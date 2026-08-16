@@ -123,3 +123,23 @@ def test_pickle_round_trip(sample_dir, tmp_path):
     # force rebuild bypasses cache
     d3 = load_or_build(inst, cell, cache_dir=cache, force=True)
     pd.testing.assert_frame_equal(d1.hier, d3.hier)
+
+
+def test_bar_series():
+    from vlsi_viewer.model import bar_series
+
+    idx = pd.Index(["TOP", "TOP/A", "TOP/B"])
+    counts = pd.Series([100.0, 40.0, 60.0], index=idx)
+    bar = bar_series(counts, ["TOP"], "count")
+    assert bar.loc["TOP"] == pytest.approx(1.0)
+    assert bar.loc["TOP/A"] == pytest.approx(0.4)
+    assert bar.loc["TOP/B"] == pytest.approx(0.6)
+
+    pct = pd.Series([0.7, 0.2, 1.5], index=idx)
+    bar_pct = bar_series(pct, ["TOP"], "percent")
+    assert bar_pct.loc["TOP/A"] == pytest.approx(0.2)
+    assert bar_pct.loc["TOP/B"] == pytest.approx(1.0)  # clipped
+
+    zero = pd.Series([0.0, 0.0], index=pd.Index(["TOP", "TOP/A"]))
+    bar_zero = bar_series(zero, ["TOP"], "area")
+    assert pd.isna(bar_zero.loc["TOP"])

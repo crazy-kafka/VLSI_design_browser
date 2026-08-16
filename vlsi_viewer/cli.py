@@ -47,9 +47,11 @@ def main(argv=None):
 
     from PyQt5.QtWidgets import QApplication
 
+    from . import theme
     from .ui_main import MainWindow
 
     app = QApplication(sys.argv)
+    theme.apply_theme(app)
     win = MainWindow(design1, design2,
                      threshold=args.min_instances, include_macros=args.include_macros)
     win.show()

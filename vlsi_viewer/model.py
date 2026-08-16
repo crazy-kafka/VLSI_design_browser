@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable, List
 
+import numpy as np
 import pandas as pd
 
 from . import schema
@@ -12,10 +13,27 @@ from .metrics import diff_table
 
 @dataclass
 class Column:
-    """One display column: a label, a per-path value series, and a formatter."""
+    """One display column: label, per-path values, formatter, optional bar ratios."""
     label: str
     series: pd.Series              # indexed by hierarchy path
     fmt: Callable[[object], str]
+    bar: pd.Series = None          # indexed by path; 0..1 background bar fraction
+    is_macro: bool = False         # true for macro count/area columns (amber bars)
+
+
+def bar_series(values: pd.Series, roots, kind: str) -> pd.Series:
+    """0..1 background-bar fraction for a metric column.
+
+    percent metrics use their own value; count/area metrics use
+    value / top-level total (summed over roots).
+    """
+    if kind == "percent":
+        return values.clip(0.0, 1.0)
+    total = float(values.reindex(roots).sum(skipna=True))
+    if not total or pd.isna(total):
+        return pd.Series(float("nan"), index=values.index)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return (values / total).clip(0.0, 1.0)
 
 
 def metric_columns(design, include_macros: bool = False) -> List[Column]:
@@ -24,7 +42,7 @@ def metric_columns(design, include_macros: bool = False) -> List[Column]:
     cols = []
     for m in metrics:
         fmt = (lambda v, k=m.kind: schema.format_metric(k, v))
-        cols.append(Column(m.label, mv[m.key], fmt))
+        cols.append(Column(m.label, mv[m.key], fmt, bar_series(mv[m.key], design.roots, m.kind), m.is_macro))
     return cols
 
 

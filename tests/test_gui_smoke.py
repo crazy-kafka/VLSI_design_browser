@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import QApplication
 from vlsi_viewer.model import match_paths, view_for_diff, view_for_single
 from vlsi_viewer.ui_main import MainWindow
 from vlsi_viewer.ui_search import SearchDialog
-from vlsi_viewer.ui_tree import HierarchyTree
+from vlsi_viewer.ui_tree import BAR_ROLE, HierarchyTree
 
 
 @pytest.fixture(scope="module")
@@ -28,12 +28,13 @@ def test_tree_constructs(app, design):
 
     top = tree.topLevelItem(0)
     assert top.data(0, Qt.UserRole) == "TOP"
-    assert top.childCount() == 2
+    assert top.childCount() == 2   # root expanded one level
 
     kids = {top.child(i).data(0, Qt.UserRole): top.child(i) for i in range(top.childCount())}
     assert set(kids) == {"TOP/MACROA", "TOP/UNIT2"}
+    # children are collapsed, showing only a placeholder (expand arrow)
     assert kids["TOP/MACROA"].childCount() == 1
-    assert kids["TOP/MACROA"].child(0).data(0, Qt.UserRole) == "TOP/MACROA/UNIT1"
+    assert kids["TOP/MACROA"].child(0).data(0, Qt.UserRole) is None
     assert kids["TOP/UNIT2"].childCount() == 0
 
 
@@ -115,11 +116,10 @@ def test_deep_hierarchy_expand_arrow(app, tmp_path):
     tree = HierarchyTree()
     tree.set_view(view_for_single(design))
 
-    top = tree.topLevelItem(0)   # TOP
-    a = top.child(0)             # TOP/A (level 2, expanded at startup)
-    ab = a.child(0)              # TOP/A/B (level 3, collapsed)
-    assert ab.childCount() == 1  # placeholder -> expand arrow present
-    assert ab.child(0).data(0, Qt.UserRole) is None
+    top = tree.topLevelItem(0)   # TOP (expanded)
+    a = top.child(0)             # TOP/A (level 2, collapsed -> placeholder arrow)
+    assert a.childCount() == 1
+    assert a.child(0).data(0, Qt.UserRole) is None
 
     tree.expand_to("TOP/A/B/C")
     assert tree.currentItem().data(0, Qt.UserRole) == "TOP/A/B/C"
@@ -138,3 +138,15 @@ def test_toggle_macros_preserves_expansion(app, design):
     assert tree._expanded_paths() == ["TOP"]       # expansion preserved
     assert tree.columnCount() == 10                # +2 macro columns
     assert tree.topLevelItem(0).childCount() == 2
+
+
+def test_bar_ratios_stored(app, design):
+    tree = HierarchyTree()
+    tree.set_view(view_for_single(design))
+    top = tree.topLevelItem(0)
+    assert top.data(0, BAR_ROLE) is None                # hierarchy column: no bar
+    assert top.data(2, BAR_ROLE) == pytest.approx(1.0)  # Count = 5/5
+    assert top.data(1, BAR_ROLE) == pytest.approx(1.0)  # Area = 11.5/11.5
+    assert top.data(3, BAR_ROLE) == pytest.approx(7 / 11.5)  # ULVT% = value itself
+    macroa = top.child(0)  # TOP/MACROA
+    assert macroa.data(2, BAR_ROLE) == pytest.approx(0.8)   # Count = 4/5
