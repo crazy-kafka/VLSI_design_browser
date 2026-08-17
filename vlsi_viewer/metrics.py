@@ -8,19 +8,22 @@ import numpy as np
 import pandas as pd
 
 from . import config, schema
-from .loader import load_instance_info, load_cell_info
+from .loader import load_block, load_cell_info
 
 logger = logging.getLogger(__name__)
 
 # Raw aggregate columns computed per hierarchy node (flattened over descendants).
 RAW_COLS = [
     "count", "area", "ulvt_area", "reg_bits", "mb_bits",
-    "d1d2_count", "bi_count", "bi_area", "macro_count", "macro_area",
+    "d1d2_count", "bi_count", "bi_area", "pul_count", "ckb_count", "icg_count",
+    "macro_count", "macro_area",
 ]
-_COUNT_COLS = ["count", "d1d2_count", "bi_count", "macro_count"]
+_COUNT_COLS = ["count", "d1d2_count", "bi_count", "pul_count", "ckb_count",
+               "icg_count", "macro_count"]
 _STD_COLS = ["count", "area", "ulvt_area", "reg_bits", "mb_bits",
-             "d1d2_count", "bi_count", "bi_area"]
+             "d1d2_count", "bi_count", "bi_area", "pul_count", "ckb_count", "icg_count"]
 _MACRO_COLS = ["macro_count", "macro_area"]
+CACHE_VERSION = "2"  # bump to invalidate stale pickles when RAW_COLS / metrics change
 
 
 def _parent_of(path: str) -> str:
@@ -30,6 +33,65 @@ def _parent_of(path: str) -> str:
 
 def _depth_of(path: str) -> int:
     return path.count("/") + 1
+
+
+def _join(prefix: str, rel: str) -> str:
+    return f"{prefix}/{rel}" if prefix else rel
+
+
+def load_blocks(block_paths) -> pd.DataFrame:
+    """Load every block and merge them into flat leaves with absolute paths.
+
+    A leaf whose ``cell_name`` matches another block's ``top_name`` is a block
+    instance: that block's leaves are nested at the leaf's absolute path.
+    """
+    blocks = {}
+    for p in block_paths:
+        name, df = load_block(p)
+        if name in blocks:
+            logger.warning("duplicate top_name '%s'; overriding with %s", name, p)
+        blocks[name] = df
+
+    names = set(blocks)
+    referenced = set()
+    for df in blocks.values():
+        referenced.update(df["cell_name"].dropna().astype(str).unique())
+
+    tops = [n for n in blocks if n not in referenced]
+    if not tops:
+        logger.warning("no top-level block found (every top_name is referenced); "
+                       "treating all blocks as top-level")
+        tops = list(blocks)
+
+    logger.info("%d block(s) loaded; top-level: %s", len(blocks), ", ".join(tops))
+
+    parts = []
+    visiting = []
+
+    def expand(name, prefix):
+        if name in visiting:
+            logger.warning("cyclic block reference skipped: %s",
+                           " -> ".join(visiting + [name]))
+            return
+        visiting.append(name)
+        df = blocks[name]
+        is_ref = df["cell_name"].isin(names)
+        leaf = df[~is_ref].copy()
+        if prefix and len(leaf):
+            leaf["leaf_instance_name"] = prefix + "/" + leaf["leaf_instance_name"]
+        parts.append(leaf)
+        for rel, cell in zip(df.loc[is_ref, "leaf_instance_name"], df.loc[is_ref, "cell_name"]):
+            logger.info("expanding block '%s' under '%s'", cell, _join(prefix, rel))
+            expand(cell, _join(prefix, rel))
+        visiting.pop()
+
+    for top in tops:
+        expand(top, top)
+
+    columns = ["leaf_instance_name"] + [s.name for s in schema.INSTANCE_ATTRS]
+    merged = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=columns)
+    logger.info("merged %d leaf instance(s)", len(merged))
+    return merged
 
 
 def _build_leaves(inst: pd.DataFrame, cells: pd.DataFrame) -> pd.DataFrame:
@@ -70,6 +132,9 @@ def _flatten(leaves: pd.DataFrame) -> pd.DataFrame:
     is_bi = (counted["is_buffer"] | counted["is_inverter"]).to_numpy(dtype="bool")
     is_d1d2 = (counted["drive_size"] <= 2).to_numpy(dtype="bool")
     is_mb = is_reg & (reg_bits > 1)
+    is_pul = counted["is_pulse_latch"].to_numpy(dtype="bool")
+    is_ckb = is_bi & counted["is_clock_cell"].to_numpy(dtype="bool")
+    is_icg = counted["is_integrated_clock_gating_cell"].to_numpy(dtype="bool")
 
     std = pd.DataFrame({
         "parent_path": counted["parent_path"].to_numpy(dtype=str),
@@ -81,6 +146,9 @@ def _flatten(leaves: pd.DataFrame) -> pd.DataFrame:
         "d1d2_count": is_d1d2.astype("int64"),
         "bi_count": is_bi.astype("int64"),
         "bi_area": np.where(is_bi, area, 0.0),
+        "pul_count": is_pul.astype("int64"),
+        "ckb_count": is_ckb.astype("int64"),
+        "icg_count": is_icg.astype("int64"),
     })
     std = std.groupby("parent_path", sort=False).sum()
 
@@ -135,11 +203,11 @@ def _flatten(leaves: pd.DataFrame) -> pd.DataFrame:
 class DesignData:
     """Preprocessed design data for one version."""
 
-    def __init__(self, hier, missing_cells, children, instance_path, cell_path):
+    def __init__(self, hier, missing_cells, children, instance_paths, cell_path):
         self.hier = hier              # DataFrame indexed by path (RAW_COLS+parent+depth)
         self.missing_cells = missing_cells   # sorted list of unique cell_name str
         self.children = children      # dict: parent path -> sorted list of child paths
-        self.instance_path = instance_path
+        self.instance_paths = instance_paths  # list of block file paths
         self.cell_path = cell_path
 
     @property
@@ -158,9 +226,9 @@ def _children_map(hier: pd.DataFrame):
     return hier.index.to_series().groupby(hier["parent"]).apply(list).to_dict()
 
 
-def build_design(instance_path: str, cell_path: str) -> DesignData:
-    """Parse inputs and build the preprocessed design."""
-    inst = load_instance_info(instance_path)
+def build_design(block_paths, cell_path: str) -> DesignData:
+    """Load all blocks, merge into one hierarchy, and build the preprocessed design."""
+    inst = load_blocks(block_paths)
     cells = load_cell_info(cell_path)
     leaves = _build_leaves(inst, cells)
     hier = _flatten(leaves)
@@ -172,12 +240,17 @@ def build_design(instance_path: str, cell_path: str) -> DesignData:
         logger.warning("Found %d instance(s) with missing cell_info (%d unique cell_name); "
                        "excluded from all metrics.", int(leaves["is_missing"].sum()), len(missing))
 
-    return DesignData(hier, missing, _children_map(hier), instance_path, cell_path)
+    depth = int(hier["depth"].max()) if len(hier) else 0
+    logger.info("built hierarchy: %d node(s), max depth %d, %d leaf instance(s)",
+                hier.shape[0], depth, len(leaves))
+
+    return DesignData(hier, missing, _children_map(hier), list(block_paths), cell_path)
 
 
 def _source_key(paths) -> str:
-    """Fast change-detection key from path + mtime + size (avoids re-reading GBs)."""
+    """Fast change-detection key from cache version + path + mtime + size."""
     h = hashlib.sha256()
+    h.update(CACHE_VERSION.encode("utf-8"))
     for p in paths:
         st = os.stat(p)
         h.update(os.path.abspath(p).encode("utf-8"))
@@ -186,29 +259,32 @@ def _source_key(paths) -> str:
     return h.hexdigest()[:16]
 
 
-def _cache_file(instance_path: str, cell_path: str, cache_dir: str) -> str:
-    key = _source_key([instance_path, cell_path])
+def _cache_file(block_paths, cell_path: str, cache_dir: str) -> str:
+    key = _source_key(list(block_paths) + [cell_path])
     return os.path.join(cache_dir, f"{key}.pkl")
 
 
-def load_or_build(instance_path: str, cell_path: str,
+def load_or_build(block_paths, cell_path: str,
                   cache_dir: str = None, force: bool = False) -> DesignData:
     """Load from pickle cache when fresh, else build and persist."""
     if cache_dir is None:
         cache_dir = os.path.join(
-            os.path.dirname(os.path.abspath(instance_path)), config.CACHE_DIR_NAME)
-    cache_file = _cache_file(instance_path, cell_path, cache_dir)
+            os.path.dirname(os.path.abspath(block_paths[0])), config.CACHE_DIR_NAME)
+    cache_file = _cache_file(block_paths, cell_path, cache_dir)
 
     if not force and os.path.exists(cache_file):
         try:
             with open(cache_file, "rb") as f:
                 data = pickle.load(f)
-            logger.info("pickle cache hit: %s", cache_file)
-            return data
+            if not set(RAW_COLS).issubset(data.hier.columns):
+                logger.warning("cached data schema is stale (missing columns); rebuilding")
+            else:
+                logger.info("pickle cache hit: %s", cache_file)
+                return data
         except Exception as exc:  # corrupt/stale cache -> rebuild
             logger.warning("cache load failed (%s); rebuilding", exc)
 
-    data = build_design(instance_path, cell_path)
+    data = build_design(block_paths, cell_path)
     os.makedirs(cache_dir, exist_ok=True)
     with open(cache_file, "wb") as f:
         pickle.dump(data, f)

@@ -1,16 +1,22 @@
-"""Load ``instance_info.json`` and ``cell_info.json`` into typed DataFrames.
+"""Load ``instance_info.json`` blocks and ``cell_info.json`` into typed DataFrames.
 
-Missing attributes are filled with defaults and coerced to the declared type,
-per the attribute schema in :mod:`vlsi_viewer.schema`.
+``instance_info.json`` (new format)::
+
+    {"top_name": "block_A", "instances": {"rel/path/leaf": {attrs...}}}
+
+Leaf paths are relative to ``top_name``. Missing attributes are filled with
+defaults and coerced per the attribute schema in :mod:`vlsi_viewer.schema`.
 """
 import json
+import logging
 
 import pandas as pd
 
 from . import schema
 
+logger = logging.getLogger(__name__)
+
 _DTYPE = {"bool": "bool", "int": "int64", "float": "float64", "str": "object"}
-_DEFAULT = {"bool": False, "int": 0, "float": 0.0, "str": ""}
 
 
 def _coerce(value, attr_type):
@@ -41,17 +47,27 @@ def _cast(df, specs):
     return df
 
 
-def load_instance_info(path: str) -> pd.DataFrame:
+def load_block(path: str):
+    """Load one instance_info.json block -> ``(top_name, instances DataFrame)``."""
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
+
+    top_name = str(data.get("top_name", ""))
+    instances = data.get("instances", {})
+    if not isinstance(instances, dict):
+        raise ValueError(f"'instances' must be a dict in {path}")
+
     records = []
-    for leaf_name, attrs in data.items():
+    for leaf_name, attrs in instances.items():
         row = {"leaf_instance_name": leaf_name}
         for spec in schema.INSTANCE_ATTRS:
             row[spec.name] = _apply_spec(attrs, spec)
         records.append(row)
+
     df = pd.DataFrame(records, columns=["leaf_instance_name"] + [s.name for s in schema.INSTANCE_ATTRS])
-    return _cast(df, schema.INSTANCE_ATTRS)
+    _cast(df, schema.INSTANCE_ATTRS)
+    logger.info("Loaded block '%s' with %d instance(s) from %s", top_name, len(df), path)
+    return top_name, df
 
 
 def load_cell_info(path: str) -> pd.DataFrame:
@@ -64,4 +80,6 @@ def load_cell_info(path: str) -> pd.DataFrame:
             row[spec.name] = _apply_spec(attrs, spec)
         records.append(row)
     df = pd.DataFrame(records, columns=["cell_name"] + [s.name for s in schema.CELL_ATTRS])
-    return _cast(df, schema.CELL_ATTRS)
+    _cast(df, schema.CELL_ATTRS)
+    logger.info("Loaded %d cell(s) from %s", len(df), path)
+    return df

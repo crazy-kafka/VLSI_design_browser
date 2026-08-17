@@ -7,14 +7,17 @@ from vlsi_viewer.metrics import build_design
 
 # Small hand-verifiable netlist used by the unit tests.
 INSTANCE_INFO = {
-    "TOP/MACROA/UNIT1/inv_a": {"cell_name": "INV_X1"},
-    "TOP/MACROA/UNIT1/buf_a": {"cell_name": "BUF_X1"},
-    "TOP/MACROA/UNIT1/dff_a": {"cell_name": "DFF_X2"},
-    "TOP/MACROA/UNIT1/dff_b": {"cell_name": "DFF_X1"},
-    "TOP/UNIT2/and_a": {"cell_name": "AND_X1"},
-    "TOP/UNIT2/sram_a": {"cell_name": "SRAM"},
-    "TOP/tap_a": {"cell_name": "TAP", "is_physical_only": True},
-    "TOP/MACROA/UNIT1/missing_a": {"cell_name": "UNKNOWN"},
+    "top_name": "TOP",
+    "instances": {
+        "MACROA/UNIT1/inv_a": {"cell_name": "INV_X1"},
+        "MACROA/UNIT1/buf_a": {"cell_name": "BUF_X1"},
+        "MACROA/UNIT1/dff_a": {"cell_name": "DFF_X2"},
+        "MACROA/UNIT1/dff_b": {"cell_name": "DFF_X1"},
+        "UNIT2/and_a": {"cell_name": "AND_X1"},
+        "UNIT2/sram_a": {"cell_name": "SRAM"},
+        "tap_a": {"cell_name": "TAP", "is_physical_only": True},
+        "MACROA/UNIT1/missing_a": {"cell_name": "UNKNOWN"},
+    },
 }
 
 CELL_INFO = {
@@ -38,6 +41,6 @@ def sample_dir(tmp_path):
 @pytest.fixture
 def design(sample_dir):
     return build_design(
-        os.path.join(sample_dir, "instance_info.json"),
+        [os.path.join(sample_dir, "instance_info.json")],
         os.path.join(sample_dir, "cell_info.json"),
     )

@@ -8,8 +8,9 @@ It reads two JSON inputs, reconstructs the hierarchy tree from leaf instance ful
 
 ## 2. Input Data Model
 
-### `instance_info.json`
-- key: `leaf_instance_name` — full hierarchical path, `/`-separated (e.g. `TOP/MACROA/UNIT1/inv_x`)
+### `instance_info.json` (block file)
+- shape: `{"top_name": <str>, "instances": {<rel_path>: {attrs...}}}`
+- each `instances` key is a leaf path relative to `top_name` (e.g. `MACROA/UNIT1/inv_x`)
 - value (dict): `cell_name`, `dynamic_power`, `leakage_power`, `orient`, `location_x`, `location_y`, `is_physical_only`
 
 ### `cell_info.json`
@@ -28,6 +29,10 @@ Consequences of `0`/`False` defaults: an entry omitting `is_macro` is treated as
 
 ## 3. Hierarchy Construction
 
+- Each block file contributes leaves relative to its `top_name`.
+- Multi-block composition: a leaf whose `cell_name` equals another block's `top_name`
+  is a block instance — that block's leaves nest at the leaf's absolute path
+  (recursive, cycle-guarded). Top-level block(s) are auto-detected (not referenced).
 - Split each leaf name on `/`; every prefix is a hierarchy node; the last segment is the leaf.
 - Build a tree of hierarchy nodes; leaves are NOT shown as nodes (only hierarchies, ≈1/100 of instance count).
 - Each hierarchy aggregates metrics of all descendant leaves (flatten-only mode).
@@ -36,7 +41,7 @@ Consequences of `0`/`False` defaults: an entry omitting `is_macro` is treated as
 
 A leaf is "counted" only if ALL hold:
 1. Its `cell_name` exists in `cell_info.json` — else excluded entirely + warning log (deduped per missing `cell_name`).
-2. `is_macro == false` — macros excluded from the 7 std metrics; surfaced separately via toggle.
+2. `is_macro == false` — macros excluded from the 10 std metrics; surfaced separately via toggle.
 3. `is_physical_only == false` — always excluded, no toggle.
 
 Aggregation is hierarchy-flatten: a hierarchy's metric aggregates every counted descendant leaf.
@@ -52,6 +57,9 @@ Let S = set of counted leaves under a hierarchy (post-filter).
 5. **D1D2 Ratio** = |{leaf : `drive_size ≤ 2`}| / |S|. (count-based)
 6. **Buffer&Inverter Count** = |{leaf : `is_buffer || is_inverter`}|.
 7. **Buffer&Inverter Area** = Σ{`area` : `is_buffer || is_inverter`}.
+8. **Pulse Latch Count (PUL Cnt)** = |{leaf : `is_pulse_latch`}|.
+9. **Clock Buffer/Inverter Count (CKB Cnt)** = |{leaf : (`is_buffer || is_inverter`) && `is_clock_cell`}|.
+10. **ICG Count (ICG Cnt)** = |{leaf : `is_integrated_clock_gating_cell`}|.
 
 Macro columns (visible only when "Include macros" on):
 - **Macro Count** = |{leaf : `is_macro`}|.
@@ -81,6 +89,9 @@ Division-by-zero → display `—`.
 - `▼`/`▶` = expanded/collapsed; indentation = depth; tree shows last path segment.
 - Search input + match mode live in the **toolbar**; results open in a separate popup window.
 - "Include macros" on → append `| Macro Area | Macro Cnt |` columns.
+- Metric cells render background **data bars**; count/area scale to the top-level
+  total, and ULVT%/MB%/D1D2% are color-coded red→green (ULVT lower-better;
+  MB/D1D2 higher-better).
 
 ### Search results popup window
 ```

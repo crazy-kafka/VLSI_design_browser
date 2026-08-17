@@ -12,11 +12,14 @@ def parse_args(argv=None):
         prog="vlsi-viewer",
         description="VLSI design hierarchy visualization tool.",
     )
-    parser.add_argument("instance_info", help="path to instance_info.json")
-    parser.add_argument("cell_info", help="path to cell_info.json")
-    parser.add_argument(
-        "--compare", nargs=2, metavar=("INSTANCE", "CELL"),
-        help="second (instance_info.json, cell_info.json) pair for two-version diff")
+    parser.add_argument("--cell_info", required=True, metavar="CELL",
+                        help="path to cell_info.json")
+    parser.add_argument("--block_info", required=True, nargs="+", metavar="BLOCK",
+                        help="one or more instance_info.json block files")
+    parser.add_argument("--compare_cell_info", metavar="CELL",
+                        help="cell_info.json for the second design (two-version diff)")
+    parser.add_argument("--compare_block_info", nargs="+", metavar="BLOCK",
+                        help="instance_info.json block files for the second design")
     parser.add_argument(
         "--min-instances", type=int, default=config.DEFAULT_MIN_INST_COUNT, metavar="N",
         help="hide hierarchies with fewer than N instances (default: %(default)s)")
@@ -26,20 +29,26 @@ def parse_args(argv=None):
                         help="pickle cache directory override")
     parser.add_argument("--force", action="store_true",
                         help="ignore cache and re-preprocess")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="verbose (debug) logging")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser.parse_args(argv)
 
 
 def main(argv=None):
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     args = parse_args(argv)
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+                        format="%(levelname)s %(name)s: %(message)s")
 
     try:
-        design1 = load_or_build(args.instance_info, args.cell_info,
+        design1 = load_or_build(args.block_info, args.cell_info,
                                 cache_dir=args.cache_dir, force=args.force)
         design2 = None
-        if args.compare:
-            design2 = load_or_build(args.compare[0], args.compare[1],
+        if args.compare_cell_info:
+            if not args.compare_block_info:
+                print("error: --compare_cell_info requires --compare_block_info", file=sys.stderr)
+                return 2
+            design2 = load_or_build(args.compare_block_info, args.compare_cell_info,
                                     cache_dir=args.cache_dir, force=args.force)
     except Exception as exc:  # surface load errors on the CLI, no window needed
         print(f"error: {exc}", file=sys.stderr)

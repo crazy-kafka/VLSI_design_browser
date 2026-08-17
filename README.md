@@ -1,22 +1,27 @@
 # VLSI Design Hierarchy Visualization Tool
 
 A PyQt5 desktop application for physical-design engineers to browse a gate-level
-netlist's **hierarchy tree** and inspect per-level statistics. It reads two JSON
-files, reconstructs the hierarchy from full-path leaf instance names, and renders
-a sortable, searchable tree-table of metrics — plus a two-version diff view.
+netlist's **hierarchy tree** and inspect per-level statistics. It reads a cell
+library plus one or more block files, reconstructs (and auto-composes) the design
+hierarchy, and renders a sortable, searchable tree-table of metrics — plus a
+two-version diff view.
 
 ## Features
 
 - **Hierarchy tree-table** — expand/collapse any level; only hierarchies are shown
   (≈1/100 of the instance count), not individual leaf cells.
-- **7 standard-cell metrics + macro columns** — computed per hierarchy via
+- **10 standard-cell metrics + macro columns** — computed per hierarchy via
   flattened (all-descendants) aggregation.
-- **Sorting** — click a column header; sorts siblings within each level.
+- **Data bars** — background progress bars in metric cells: count/area scale to the
+  top-level total; ULVT%/MB%/D1D2% are color-coded red→green (bad→good).
+- **Sorting** — click a metric header; sorts siblings within each level, shows the
+  active sort in the status bar, and re-applies it automatically as you expand.
 - **Search** — exact / wildcard / regex, case-insensitive; results in a popup
   window that jumps the tree to the selected hierarchy.
+- **Context menu** — right-click a hierarchy name to copy its full or base name.
 - **Min-instance threshold** — hide small hierarchies from the tree (UI-only).
 - **Two-version comparison** — V1 / V2 / Diff tabs with per-metric Δabs and Δrel.
-- **Pickle cache** — fast re-loads via a cache keyed on input file metadata.
+- **Pickle cache** — fast re-loads via a cache keyed on input file metadata + schema version.
 
 ## Requirements & install
 
@@ -32,29 +37,44 @@ pip install -r requirements.txt
 Input files are passed on the command line (no file dialogs):
 
 ```bash
-# basic view
-python main.py sample_data/instance_info.json sample_data/cell_info.json
+# basic view (one cell library + one block)
+python main.py --cell_info sample_data/cell_info.json --block_info sample_data/instance_info.json
 
-# show all hierarchies (no threshold) + macro columns
-python main.py inst.json cell.json --min-instances 0 --include-macros
+# multiple blocks: a sub-block referenced by name is nested automatically
+python main.py --cell_info sample_data/cell_info.json \
+               --block_info sample_data/instance_info.json sample_data/block_B.instance_info.json
+
+# show all hierarchies (no threshold) + macro columns + verbose load/build log
+python main.py --cell_info c.json --block_info a.json b.json --min-instances 0 --include-macros --verbose
 
 # two-version comparison
-python main.py v1_inst.json v1_cell.json --compare v2_inst.json v2_cell.json
+python main.py --cell_info v1_cell.json --block_info v1_a.json \
+               --compare_cell_info v2_cell.json --compare_block_info v2_a.json
 
 # ignore the pickle cache and rebuild
-python main.py inst.json cell.json --force
+python main.py --cell_info c.json --block_info a.json --force
 ```
 
 `python -m vlsi_viewer …` is equivalent. Run `python main.py --help` for all
-options (`--compare`, `--min-instances`, `--include-macros`, `--cache-dir`,
-`--force`, `--version`).
+options (`--block_info`, `--compare_cell_info`/`--compare_block_info`,
+`--min-instances`, `--include-macros`, `--cache-dir`, `--force`, `--verbose`,
+`--version`).
 
 ## Input format
 
-### `instance_info.json`
+### `instance_info.json` (block file)
 
-Keyed by the full hierarchical leaf path (``/``-separated), e.g.
-`"TOP/MACROA/UNIT1/inv_x"`. Values are dicts with these attributes:
+```json
+{
+  "top_name": "TOP",
+  "instances": {
+    "MACROA/UNIT1/inv_x": { "cell_name": "INV_X1" }
+  }
+}
+```
+
+`top_name` is the block's design name; each `instances` key is a leaf path
+**relative to `top_name`**. Each leaf attribute dict:
 
 | attribute | type | default |
 |---|---|---|
@@ -65,6 +85,14 @@ Keyed by the full hierarchical leaf path (``/``-separated), e.g.
 | `location_x` | float | `0.0` |
 | `location_y` | float | `0.0` |
 | `is_physical_only` | bool | `false` |
+
+### Multiple blocks & automatic nesting
+
+Pass several `--block_info` files to compose a hierarchy. A leaf whose `cell_name`
+equals another block's `top_name` is a **block instance**: that block's leaves are
+nested at the leaf's absolute path. The top-level block(s) are auto-detected (a
+block not referenced by any other). A block instance whose file is *not* provided
+stays a leaf, so `cell_info.json` treats it as a macro or missing cell as usual.
 
 ### `cell_info.json`
 
@@ -110,6 +138,9 @@ Computed over the "counted" set: standard cells (`is_macro == false` and
 | D1D2% | count(`drive_size ≤ 2`) / Count |
 | B/I Cnt | count(`is_buffer` or `is_inverter`) |
 | B/I Area | Σ(`area` where buffer/inverter) |
+| PUL Cnt | count(`is_pulse_latch`) |
+| CKB Cnt | count((`is_buffer` or `is_inverter`) and `is_clock_cell`) |
+| ICG Cnt | count(`is_integrated_clock_gating_cell`) |
 
 Macro columns (shown with `--include-macros`): **Macro Cnt** = count(`is_macro`),
 **Macro Area** = Σ(`area` where `is_macro`).
@@ -122,6 +153,7 @@ Macro columns (shown with `--include-macros`): **Macro Cnt** = count(`is_macro`)
 | `vlsi_viewer/loader.py` | JSON → typed DataFrames (defaults + coercion) |
 | `vlsi_viewer/metrics.py` | hierarchy build, filtering, flatten aggregation, pickle cache, diff |
 | `vlsi_viewer/model.py` | column/view abstractions bridging data to the widgets |
+| `vlsi_viewer/theme.py` | visual theme (palette, stylesheet, data-bar colors) |
 | `vlsi_viewer/ui_tree.py` | tree-table widget (lazy expand, per-level sort, threshold) |
 | `vlsi_viewer/ui_search.py` | search results popup |
 | `vlsi_viewer/ui_compare.py` | V1 / V2 / Diff tabs |

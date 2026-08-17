@@ -1,0 +1,65 @@
+{
+  "top_name": "block_B",
+  "instances": {
+    "UNIT_0/leaf_0": {
+      "cell_name": "INV_X1_SVT"
+    },
+    "UNIT_0/leaf_1": {
+      "cell_name": "DFF_X2"
+    },
+    "UNIT_0/leaf_2": {
+      "cell_name": "DFF_X2"
+    },
+    "UNIT_0/leaf_3": {
+      "cell_name": "INV_X1_SVT"
+    },
+    "UNIT_0/leaf_4": {
+      "cell_name": "DFF_X2"
+    },
+    "UNIT_0/leaf_5": {
+      "cell_name": "DFF_X2"
+    },
+    "UNIT_0/leaf_6": {
+      "cell_name": "INV_X1_SVT"
+    },
+    "UNIT_0/leaf_7": {
+      "cell_name": "DFF_X2"
+    },
+    "UNIT_0/leaf_8": {
+      "cell_name": "DFF_X2"
+    },
+    "UNIT_0/leaf_9": {
+      "cell_name": "INV_X1_SVT"
+    },
+    "UNIT_1/leaf_0": {
+      "cell_name": "DFF_X2"
+    },
+    "UNIT_1/leaf_1": {
+      "cell_name": "DFF_X2"
+    },
+    "UNIT_1/leaf_2": {
+      "cell_name": "INV_X1_SVT"
+    },
+    "UNIT_1/leaf_3": {
+      "cell_name": "DFF_X2"
+    },
+    "UNIT_1/leaf_4": {
+      "cell_name": "DFF_X2"
+    },
+    "UNIT_1/leaf_5": {
+      "cell_name": "INV_X1_SVT"
+    },
+    "UNIT_1/leaf_6": {
+      "cell_name": "DFF_X2"
+    },
+    "UNIT_1/leaf_7": {
+      "cell_name": "DFF_X2"
+    },
+    "UNIT_1/leaf_8": {
+      "cell_name": "INV_X1_SVT"
+    },
+    "UNIT_1/leaf_9": {
+      "cell_name": "DFF_X2"
+    }
+  }
+}

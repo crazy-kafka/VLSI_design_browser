@@ -1,10 +1,11 @@
 """Hierarchy tree-table widget (QTreeWidget) with lazy expand + per-level sort."""
 import math
 
-from PyQt5.QtCore import Qt, QRect
+from PyQt5.QtCore import Qt, QRect, pyqtSignal
 from PyQt5.QtGui import QFont, QFontDatabase
 from PyQt5.QtWidgets import (
-    QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTreeWidget, QTreeWidgetItem,
+    QApplication, QHeaderView, QMenu, QStyle, QStyledItemDelegate,
+    QStyleOptionViewItem, QTreeWidget, QTreeWidgetItem,
 )
 
 from . import theme
@@ -84,11 +85,15 @@ class HierarchyItem(QTreeWidgetItem):
 
 
 class HierarchyTree(QTreeWidget):
+    sort_changed = pyqtSignal(str)  # human-readable sort summary
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._view = None
         self._threshold = 0
         self._sort_column = 0
+        self._sort_order = Qt.AscendingOrder
+        self._sort_active = False
         self._populated_once = False
         self.setAlternatingRowColors(True)
         self.setUniformRowHeights(True)
@@ -98,6 +103,8 @@ class HierarchyTree(QTreeWidget):
         self.header().setSectionsClickable(True)
         self.header().sectionClicked.connect(self._on_header_clicked)
         self.itemExpanded.connect(self._on_expand)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_context_menu)
 
     # -- configuration -----------------------------------------------------
     def set_view(self, view: TreeView):
@@ -118,6 +125,10 @@ class HierarchyTree(QTreeWidget):
         labels = ["Hierarchy"] + [c.label for c in self._view.columns]
         self.setColumnCount(len(labels))
         self.setHeaderLabels(labels)
+        # hierarchy name fits its content; metric columns stretch evenly
+        self.header().setSectionResizeMode(0, QHeaderView.Interactive)
+        for ci in range(1, len(labels)):
+            self.header().setSectionResizeMode(ci, QHeaderView.Stretch)
         for path in self._view.roots:
             self.addTopLevelItem(self._make_item(path))
         if expanded is None:
@@ -150,8 +161,12 @@ class HierarchyTree(QTreeWidget):
                         f = float(r)
                         if not math.isnan(f):
                             item.setData(ci, BAR_ROLE, f)
-                            item.setData(ci, BAR_COLOR_ROLE,
-                                         theme.MACRO_BAR_COLOR if col.is_macro else theme.BAR_COLOR)
+                            if col.gradient:
+                                goodness = f if col.gradient == "higher_better" else 1.0 - f
+                                item.setData(ci, BAR_COLOR_ROLE, theme.quality_color(goodness))
+                            else:
+                                item.setData(ci, BAR_COLOR_ROLE,
+                                             theme.MACRO_BAR_COLOR if col.is_macro else theme.BAR_COLOR)
                     except (TypeError, ValueError):
                         pass
         if self._visible_children(path):
@@ -172,6 +187,9 @@ class HierarchyTree(QTreeWidget):
 
     def _on_expand(self, item: HierarchyItem):
         self._populate(item, item.data(0, Qt.UserRole))
+        if self._sort_active and item.childCount() > 1:
+            item.sortChildren(self._sort_column, self._sort_order)
+        self.resizeColumnToContents(0)
 
     # -- sorting -----------------------------------------------------------
     def _on_header_clicked(self, col: int):
@@ -182,14 +200,36 @@ class HierarchyTree(QTreeWidget):
             order = Qt.DescendingOrder
         self.header().setSortIndicator(col, order)
         self._sort_column = col
+        self._sort_order = order
+        self._sort_active = True
         for i in range(self.topLevelItemCount()):
             self._sort_item(self.topLevelItem(i), col, order)
+        label = self.headerItem().text(col)
+        direction = "desc" if order == Qt.DescendingOrder else "asc"
+        self.sort_changed.emit(f"Sorted by {label} ({direction})")
 
     def _sort_item(self, item, col, order):
         if item.childCount() > 1:
             item.sortChildren(col, order)
         for i in range(item.childCount()):
             self._sort_item(item.child(i), col, order)
+
+    # -- context menu ------------------------------------------------------
+    def _on_context_menu(self, pos):
+        item = self.itemAt(pos)
+        if item is None or self.columnAt(pos.x()) != 0:
+            return
+        path = item.data(0, Qt.UserRole)
+        if path is None:
+            return
+        menu = QMenu(self)
+        menu.addAction("Copy full name", lambda: self._copy(path))
+        menu.addAction("Copy base name", lambda: self._copy(path.rsplit("/", 1)[-1]))
+        menu.exec_(self.viewport().mapToGlobal(pos))
+
+    @staticmethod
+    def _copy(text: str):
+        QApplication.clipboard().setText(text)
 
     # -- navigation --------------------------------------------------------
     def _locate_and_expand(self, path: str):

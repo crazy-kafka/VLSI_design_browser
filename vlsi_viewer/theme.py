@@ -30,6 +30,19 @@ TEXT_C = _qc(TEXT)
 BAR_COLOR = _qc(ACCENT, BAR_ALPHA)
 MACRO_BAR_COLOR = _qc(MACRO, BAR_ALPHA)
 
+QUALITY_ALPHA = 0x60
+
+
+def quality_color(goodness):
+    """Red (bad) -> yellow -> green (good) color for a 'quality' bar.
+
+    ``goodness`` is 0..1 (0 = worst/red, 1 = best/green).
+    """
+    g = max(0.0, min(1.0, float(goodness)))
+    c = QColor.fromHsv(int(g * 120), 190, 240)
+    c.setAlpha(QUALITY_ALPHA)
+    return c
+
 
 def _stylesheet():
     return f"""

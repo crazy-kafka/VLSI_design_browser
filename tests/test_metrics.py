@@ -89,8 +89,37 @@ def test_missing_cells_reported(design):
 def test_metric_registry_columns(design):
     assert [m.key for m in schema.STD_METRICS] == [
         "area", "count", "ulvt_ratio", "mb_ratio", "d1d2_ratio", "bi_count", "bi_area",
+        "pul_count", "ckb_count", "icg_count",
     ]
     assert [m.key for m in schema.MACRO_METRICS] == ["macro_count", "macro_area"]
+
+
+def test_new_metrics(tmp_path):
+    import json
+
+    cell = {
+        "PULSE": {"area": 1.0, "is_pulse_latch": True},
+        "CLKBUF": {"area": 1.0, "is_buffer": True, "is_clock_cell": True},
+        "CLKINV": {"area": 1.0, "is_inverter": True, "is_clock_cell": True},
+        "BUF": {"area": 1.0, "is_buffer": True},
+        "ICG": {"area": 1.0, "is_integrated_clock_gating_cell": True},
+        "AND": {"area": 1.0, "is_combinational_cell": True},
+    }
+    inst = {"top_name": "TOP", "instances": {
+        "a/pulse": {"cell_name": "PULSE"},
+        "b/clkbuf": {"cell_name": "CLKBUF"},
+        "c/clkinv": {"cell_name": "CLKINV"},
+        "d/buf": {"cell_name": "BUF"},
+        "e/icg": {"cell_name": "ICG"},
+        "f/and": {"cell_name": "AND"},
+    }}
+    (tmp_path / "cell_info.json").write_text(json.dumps(cell))
+    (tmp_path / "instance_info.json").write_text(json.dumps(inst))
+    design = build_design([str(tmp_path / "instance_info.json")], str(tmp_path / "cell_info.json"))
+    mv = design.metric_values()
+    assert mv.loc["TOP", "pul_count"] == 1
+    assert mv.loc["TOP", "ckb_count"] == 2   # CLKBUF + CLKINV (BUF is not a clock cell)
+    assert mv.loc["TOP", "icg_count"] == 1
 
 
 def test_formatting():
@@ -115,13 +144,13 @@ def test_pickle_round_trip(sample_dir, tmp_path):
     cell = os.path.join(sample_dir, "cell_info.json")
     cache = str(tmp_path / "cache")
 
-    d1 = load_or_build(inst, cell, cache_dir=cache)
-    d2 = load_or_build(inst, cell, cache_dir=cache)  # cache hit
+    d1 = load_or_build([inst], cell, cache_dir=cache)
+    d2 = load_or_build([inst], cell, cache_dir=cache)  # cache hit
     assert sorted(d2.missing_cells) == sorted(d1.missing_cells)
     assert list(d2.hier.index) == list(d1.hier.index)
     pd.testing.assert_frame_equal(d1.hier, d2.hier)
     # force rebuild bypasses cache
-    d3 = load_or_build(inst, cell, cache_dir=cache, force=True)
+    d3 = load_or_build([inst], cell, cache_dir=cache, force=True)
     pd.testing.assert_frame_equal(d1.hier, d3.hier)
 
 

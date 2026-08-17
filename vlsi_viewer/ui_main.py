@@ -1,6 +1,5 @@
 """Main window: toolbar (search / threshold / macros); designs injected by the CLI."""
 import logging
-import os
 
 from PyQt5.QtWidgets import (
     QAction, QCheckBox, QComboBox, QLabel, QLineEdit, QMainWindow, QSpinBox,
@@ -32,6 +31,10 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._tree)
         self._stack.addWidget(self._compare)
         self.setCentralWidget(self._stack)
+
+        self._tree.sort_changed.connect(self._on_sort_changed)
+        for t in (self._compare.v1, self._compare.v2, self._compare.diff):
+            t.sort_changed.connect(self._on_sort_changed)
 
         self._build_toolbar()
         self._set_initial_options(threshold, include_macros)
@@ -94,6 +97,9 @@ class MainWindow(QMainWindow):
         else:
             self._compare.configure(threshold, include_macros)
 
+    def _on_sort_changed(self, msg: str):
+        self.statusBar().showMessage(msg)
+
     def _do_search(self):
         if self._design1 is None:
             return
@@ -114,10 +120,10 @@ class MainWindow(QMainWindow):
             return
         if self._design2 is not None:
             self.statusBar().showMessage(
-                f"Comparing {os.path.basename(self._design1.instance_path)} vs "
-                f"{os.path.basename(self._design2.instance_path)}")
+                f"Comparing {len(self._design1.instance_paths)} vs "
+                f"{len(self._design2.instance_paths)} blocks")
             return
-        msg = (f"{os.path.basename(self._design1.instance_path)} · "
+        msg = (f"{len(self._design1.instance_paths)} block(s) · "
                f"{self._design1.hier.shape[0]} hierarchies")
         if self._design1.missing_cells:
             msg += f" · {len(self._design1.missing_cells)} missing cell(s)"

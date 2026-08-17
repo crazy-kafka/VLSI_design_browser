@@ -11,6 +11,12 @@
     "drive_size": 2,
     "is_LVT": true
   },
+  "INV_X1_ULVT": {
+    "area": 0.7,
+    "is_inverter": true,
+    "drive_size": 1,
+    "is_ULVT": true
+  },
   "INV_X4_ULVT": {
     "area": 1.8,
     "is_inverter": true,
@@ -124,6 +130,10 @@
   },
   "ADC": {
     "area": 12000.0,
+    "is_macro": true
+  },
+  "block_B": {
+    "area": 5000.0,
     "is_macro": true
   }
 }

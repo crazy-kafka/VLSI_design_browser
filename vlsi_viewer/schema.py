@@ -68,6 +68,9 @@ def _m_mb(g):      return _ratio(g["mb_bits"], g["reg_bits"])
 def _m_d1d2(g):    return _ratio(g["d1d2_count"], g["count"])
 def _m_bi_count(g): return g["bi_count"]
 def _m_bi_area(g): return g["bi_area"]
+def _m_pul(g): return g["pul_count"]
+def _m_ckb(g): return g["ckb_count"]
+def _m_icg(g): return g["icg_count"]
 def _m_macro_count(g): return g["macro_count"]
 def _m_macro_area(g):  return g["macro_area"]
 
@@ -80,16 +83,20 @@ class MetricSpec:
     kind: str          # "count" | "area" | "percent"
     is_macro: bool
     compute: Callable[[pd.DataFrame], pd.Series]
+    gradient: str = None   # None | "lower_better" | "higher_better" (quality bar color)
 
 
 METRICS = [
     MetricSpec("area", "Area", "area", False, _m_area),
     MetricSpec("count", "Count", "count", False, _m_count),
-    MetricSpec("ulvt_ratio", "ULVT%", "percent", False, _m_ulvt),
-    MetricSpec("mb_ratio", "MB%", "percent", False, _m_mb),
-    MetricSpec("d1d2_ratio", "D1D2%", "percent", False, _m_d1d2),
+    MetricSpec("ulvt_ratio", "ULVT%", "percent", False, _m_ulvt, "lower_better"),
+    MetricSpec("mb_ratio", "MB%", "percent", False, _m_mb, "higher_better"),
+    MetricSpec("d1d2_ratio", "D1D2%", "percent", False, _m_d1d2, "higher_better"),
     MetricSpec("bi_count", "B/I Cnt", "count", False, _m_bi_count),
     MetricSpec("bi_area", "B/I Area", "area", False, _m_bi_area),
+    MetricSpec("pul_count", "PUL Cnt", "count", False, _m_pul),
+    MetricSpec("ckb_count", "CKB Cnt", "count", False, _m_ckb),
+    MetricSpec("icg_count", "ICG Cnt", "count", False, _m_icg),
     MetricSpec("macro_count", "Macro Cnt", "count", True, _m_macro_count),
     MetricSpec("macro_area", "Macro Area", "area", True, _m_macro_area),
 ]

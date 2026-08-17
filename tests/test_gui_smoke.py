@@ -7,10 +7,11 @@ import pytest
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
 
+from vlsi_viewer import theme
 from vlsi_viewer.model import match_paths, view_for_diff, view_for_single
 from vlsi_viewer.ui_main import MainWindow
 from vlsi_viewer.ui_search import SearchDialog
-from vlsi_viewer.ui_tree import BAR_ROLE, HierarchyTree
+from vlsi_viewer.ui_tree import BAR_COLOR_ROLE, BAR_ROLE, HierarchyTree
 
 
 @pytest.fixture(scope="module")
@@ -23,7 +24,7 @@ def test_tree_constructs(app, design):
     tree = HierarchyTree()
     tree.set_view(view)
 
-    assert tree.columnCount() == 8  # Hierarchy + 7 std metrics
+    assert tree.columnCount() == 11  # Hierarchy + 10 std metrics
     assert tree.topLevelItemCount() == 1
 
     top = tree.topLevelItem(0)
@@ -42,7 +43,7 @@ def test_include_macros_adds_columns(app, design):
     view = view_for_single(design, include_macros=True)
     tree = HierarchyTree()
     tree.set_view(view)
-    assert tree.columnCount() == 10  # Hierarchy + 7 std + 2 macro
+    assert tree.columnCount() == 13  # Hierarchy + 10 std + 2 macro
 
 
 def test_threshold_filters_children(app, design):
@@ -78,7 +79,7 @@ def test_search_dialog(app, design):
 
 def test_diff_view(app, design):
     view = view_for_diff(design, design)
-    assert len(view.columns) == 14  # 7 metrics x {abs, rel}
+    assert len(view.columns) == 20  # 10 metrics x {abs, rel}
     tree = HierarchyTree()
     tree.set_view(view)
     # diff against itself -> area delta is 0
@@ -91,7 +92,7 @@ def test_mainwindow_preloaded(app, design):
     assert w._stack.currentWidget() is w._tree
     assert w._tree.topLevelItemCount() == 1
     assert w._tree.topLevelItem(0).data(0, Qt.UserRole) == "TOP"
-    assert w.statusBar().currentMessage().startswith("instance_info.json")
+    assert w.statusBar().currentMessage().startswith("1 block(s)")
 
 
 def test_mainwindow_compare(app, design):
@@ -99,19 +100,20 @@ def test_mainwindow_compare(app, design):
     assert w._stack.currentWidget() is w._compare
     assert w._compare.v1.topLevelItemCount() == 1
     assert w._compare.diff.topLevelItemCount() == 1
-    assert w._compare.diff.columnCount() == 15  # Hierarchy + 14 diff columns
+    assert w._compare.diff.columnCount() == 21  # Hierarchy + 20 diff columns
 
 
 def test_deep_hierarchy_expand_arrow(app, tmp_path):
     import json
     from vlsi_viewer.metrics import build_design
 
-    inst = {"TOP/A/B/C/l1": {"cell_name": "C1"},
-            "TOP/A/B/C/l2": {"cell_name": "C1"}}
+    inst = {"top_name": "TOP",
+            "instances": {"A/B/C/l1": {"cell_name": "C1"},
+                          "A/B/C/l2": {"cell_name": "C1"}}}
     cell = {"C1": {"area": 1.0}}
     (tmp_path / "instance_info.json").write_text(json.dumps(inst))
     (tmp_path / "cell_info.json").write_text(json.dumps(cell))
-    design = build_design(str(tmp_path / "instance_info.json"), str(tmp_path / "cell_info.json"))
+    design = build_design([str(tmp_path / "instance_info.json")], str(tmp_path / "cell_info.json"))
 
     tree = HierarchyTree()
     tree.set_view(view_for_single(design))
@@ -136,7 +138,7 @@ def test_toggle_macros_preserves_expansion(app, design):
 
     tree.set_view(view_for_single(design, include_macros=True))
     assert tree._expanded_paths() == ["TOP"]       # expansion preserved
-    assert tree.columnCount() == 10                # +2 macro columns
+    assert tree.columnCount() == 13                # +2 macro columns
     assert tree.topLevelItem(0).childCount() == 2
 
 
@@ -150,3 +152,39 @@ def test_bar_ratios_stored(app, design):
     assert top.data(3, BAR_ROLE) == pytest.approx(7 / 11.5)  # ULVT% = value itself
     macroa = top.child(0)  # TOP/MACROA
     assert macroa.data(2, BAR_ROLE) == pytest.approx(0.8)   # Count = 4/5
+
+
+def test_quality_color():
+    red = theme.quality_color(0.0)
+    green = theme.quality_color(1.0)
+    assert red.red() > red.green()        # red channel dominates at "bad"
+    assert green.green() > green.red()    # green channel dominates at "good"
+
+
+def test_gradient_bar_color(app, design):
+    tree = HierarchyTree()
+    tree.set_view(view_for_single(design))
+    top = tree.topLevelItem(0)
+    count_color = top.data(2, BAR_COLOR_ROLE)   # Count -> fixed teal
+    ulvt_color = top.data(3, BAR_COLOR_ROLE)    # ULVT% -> quality gradient
+    assert count_color == theme.BAR_COLOR
+    assert ulvt_color is not None and ulvt_color != theme.BAR_COLOR
+
+
+def test_sort_records_and_signals(app, design):
+    tree = HierarchyTree()
+    tree.set_view(view_for_single(design))
+    msgs = []
+    tree.sort_changed.connect(msgs.append)
+    tree._on_header_clicked(2)  # Count column
+    assert tree._sort_active
+    assert tree._sort_column == 2
+    assert msgs and "Count" in msgs[-1]
+    tree.expand_to("TOP/MACROA/UNIT1")  # auto-sort on expand does not crash
+
+
+def test_copy_to_clipboard(app, design):
+    tree = HierarchyTree()
+    tree.set_view(view_for_single(design))
+    tree._copy("TOP/MACROA")
+    assert QApplication.clipboard().text() == "TOP/MACROA"
