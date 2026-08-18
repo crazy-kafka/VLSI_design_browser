@@ -13,7 +13,8 @@ two-version diff view.
 - **10 standard-cell metrics + macro columns** — computed per hierarchy via
   flattened (all-descendants) aggregation.
 - **Data bars** — background progress bars in metric cells: count/area scale to the
-  top-level total; ULVT%/MB%/D1D2% are color-coded red→green (bad→good).
+  top-level total; ULVT%/MB%/D1D2% are color-coded red→green (bad→good) over a
+  configurable min–max range.
 - **Sorting** — click a metric header; sorts siblings within each level, shows the
   active sort in the status bar, and re-applies it automatically as you expand.
 - **Search** — exact / wildcard / regex, case-insensitive; results in a popup
@@ -136,11 +137,16 @@ Computed over the "counted" set: standard cells (`is_macro == false` and
 | ULVT% | Σ(`area` where `is_ULVT`) / Area |
 | MB% | Σ(`register_bit_count` where `is_register_cell` and `> 1`) / Σ(`register_bit_count` where `is_register_cell`) |
 | D1D2% | count(`drive_size ≤ 2`) / Count |
-| B/I Cnt | count(`is_buffer` or `is_inverter`) |
-| B/I Area | Σ(`area` where buffer/inverter) |
-| PUL Cnt | count(`is_pulse_latch`) |
+| Bits | Σ(`register_bit_count` where `is_register_cell`) |
 | CKB Cnt | count((`is_buffer` or `is_inverter`) and `is_clock_cell`) |
 | ICG Cnt | count(`is_integrated_clock_gating_cell`) |
+| PUL Cnt | count(`is_pulse_latch`) |
+| B/I Cnt | count(`is_buffer` or `is_inverter`) |
+| B/I Area | Σ(`area` where buffer/inverter) |
+
+Percentage metrics (ULVT%/MB%/D1D2%) use a red→green quality gradient over a
+configurable `[min, max]` range (right-click a percentage column to edit); defaults
+are ULVT% 0.00–0.35, MB% 0.50–0.90, D1D2% 0.55–0.90.
 
 Macro columns (shown with `--include-macros`): **Macro Cnt** = count(`is_macro`),
 **Macro Area** = Σ(`area` where `is_macro`).

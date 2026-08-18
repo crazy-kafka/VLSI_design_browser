@@ -55,11 +55,12 @@ Let S = set of counted leaves under a hierarchy (post-filter).
 3. **ULVT Ratio** = Σ{`area` : `is_ULVT`} / Area. VT flags mutually exclusive (≤1 of SVT/LVT/ULVT); unclassified cells don't enter numerator.
 4. **MB Ratio** = Σ{`register_bit_count` : `is_register_cell` && `register_bit_count > 1`} / Σ{`register_bit_count` : `is_register_cell`}. (`—` if denominator 0.)
 5. **D1D2 Ratio** = |{leaf : `drive_size ≤ 2`}| / |S|. (count-based)
-6. **Buffer&Inverter Count** = |{leaf : `is_buffer || is_inverter`}|.
-7. **Buffer&Inverter Area** = Σ{`area` : `is_buffer || is_inverter`}.
-8. **Pulse Latch Count (PUL Cnt)** = |{leaf : `is_pulse_latch`}|.
-9. **Clock Buffer/Inverter Count (CKB Cnt)** = |{leaf : (`is_buffer || is_inverter`) && `is_clock_cell`}|.
-10. **ICG Count (ICG Cnt)** = |{leaf : `is_integrated_clock_gating_cell`}|.
+6. **Register Bit Count (Bits)** = Σ{`register_bit_count` : `is_register_cell`}.
+7. **Clock Buffer/Inverter Count (CKB Cnt)** = |{leaf : (`is_buffer || is_inverter`) && `is_clock_cell`}|.
+8. **ICG Count (ICG Cnt)** = |{leaf : `is_integrated_clock_gating_cell`}|.
+9. **Pulse Latch Count (PUL Cnt)** = |{leaf : `is_pulse_latch`}|.
+10. **Buffer&Inverter Count** = |{leaf : `is_buffer || is_inverter`}|.
+11. **Buffer&Inverter Area** = Σ{`area` : `is_buffer || is_inverter`}.
 
 Macro columns (visible only when "Include macros" on):
 - **Macro Count** = |{leaf : `is_macro`}|.
@@ -91,7 +92,8 @@ Division-by-zero → display `—`.
 - "Include macros" on → append `| Macro Area | Macro Cnt |` columns.
 - Metric cells render background **data bars**; count/area scale to the top-level
   total, and ULVT%/MB%/D1D2% are color-coded red→green (ULVT lower-better;
-  MB/D1D2 higher-better).
+  MB/D1D2 higher-better) over a configurable `[min, max]` range (right-click to
+  edit; defaults ULVT% 0.00–0.35, MB% 0.50–0.90, D1D2% 0.55–0.90).
 
 ### Search results popup window
 ```

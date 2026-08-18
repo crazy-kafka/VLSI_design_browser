@@ -20,6 +20,7 @@ class Column:
     bar: pd.Series = None          # indexed by path; 0..1 background bar fraction
     is_macro: bool = False         # true for macro count/area columns (amber bars)
     gradient: str = None           # None | "lower_better" | "higher_better"
+    key: str = None                # metric key (for gradient range lookup)
 
 
 def bar_series(values: pd.Series, roots, kind: str) -> pd.Series:
@@ -43,7 +44,9 @@ def metric_columns(design, include_macros: bool = False) -> List[Column]:
     cols = []
     for m in metrics:
         fmt = (lambda v, k=m.kind: schema.format_metric(k, v))
-        cols.append(Column(m.label, mv[m.key], fmt, bar_series(mv[m.key], design.roots, m.kind), m.is_macro, m.gradient))
+        bar = None if m.gradient else bar_series(mv[m.key], design.roots, m.kind)
+        cols.append(Column(m.label, mv[m.key], fmt, bar=bar, is_macro=m.is_macro,
+                           gradient=m.gradient, key=m.key))
     return cols
 
 

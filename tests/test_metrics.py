@@ -88,8 +88,8 @@ def test_missing_cells_reported(design):
 
 def test_metric_registry_columns(design):
     assert [m.key for m in schema.STD_METRICS] == [
-        "area", "count", "ulvt_ratio", "mb_ratio", "d1d2_ratio", "bi_count", "bi_area",
-        "pul_count", "ckb_count", "icg_count",
+        "area", "count", "ulvt_ratio", "mb_ratio", "d1d2_ratio", "bits",
+        "ckb_count", "icg_count", "pul_count", "bi_count", "bi_area",
     ]
     assert [m.key for m in schema.MACRO_METRICS] == ["macro_count", "macro_area"]
 
@@ -120,6 +120,24 @@ def test_new_metrics(tmp_path):
     assert mv.loc["TOP", "pul_count"] == 1
     assert mv.loc["TOP", "ckb_count"] == 2   # CLKBUF + CLKINV (BUF is not a clock cell)
     assert mv.loc["TOP", "icg_count"] == 1
+
+
+def test_gradient_range_defaults_and_validation():
+    assert schema.gradient_range("ulvt_ratio") == (0.0, 0.35)
+    assert schema.gradient_range("mb_ratio") == (0.5, 0.9)
+    assert schema.gradient_range("d1d2_ratio") == (0.55, 0.9)
+    assert schema.gradient_range("unknown") == (0.0, 1.0)
+    try:
+        schema.set_gradient_range("ulvt_ratio", 0.1, 0.5)
+        assert schema.gradient_range("ulvt_ratio") == (0.1, 0.5)
+        with pytest.raises(ValueError):
+            schema.set_gradient_range("ulvt_ratio", 0.8, 0.2)  # min > max
+        with pytest.raises(ValueError):
+            schema.set_gradient_range("ulvt_ratio", 0.0, 1.5)  # > 1
+        with pytest.raises(ValueError):
+            schema.set_gradient_range("ulvt_ratio", -0.1, 0.5)  # < 0
+    finally:
+        schema.set_gradient_range("ulvt_ratio", 0.0, 0.35)
 
 
 def test_formatting():

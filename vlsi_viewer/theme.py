@@ -30,7 +30,7 @@ TEXT_C = _qc(TEXT)
 BAR_COLOR = _qc(ACCENT, BAR_ALPHA)
 MACRO_BAR_COLOR = _qc(MACRO, BAR_ALPHA)
 
-QUALITY_ALPHA = 0x60
+QUALITY_ALPHA = 0x90
 
 
 def quality_color(goodness):
@@ -39,7 +39,7 @@ def quality_color(goodness):
     ``goodness`` is 0..1 (0 = worst/red, 1 = best/green).
     """
     g = max(0.0, min(1.0, float(goodness)))
-    c = QColor.fromHsv(int(g * 120), 190, 240)
+    c = QColor.fromHsv(int(g * 120), 255, 235)
     c.setAlpha(QUALITY_ALPHA)
     return c
 

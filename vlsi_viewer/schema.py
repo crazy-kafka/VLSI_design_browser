@@ -68,6 +68,7 @@ def _m_mb(g):      return _ratio(g["mb_bits"], g["reg_bits"])
 def _m_d1d2(g):    return _ratio(g["d1d2_count"], g["count"])
 def _m_bi_count(g): return g["bi_count"]
 def _m_bi_area(g): return g["bi_area"]
+def _m_bits(g):    return g["reg_bits"]
 def _m_pul(g): return g["pul_count"]
 def _m_ckb(g): return g["ckb_count"]
 def _m_icg(g): return g["icg_count"]
@@ -92,17 +93,39 @@ METRICS = [
     MetricSpec("ulvt_ratio", "ULVT%", "percent", False, _m_ulvt, "lower_better"),
     MetricSpec("mb_ratio", "MB%", "percent", False, _m_mb, "higher_better"),
     MetricSpec("d1d2_ratio", "D1D2%", "percent", False, _m_d1d2, "higher_better"),
-    MetricSpec("bi_count", "B/I Cnt", "count", False, _m_bi_count),
-    MetricSpec("bi_area", "B/I Area", "area", False, _m_bi_area),
-    MetricSpec("pul_count", "PUL Cnt", "count", False, _m_pul),
+    MetricSpec("bits", "bit count", "count", False, _m_bits),
     MetricSpec("ckb_count", "CKB Cnt", "count", False, _m_ckb),
     MetricSpec("icg_count", "ICG Cnt", "count", False, _m_icg),
+    MetricSpec("pul_count", "PUL Cnt", "count", False, _m_pul),
+    MetricSpec("bi_count", "B/I Cnt", "count", False, _m_bi_count),
+    MetricSpec("bi_area", "B/I Area", "area", False, _m_bi_area),
     MetricSpec("macro_count", "Macro Cnt", "count", True, _m_macro_count),
     MetricSpec("macro_area", "Macro Area", "area", True, _m_macro_area),
 ]
 
 STD_METRICS = [m for m in METRICS if not m.is_macro]
 MACRO_METRICS = [m for m in METRICS if m.is_macro]
+
+# Mutable gradient ranges (defaults) keyed by metric key.
+_GRADIENT_RANGES = {
+    "ulvt_ratio": [0.0, 0.35],
+    "mb_ratio": [0.50, 0.90],
+    "d1d2_ratio": [0.55, 0.90],
+}
+
+
+def gradient_range(key: str):
+    """Return the current (min, max) gradient range for a metric."""
+    lo, hi = _GRADIENT_RANGES.get(key, (0.0, 1.0))
+    return float(lo), float(hi)
+
+
+def set_gradient_range(key: str, lo: float, hi: float):
+    """Set a metric's gradient range; requires 0 <= lo <= hi <= 1."""
+    if not (0.0 <= lo <= hi <= 1.0):
+        raise ValueError("gradient range must satisfy 0 <= min <= max <= 1")
+    _GRADIENT_RANGES[key] = [float(lo), float(hi)]
+
 
 _METRIC_BY_KEY = {m.key: m for m in METRICS}
 

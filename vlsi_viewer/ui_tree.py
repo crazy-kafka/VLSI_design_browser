@@ -4,11 +4,12 @@ import math
 from PyQt5.QtCore import Qt, QRect, pyqtSignal
 from PyQt5.QtGui import QFont, QFontDatabase
 from PyQt5.QtWidgets import (
-    QApplication, QHeaderView, QMenu, QStyle, QStyledItemDelegate,
-    QStyleOptionViewItem, QTreeWidget, QTreeWidgetItem,
+    QApplication, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
+    QHeaderView, QMenu, QMessageBox, QStyle, QStyledItemDelegate,
+    QStyleOptionViewItem, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
 )
 
-from . import theme
+from . import schema, theme
 from .model import TreeView
 
 
@@ -84,6 +85,42 @@ class HierarchyItem(QTreeWidgetItem):
         return a < b
 
 
+class GradientRangeDialog(QDialog):
+    """Dialog to edit a percentage metric's gradient [min, max] range."""
+
+    def __init__(self, label, lo, hi, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Gradient range — {label}")
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.min_spin = QDoubleSpinBox()
+        self.min_spin.setRange(0.0, 1.0)
+        self.min_spin.setDecimals(2)
+        self.min_spin.setSingleStep(0.01)
+        self.min_spin.setValue(lo)
+        self.max_spin = QDoubleSpinBox()
+        self.max_spin.setRange(0.0, 1.0)
+        self.max_spin.setDecimals(2)
+        self.max_spin.setSingleStep(0.01)
+        self.max_spin.setValue(hi)
+        form.addRow("Min", self.min_spin)
+        form.addRow("Max", self.max_spin)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self):
+        if self.min_spin.value() > self.max_spin.value():
+            QMessageBox.warning(self, "Invalid range", "Min must be ≤ Max (within 0…1).")
+            return
+        self.accept()
+
+    def range(self):
+        return self.min_spin.value(), self.max_spin.value()
+
+
 class HierarchyTree(QTreeWidget):
     sort_changed = pyqtSignal(str)  # human-readable sort summary
 
@@ -154,25 +191,43 @@ class HierarchyTree(QTreeWidget):
             v = col.series.get(path, None)
             item.setText(ci, col.fmt(v))
             item.setData(ci, Qt.UserRole, _sortable(v))
-            if col.bar is not None:
-                r = col.bar.get(path, None)
-                if r is not None:
-                    try:
-                        f = float(r)
-                        if not math.isnan(f):
-                            item.setData(ci, BAR_ROLE, f)
-                            if col.gradient:
-                                goodness = f if col.gradient == "higher_better" else 1.0 - f
-                                item.setData(ci, BAR_COLOR_ROLE, theme.quality_color(goodness))
-                            else:
-                                item.setData(ci, BAR_COLOR_ROLE,
-                                             theme.MACRO_BAR_COLOR if col.is_macro else theme.BAR_COLOR)
-                    except (TypeError, ValueError):
-                        pass
+            if col.gradient:
+                self._set_gradient_bar(item, ci, col, v)
+            elif col.bar is not None:
+                self._set_ratio_bar(item, ci, col, path)
         if self._visible_children(path):
             # placeholder child so the expand arrow is shown before lazy population
             item.addChild(QTreeWidgetItem())
         return item
+
+    def _set_gradient_bar(self, item, ci, col, v):
+        if v is None:
+            return
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return
+        if math.isnan(f):
+            return
+        lo, hi = schema.gradient_range(col.key)
+        t = (f - lo) / (hi - lo) if hi > lo else 0.0
+        t = max(0.0, min(1.0, t))
+        item.setData(ci, BAR_ROLE, t)
+        goodness = t if col.gradient == "higher_better" else 1.0 - t
+        item.setData(ci, BAR_COLOR_ROLE, theme.quality_color(goodness))
+
+    def _set_ratio_bar(self, item, ci, col, path):
+        r = col.bar.get(path, None)
+        if r is None:
+            return
+        try:
+            f = float(r)
+            if not math.isnan(f):
+                item.setData(ci, BAR_ROLE, f)
+                item.setData(ci, BAR_COLOR_ROLE,
+                             theme.MACRO_BAR_COLOR if col.is_macro else theme.BAR_COLOR)
+        except (TypeError, ValueError):
+            pass
 
     def _visible_children(self, path: str):
         return [c for c in self._view.children.get(path, []) if self._passes_threshold(c)]
@@ -217,15 +272,29 @@ class HierarchyTree(QTreeWidget):
     # -- context menu ------------------------------------------------------
     def _on_context_menu(self, pos):
         item = self.itemAt(pos)
-        if item is None or self.columnAt(pos.x()) != 0:
+        if item is None:
             return
-        path = item.data(0, Qt.UserRole)
-        if path is None:
-            return
+        col_idx = self.columnAt(pos.x())
         menu = QMenu(self)
-        menu.addAction("Copy full name", lambda: self._copy(path))
-        menu.addAction("Copy base name", lambda: self._copy(path.rsplit("/", 1)[-1]))
+        if col_idx == 0:
+            path = item.data(0, Qt.UserRole)
+            if path is not None:
+                menu.addAction("Copy full name", lambda: self._copy(path.split('/', 1)[1]))
+                menu.addAction("Copy base name", lambda: self._copy(path.rsplit("/", 1)[-1]))
+        elif self._view and 0 < col_idx <= len(self._view.columns):
+            column = self._view.columns[col_idx - 1]
+            if column.gradient:
+                menu.addAction("Set gradient range…", lambda: self._edit_gradient_range(column))
+        if menu.isEmpty():
+            return
         menu.exec_(self.viewport().mapToGlobal(pos))
+
+    def _edit_gradient_range(self, column):
+        lo, hi = schema.gradient_range(column.key)
+        dlg = GradientRangeDialog(column.label, lo, hi, self)
+        if dlg.exec_() == QDialog.Accepted:
+            schema.set_gradient_range(column.key, *dlg.range())
+            self.rebuild()
 
     @staticmethod
     def _copy(text: str):

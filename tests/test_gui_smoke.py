@@ -24,7 +24,7 @@ def test_tree_constructs(app, design):
     tree = HierarchyTree()
     tree.set_view(view)
 
-    assert tree.columnCount() == 11  # Hierarchy + 10 std metrics
+    assert tree.columnCount() == 12  # Hierarchy + 11 std metrics
     assert tree.topLevelItemCount() == 1
 
     top = tree.topLevelItem(0)
@@ -43,7 +43,7 @@ def test_include_macros_adds_columns(app, design):
     view = view_for_single(design, include_macros=True)
     tree = HierarchyTree()
     tree.set_view(view)
-    assert tree.columnCount() == 13  # Hierarchy + 10 std + 2 macro
+    assert tree.columnCount() == 14  # Hierarchy + 11 std + 2 macro
 
 
 def test_threshold_filters_children(app, design):
@@ -79,7 +79,7 @@ def test_search_dialog(app, design):
 
 def test_diff_view(app, design):
     view = view_for_diff(design, design)
-    assert len(view.columns) == 20  # 10 metrics x {abs, rel}
+    assert len(view.columns) == 22  # 11 metrics x {abs, rel}
     tree = HierarchyTree()
     tree.set_view(view)
     # diff against itself -> area delta is 0
@@ -100,7 +100,7 @@ def test_mainwindow_compare(app, design):
     assert w._stack.currentWidget() is w._compare
     assert w._compare.v1.topLevelItemCount() == 1
     assert w._compare.diff.topLevelItemCount() == 1
-    assert w._compare.diff.columnCount() == 21  # Hierarchy + 20 diff columns
+    assert w._compare.diff.columnCount() == 23  # Hierarchy + 22 diff columns
 
 
 def test_deep_hierarchy_expand_arrow(app, tmp_path):
@@ -138,7 +138,7 @@ def test_toggle_macros_preserves_expansion(app, design):
 
     tree.set_view(view_for_single(design, include_macros=True))
     assert tree._expanded_paths() == ["TOP"]       # expansion preserved
-    assert tree.columnCount() == 13                # +2 macro columns
+    assert tree.columnCount() == 14                # +2 macro columns
     assert tree.topLevelItem(0).childCount() == 2
 
 
@@ -149,7 +149,7 @@ def test_bar_ratios_stored(app, design):
     assert top.data(0, BAR_ROLE) is None                # hierarchy column: no bar
     assert top.data(2, BAR_ROLE) == pytest.approx(1.0)  # Count = 5/5
     assert top.data(1, BAR_ROLE) == pytest.approx(1.0)  # Area = 11.5/11.5
-    assert top.data(3, BAR_ROLE) == pytest.approx(7 / 11.5)  # ULVT% = value itself
+    assert top.data(3, BAR_ROLE) == pytest.approx(1.0)  # ULVT% 0.6087 clamps to range [0, 0.35]
     macroa = top.child(0)  # TOP/MACROA
     assert macroa.data(2, BAR_ROLE) == pytest.approx(0.8)   # Count = 4/5
 
@@ -188,3 +188,19 @@ def test_copy_to_clipboard(app, design):
     tree.set_view(view_for_single(design))
     tree._copy("TOP/MACROA")
     assert QApplication.clipboard().text() == "TOP/MACROA"
+
+
+def test_gradient_fill_scaled_to_range(app, design):
+    from vlsi_viewer import schema
+    try:
+        tree = HierarchyTree()
+        tree.set_view(view_for_single(design))
+        top = tree.topLevelItem(0)
+        # TOP ULVT = 7/11.5 ≈ 0.6087; default range [0, 0.35] -> clamped to 1.0
+        assert top.data(3, BAR_ROLE) == pytest.approx(1.0)
+        schema.set_gradient_range("ulvt_ratio", 0.0, 1.0)
+        tree.rebuild()
+        top = tree.topLevelItem(0)
+        assert top.data(3, BAR_ROLE) == pytest.approx(7 / 11.5)
+    finally:
+        schema.set_gradient_range("ulvt_ratio", 0.0, 0.35)
