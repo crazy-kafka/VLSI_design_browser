@@ -72,14 +72,55 @@ def test_match_paths(design):
 
 def test_search_dialog(app, design):
     view = view_for_single(design)
-    dlg = SearchDialog(view, "*unit1*", "wildcard")
-    assert dlg.table.rowCount() == 1
-    assert dlg.table.item(0, 0).text() == "TOP/MACROA/UNIT1"
+    dlg = SearchDialog(view, None, "*unit1*", "wildcard")
+    table = dlg.tables["v1"]
+    assert table.rowCount() == 1
+    assert table.item(0, 0).text() == "TOP/MACROA/UNIT1"
+
+
+def test_search_dialog_compare(app, design):
+    v1 = view_for_single(design)
+    v2 = view_for_single(design, include_macros=True)
+    dlg = SearchDialog(v1, v2, "*unit1*", "wildcard")
+    assert dlg.tables["v1"].rowCount() == 1
+    assert dlg.tables["v2"].rowCount() == 1
+    # v2 table has macro columns (11 std + 2 macro)
+    assert dlg.tables["v2"].columnCount() == 1 + 13
+    assert dlg.tables["v1"].columnCount() == 1 + 11
+
+
+def test_jump_to_switches_compare_tab(app, design):
+    w = MainWindow(design, design, threshold=0)
+    assert w._compare.currentIndex() == 0  # V1 tab
+    w._jump_to("TOP/MACROA/UNIT1", "v2")
+    assert w._compare.currentIndex() == 1  # switched to V2
+    assert w._compare.v2.currentItem().data(0, Qt.UserRole) == "TOP/MACROA/UNIT1"
+
+
+def test_gradient_range_sync_between_tabs(app, design):
+    from vlsi_viewer import schema
+    try:
+        w = MainWindow(design, design, threshold=0)
+        schema.set_gradient_range("ulvt_ratio", 0.0, 1.0)
+        w._compare.v1.gradient_range_changed.emit()  # simulate edit on V1
+        # V2 tab's ULVT bar now reflects the widened range (raw value 7/11.5)
+        top_v2 = w._compare.v2.topLevelItem(0)
+        assert top_v2.data(3, BAR_ROLE) == pytest.approx(7 / 11.5)
+    finally:
+        schema.set_gradient_range("ulvt_ratio", 0.0, 0.35)
 
 
 def test_diff_view(app, design):
     view = view_for_diff(design, design)
     assert len(view.columns) == 22  # 11 metrics x {abs, rel}
+    # Δrel columns carry a gradient; Δabs columns do not
+    rel_col = view.columns[1]    # ΔArea% (index 1 = first rel after ΔArea at 0)
+    assert rel_col.gradient == "lower_better"
+    assert rel_col.key == "area_rel"
+    # MB/D1D2 Δrel are higher-better
+    mb_rel = view.columns[7]     # area,count,ulvt,mb,d1d2,bits,ckb,icg,pul,bi,bi
+    assert mb_rel.label == "ΔMB%"
+    assert mb_rel.gradient == "higher_better"
     tree = HierarchyTree()
     tree.set_view(view)
     # diff against itself -> area delta is 0

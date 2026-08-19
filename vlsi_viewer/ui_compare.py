@@ -18,6 +18,8 @@ class CompareWidget(QTabWidget):
         self._d2 = None
         self._include_macros = False
         self._threshold = 0
+        for t in (self.v1, self.v2, self.diff):
+            t.gradient_range_changed.connect(self._on_range_changed)
 
     def set_designs(self, d1, d2):
         self._d1 = d1
@@ -36,6 +38,11 @@ class CompareWidget(QTabWidget):
     def set_threshold(self, n):
         self._threshold = n
         self._refresh()
+
+    def _on_range_changed(self):
+        # a gradient range changed in one tab -> re-render all three
+        for t in (self.v1, self.v2, self.diff):
+            t.rebuild()
 
     def _refresh(self):
         if self._d1 is None:

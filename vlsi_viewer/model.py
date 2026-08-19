@@ -57,8 +57,14 @@ def diff_columns(d1, d2, include_macros: bool = False) -> List[Column]:
     for m in metrics:
         fmt_abs = (lambda v, k=m.kind: schema.format_delta_abs(k, v))
         fmt_rel = (lambda v: schema.format_delta_rel(v))
-        cols.append(Column("Δ" + m.label, dt[f"{m.key}_abs"], fmt_abs))
-        cols.append(Column("Δ" + m.label + "%", dt[f"{m.key}_rel"], fmt_rel))
+        # Δabs for percent metrics is in percentage points -> drop the "%";
+        # Δrel keeps it ("ΔULVT" vs "ΔULVT%"), and count/area get "ΔArea"/"ΔArea%".
+        base = m.label[:-1] if m.kind == "percent" else m.label
+        rel_label = "Δ" + m.label if m.kind == "percent" else "Δ" + m.label + "%"
+        cols.append(Column("Δ" + base, dt[f"{m.key}_abs"], fmt_abs))
+        gradient = m.gradient or "lower_better"
+        cols.append(Column(rel_label, dt[f"{m.key}_rel"], fmt_rel,
+                           gradient=gradient, key=m.key + "_rel"))
     return cols
 
 

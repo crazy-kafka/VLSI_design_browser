@@ -18,7 +18,8 @@ two-version diff view.
 - **Sorting** — click a metric header; sorts siblings within each level, shows the
   active sort in the status bar, and re-applies it automatically as you expand.
 - **Search** — exact / wildcard / regex, case-insensitive; results in a popup
-  window that jumps the tree to the selected hierarchy.
+  window that jumps the tree to the selected hierarchy. In compare mode the popup
+  is split into V1/V2 panels and clicking a row jumps to that version's tab.
 - **Context menu** — right-click a hierarchy name to copy its full or base name.
 - **Min-instance threshold** — hide small hierarchies from the tree (UI-only).
 - **Two-version comparison** — V1 / V2 / Diff tabs with per-metric Δabs and Δrel.
@@ -48,18 +49,22 @@ python main.py --cell_info sample_data/cell_info.json \
 # show all hierarchies (no threshold) + macro columns + verbose load/build log
 python main.py --cell_info c.json --block_info a.json b.json --min-instances 0 --include-macros --verbose
 
-# two-version comparison
-python main.py --cell_info v1_cell.json --block_info v1_a.json \
-               --compare_cell_info v2_cell.json --compare_block_info v2_a.json
+# two-version comparison (reuses the same cell_info.json)
+python main.py --cell_info cell.json --block_info v1_a.json \
+               --compare_block_info v2_a.json
+
+# compare using the bundled demo data (v1 vs v2)
+python main.py --cell_info sample_data/cell_info.json \
+    --block_info sample_data/instance_info.json sample_data/block_B.instance_info.json \
+    --compare_block_info sample_data/instance_info_v2.json sample_data/block_B.instance_info_v2.json
 
 # ignore the pickle cache and rebuild
 python main.py --cell_info c.json --block_info a.json --force
 ```
 
 `python -m vlsi_viewer …` is equivalent. Run `python main.py --help` for all
-options (`--block_info`, `--compare_cell_info`/`--compare_block_info`,
-`--min-instances`, `--include-macros`, `--cache-dir`, `--force`, `--verbose`,
-`--version`).
+options (`--block_info`, `--compare_block_info`, `--min-instances`,
+`--include-macros`, `--cache-dir`, `--force`, `--verbose`, `--version`).
 
 ## Input format
 
@@ -145,8 +150,11 @@ Computed over the "counted" set: standard cells (`is_macro == false` and
 | B/I Area | Σ(`area` where buffer/inverter) |
 
 Percentage metrics (ULVT%/MB%/D1D2%) use a red→green quality gradient over a
-configurable `[min, max]` range (right-click a percentage column to edit); defaults
-are ULVT% 0.00–0.35, MB% 0.50–0.90, D1D2% 0.55–0.90.
+configurable `[min, max]` range (right-click a gradient **column header** to edit);
+defaults are ULVT% 0.00–0.35, MB% 0.50–0.90, D1D2% 0.55–0.90. In compare mode the
+Diff tab's `ΔX%` columns are also gradient-colored over `[−0.5, 0.5]` (MB/D1D2
+higher-better, the rest lower-better); editing a range in any tab re-renders V1, V2,
+and Diff together.
 
 Macro columns (shown with `--include-macros`): **Macro Cnt** = count(`is_macro`),
 **Macro Area** = Σ(`area` where `is_macro`).

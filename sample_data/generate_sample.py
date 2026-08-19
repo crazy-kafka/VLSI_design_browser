@@ -80,16 +80,22 @@ def _write(path, data, indent=None):
         json.dump(data, f, indent=indent)
 
 
-def main():
-    # per-block recipe: three independent-ish axes spread across 0..1
+def _pools(version):
+    """Per-block (ulvt, mb, d1d2) recipes; v2 is a perturbed variant for compare."""
     pools = []
     for b in range(N_BLOCKS):
         t = b / (N_BLOCKS - 1)
-        ulvt = t
-        mb = ((b * 3) % N_BLOCKS) / (N_BLOCKS - 1)
-        d1d2 = ((b * 7) % N_BLOCKS) / (N_BLOCKS - 1)
+        if version == "v1":
+            ulvt, mb, d1d2 = t, ((b * 3) % N_BLOCKS) / (N_BLOCKS - 1), ((b * 7) % N_BLOCKS) / (N_BLOCKS - 1)
+        else:  # v2: shift ratios so the diff gradient shows variety
+            ulvt = min(1.0, t * 1.6 + 0.05)
+            mb = min(1.0, (((b * 3 + 2) % N_BLOCKS) / (N_BLOCKS - 1)) * 0.85)
+            d1d2 = min(1.0, (((b * 7 + 5) % N_BLOCKS) / (N_BLOCKS - 1)) * 1.25)
         pools.append(_make_pool(ulvt, mb, d1d2))
+    return pools
 
+
+def _build_top(pools, drop_every=None):
     instances = {}
     counter = 0
     for b in range(N_BLOCKS):
@@ -105,22 +111,45 @@ def main():
                     for c in range(N_CLS):
                         cls = f"{grp}/CLS_{c}"
                         for i in range(LEAVES_PER_CLS):
+                            if drop_every is not None and counter % drop_every == 0:
+                                counter += 1
+                                continue
                             instances[f"{cls}/leaf_{i}"] = {"cell_name": pool[counter % len(pool)]}
                             counter += 1
 
     instances["block_B"] = {"cell_name": "block_B"}
     instances["top_macro"] = {"cell_name": "PLL"}
+    return instances
 
-    _write("instance_info.json", {"top_name": "TOP", "instances": instances})
-    _write("cell_info.json", CELLS, indent=2)
 
+def _build_block_b(version):
     block_b = {}
     for u in range(2):
         for i in range(10):
-            block_b[f"UNIT_{u}/leaf_{i}"] = {"cell_name": "INV_X1_SVT" if (i + u) % 3 == 0 else "DFF_X2"}
-    _write("block_B.instance_info.json", {"top_name": "block_B", "instances": block_b}, indent=2)
+            if version == "v1":
+                cell = "INV_X1_SVT" if (i + u) % 3 == 0 else "DFF_X2"
+            else:
+                cell = "DFF_X2" if (i + u) % 3 == 0 else "AND2_X1"
+            block_b[f"UNIT_{u}/leaf_{i}"] = {"cell_name": cell}
+    return block_b
 
-    print(f"wrote {len(instances)} instances + block_B ({len(block_b)} instances)")
+
+def main():
+    _write("cell_info.json", CELLS, indent=2)
+
+    v1 = _build_top(_pools("v1"))
+    _write("instance_info.json", {"top_name": "TOP", "instances": v1})
+    _write("block_B.instance_info.json",
+           {"top_name": "block_B", "instances": _build_block_b("v1")}, indent=2)
+
+    # compare (v2): perturbed ratios + ~4% fewer leaves
+    v2 = _build_top(_pools("v2"), drop_every=25)
+    _write("instance_info_v2.json", {"top_name": "TOP", "instances": v2})
+    _write("block_B.instance_info_v2.json",
+           {"top_name": "block_B", "instances": _build_block_b("v2")}, indent=2)
+
+    print(f"wrote v1: {len(v1)} instances, v2: {len(v2)} instances "
+          f"(same cell_info.json)")
 
 
 if __name__ == "__main__":

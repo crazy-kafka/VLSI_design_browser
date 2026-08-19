@@ -103,16 +103,21 @@ class MainWindow(QMainWindow):
     def _do_search(self):
         if self._design1 is None:
             return
-        view = view_for_single(self._design1, self.macro_check.isChecked())
-        dlg = SearchDialog(view, self.search_edit.text().strip(), self.mode_combo.currentText().lower(), self)
+        include_macros = self.macro_check.isChecked()
+        v1 = view_for_single(self._design1, include_macros)
+        v2 = view_for_single(self._design2, include_macros) if self._design2 is not None else None
+        dlg = SearchDialog(v1, v2, self.search_edit.text().strip(),
+                           self.mode_combo.currentText().lower(), self)
         dlg.selected.connect(self._jump_to)
         dlg.exec_()
 
-    def _jump_to(self, path: str):
+    def _jump_to(self, path: str, version: str):
         if self._design2 is None:
             self._tree.expand_to(path)
         else:
-            self._compare.currentWidget().expand_to(path)
+            tree = self._compare.v1 if version == "v1" else self._compare.v2
+            self._compare.setCurrentWidget(tree)
+            tree.expand_to(path)
 
     def _show_status(self):
         if self._design1 is None:

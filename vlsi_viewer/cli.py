@@ -16,10 +16,9 @@ def parse_args(argv=None):
                         help="path to cell_info.json")
     parser.add_argument("--block_info", required=True, nargs="+", metavar="BLOCK",
                         help="one or more instance_info.json block files")
-    parser.add_argument("--compare_cell_info", metavar="CELL",
-                        help="cell_info.json for the second design (two-version diff)")
     parser.add_argument("--compare_block_info", nargs="+", metavar="BLOCK",
-                        help="instance_info.json block files for the second design")
+                        help="instance_info.json block files for the second design "
+                             "(reuses --cell_info)")
     parser.add_argument(
         "--min-instances", type=int, default=config.DEFAULT_MIN_INST_COUNT, metavar="N",
         help="hide hierarchies with fewer than N instances (default: %(default)s)")
@@ -44,11 +43,8 @@ def main(argv=None):
         design1 = load_or_build(args.block_info, args.cell_info,
                                 cache_dir=args.cache_dir, force=args.force)
         design2 = None
-        if args.compare_cell_info:
-            if not args.compare_block_info:
-                print("error: --compare_cell_info requires --compare_block_info", file=sys.stderr)
-                return 2
-            design2 = load_or_build(args.compare_block_info, args.compare_cell_info,
+        if args.compare_block_info:
+            design2 = load_or_build(args.compare_block_info, args.cell_info,
                                     cache_dir=args.cache_dir, force=args.force)
     except Exception as exc:  # surface load errors on the CLI, no window needed
         print(f"error: {exc}", file=sys.stderr)

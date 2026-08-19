@@ -112,6 +112,9 @@ _GRADIENT_RANGES = {
     "mb_ratio": [0.50, 0.90],
     "d1d2_ratio": [0.55, 0.90],
 }
+# default range for compare-mode relative-difference columns (ΔX%)
+for _m in METRICS:
+    _GRADIENT_RANGES.setdefault(_m.key + "_rel", [-0.5, 0.5])
 
 
 def gradient_range(key: str):
@@ -121,9 +124,9 @@ def gradient_range(key: str):
 
 
 def set_gradient_range(key: str, lo: float, hi: float):
-    """Set a metric's gradient range; requires 0 <= lo <= hi <= 1."""
-    if not (0.0 <= lo <= hi <= 1.0):
-        raise ValueError("gradient range must satisfy 0 <= min <= max <= 1")
+    """Set a metric's gradient range; requires lo <= hi."""
+    if lo > hi:
+        raise ValueError("gradient range requires min <= max")
     _GRADIENT_RANGES[key] = [float(lo), float(hi)]
 
 

@@ -126,16 +126,18 @@ def test_gradient_range_defaults_and_validation():
     assert schema.gradient_range("ulvt_ratio") == (0.0, 0.35)
     assert schema.gradient_range("mb_ratio") == (0.5, 0.9)
     assert schema.gradient_range("d1d2_ratio") == (0.55, 0.9)
+    # compare-mode Δrel columns default to [-0.5, 0.5]
+    assert schema.gradient_range("area_rel") == (-0.5, 0.5)
+    assert schema.gradient_range("ulvt_ratio_rel") == (-0.5, 0.5)
     assert schema.gradient_range("unknown") == (0.0, 1.0)
     try:
         schema.set_gradient_range("ulvt_ratio", 0.1, 0.5)
         assert schema.gradient_range("ulvt_ratio") == (0.1, 0.5)
+        # ranges may be negative now (diff deltas)
+        schema.set_gradient_range("ulvt_ratio", -0.3, 0.4)
+        assert schema.gradient_range("ulvt_ratio") == (-0.3, 0.4)
         with pytest.raises(ValueError):
             schema.set_gradient_range("ulvt_ratio", 0.8, 0.2)  # min > max
-        with pytest.raises(ValueError):
-            schema.set_gradient_range("ulvt_ratio", 0.0, 1.5)  # > 1
-        with pytest.raises(ValueError):
-            schema.set_gradient_range("ulvt_ratio", -0.1, 0.5)  # < 0
     finally:
         schema.set_gradient_range("ulvt_ratio", 0.0, 0.35)
 

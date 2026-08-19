@@ -10,7 +10,6 @@ def test_defaults():
     assert args.block_info == ["a.json"]
     assert args.min_instances == config.DEFAULT_MIN_INST_COUNT
     assert args.include_macros is False
-    assert args.compare_cell_info is None
     assert args.compare_block_info is None
     assert args.cache_dir is None
     assert args.force is False
@@ -21,7 +20,6 @@ def test_multiple_blocks_and_flags():
     args = parse_args([
         "--cell_info", "cell.json",
         "--block_info", "a.json", "b.json", "c.json",
-        "--compare_cell_info", "cell2.json",
         "--compare_block_info", "a2.json", "b2.json",
         "--min-instances", "0",
         "--include-macros",
@@ -30,7 +28,6 @@ def test_multiple_blocks_and_flags():
         "--verbose",
     ])
     assert args.block_info == ["a.json", "b.json", "c.json"]
-    assert args.compare_cell_info == "cell2.json"
     assert args.compare_block_info == ["a2.json", "b2.json"]
     assert args.min_instances == 0
     assert args.include_macros is True

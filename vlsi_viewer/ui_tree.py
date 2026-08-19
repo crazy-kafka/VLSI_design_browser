@@ -94,12 +94,12 @@ class GradientRangeDialog(QDialog):
         layout = QVBoxLayout(self)
         form = QFormLayout()
         self.min_spin = QDoubleSpinBox()
-        self.min_spin.setRange(0.0, 1.0)
+        self.min_spin.setRange(-1.0, 1.0)
         self.min_spin.setDecimals(2)
         self.min_spin.setSingleStep(0.01)
         self.min_spin.setValue(lo)
         self.max_spin = QDoubleSpinBox()
-        self.max_spin.setRange(0.0, 1.0)
+        self.max_spin.setRange(-1.0, 1.0)
         self.max_spin.setDecimals(2)
         self.max_spin.setSingleStep(0.01)
         self.max_spin.setValue(hi)
@@ -113,7 +113,7 @@ class GradientRangeDialog(QDialog):
 
     def _on_accept(self):
         if self.min_spin.value() > self.max_spin.value():
-            QMessageBox.warning(self, "Invalid range", "Min must be ≤ Max (within 0…1).")
+            QMessageBox.warning(self, "Invalid range", "Min must be ≤ Max.")
             return
         self.accept()
 
@@ -123,6 +123,7 @@ class GradientRangeDialog(QDialog):
 
 class HierarchyTree(QTreeWidget):
     sort_changed = pyqtSignal(str)  # human-readable sort summary
+    gradient_range_changed = pyqtSignal()  # a gradient range was edited here
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -142,6 +143,8 @@ class HierarchyTree(QTreeWidget):
         self.itemExpanded.connect(self._on_expand)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._on_context_menu)
+        self.header().setContextMenuPolicy(Qt.CustomContextMenu)
+        self.header().customContextMenuRequested.connect(self._on_header_context_menu)
 
     # -- configuration -----------------------------------------------------
     def set_view(self, view: TreeView):
@@ -275,19 +278,26 @@ class HierarchyTree(QTreeWidget):
         if item is None:
             return
         col_idx = self.columnAt(pos.x())
-        menu = QMenu(self)
-        if col_idx == 0:
-            path = item.data(0, Qt.UserRole)
-            if path is not None:
-                menu.addAction("Copy full name", lambda: self._copy(path.split('/', 1)[1]))
-                menu.addAction("Copy base name", lambda: self._copy(path.rsplit("/", 1)[-1]))
-        elif self._view and 0 < col_idx <= len(self._view.columns):
-            column = self._view.columns[col_idx - 1]
-            if column.gradient:
-                menu.addAction("Set gradient range…", lambda: self._edit_gradient_range(column))
-        if menu.isEmpty():
+        if col_idx != 0:
             return
+        path = item.data(0, Qt.UserRole)
+        if path is None:
+            return
+        menu = QMenu(self)
+        menu.addAction("Copy full name", lambda: self._copy(path.split('/', 1)[1]))
+        menu.addAction("Copy base name", lambda: self._copy(path.rsplit("/", 1)[-1]))
         menu.exec_(self.viewport().mapToGlobal(pos))
+
+    def _on_header_context_menu(self, pos):
+        col_idx = self.header().logicalIndexAt(pos)
+        if self._view is None or not (0 < col_idx <= len(self._view.columns)):
+            return
+        column = self._view.columns[col_idx - 1]
+        if not column.gradient:
+            return
+        menu = QMenu(self)
+        menu.addAction("Set gradient range…", lambda: self._edit_gradient_range(column))
+        menu.exec_(self.header().viewport().mapToGlobal(pos))
 
     def _edit_gradient_range(self, column):
         lo, hi = schema.gradient_range(column.key)
@@ -295,6 +305,7 @@ class HierarchyTree(QTreeWidget):
         if dlg.exec_() == QDialog.Accepted:
             schema.set_gradient_range(column.key, *dlg.range())
             self.rebuild()
+            self.gradient_range_changed.emit()
 
     @staticmethod
     def _copy(text: str):
