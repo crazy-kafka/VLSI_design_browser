@@ -4,7 +4,8 @@ from PyQt5.QtGui import QImage
 
 # Thermal gradient anchors: dark -> blue -> cyan -> green -> yellow -> red.
 _THERMAL_ANCHORS = [
-    (0.0, (0, 0, 48)),
+    # (0.0, (0, 0, 48)),
+    (0.0, (0, 0, 0)),
     (0.2, (0, 0, 255)),
     (0.4, (0, 255, 255)),
     (0.6, (0, 255, 0)),

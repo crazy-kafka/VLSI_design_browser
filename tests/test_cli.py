@@ -14,6 +14,7 @@ def test_defaults():
     assert args.cache_dir is None
     assert args.force is False
     assert args.verbose is False
+    assert args.grid_size == config.DEFAULT_GRID_SIZE
 
 
 def test_multiple_blocks_and_flags():
@@ -26,6 +27,7 @@ def test_multiple_blocks_and_flags():
         "--cache-dir", "/tmp/cache",
         "--force",
         "--verbose",
+        "--grid_size", "5.0",
     ])
     assert args.block_info == ["a.json", "b.json", "c.json"]
     assert args.compare_block_info == ["a2.json", "b2.json"]
@@ -34,6 +36,7 @@ def test_multiple_blocks_and_flags():
     assert args.cache_dir == "/tmp/cache"
     assert args.force is True
     assert args.verbose is True
+    assert args.grid_size == 5.0
 
 
 def test_required_flags():

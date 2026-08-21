@@ -4,7 +4,7 @@ from vlsi_viewer.heatmap import grid_to_image, thermal_color
 
 
 def test_thermal_anchors():
-    assert thermal_color(0.0) == (0, 0, 48)      # dark navy
+    assert thermal_color(0.0) == (0, 0, 0)       # black (low end)
     assert thermal_color(1.0) == (255, 0, 0)     # red
     mid = thermal_color(0.5)
     # somewhere between blue and green (should have green component)

@@ -65,10 +65,12 @@ python main.py --cell_info sample_data/cell_info.json \
     --compare_block_info sample_data/instance_info_v2.json sample_data/block_B.instance_info_v2.json
 
 # physical layout mode: 2-D heat map of the placed design (mutually exclusive
-# with --compare_block_info; uses the bundled >100k-instance physical sample)
+# with --compare_block_info; uses the bundled ~100k-instance CPU-cluster sample:
+# CPU_CLUSTER with 4 rotated cores, each with IFU / IEX / LSU sub-blocks)
 python main.py --cell_info sample_data/physical/cell_info.json \
     --block_info sample_data/physical/instance_info.json \
-        sample_data/physical/SUB_A.json sample_data/physical/SUB_B.json sample_data/physical/SUB_C.json \
+        sample_data/physical/CORE.json sample_data/physical/IFU.json \
+        sample_data/physical/IEX.json sample_data/physical/LSU.json \
     --physical_mode
 
 # ignore the pickle cache and rebuild
@@ -77,9 +79,10 @@ python main.py --cell_info c.json --block_info a.json --force
 
 `python -m vlsi_viewer …` is equivalent. Run `python main.py --help` for all
 options (`--block_info`, `--compare_block_info`, `--physical_mode`,
-`--min-instances`, `--include-macros`, `--cache-dir`, `--force`, `--verbose`,
-`--version`). `--physical_mode` and `--compare_block_info` are mutually
-exclusive.
+`--min-instances`, `--grid_size`, `--include-macros`, `--cache-dir`, `--force`,
+`--verbose`, `--version`). `--physical_mode` and `--compare_block_info` are
+mutually exclusive. In physical mode, hover the layout view to read the cursor
+coordinates and the heat-map grid value in the bottom-right status bar.
 
 ## Input format
 

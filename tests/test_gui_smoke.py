@@ -138,14 +138,32 @@ def test_layout_view_builds(app, tmp_path):
 
 def test_mainwindow_physical(app, design, tmp_path):
     pd_ = _tiny_physical(tmp_path)
-    pd_._src_paths = [str(tmp_path / "top.json")]
-    pd_._src_cell_path = str(tmp_path / "cell.json")
     w = MainWindow(design, physical=pd_)
     assert hasattr(w, "_layout")
     assert w.statusBar().currentMessage().startswith("Physical mode")
     # hierarchy tree is populated beside the layout
     assert w._tree.topLevelItemCount() == 1
     assert w._tree.topLevelItem(0).data(0, Qt.UserRole) == "TOP"
+    # hover readout label is pinned in the status bar
+    assert w._hover_label is not None
+
+
+def test_layout_hover_reports_coords_and_grid(app, tmp_path):
+    from PyQt5.QtCore import QPointF
+    from vlsi_viewer.ui_layout import LayoutView
+
+    pd_ = _tiny_physical(tmp_path)      # extent (0,0,20,20), grid 4 -> 5x5
+    view = LayoutView(pd_)
+    msgs = []
+    view.hover_changed.connect(msgs.append)
+    # scene point for physical (2, 2): y flipped -> scene (2, 20-2) = (2, 18)
+    view._on_hover(QPointF(2.0, 18.0))
+    assert msgs and "x=2.00" in msgs[-1]
+    assert "y=2.00" in msgs[-1]
+    assert "density[0,0] = 0.250" in msgs[-1]  # 2x2 cell fills 1/4 of the bin
+    # out-of-die hover reports coordinates only
+    view._on_hover(QPointF(50.0, 50.0))
+    assert "x=50.00" in msgs[-1] and "density" not in msgs[-1]
 
 
 def test_diff_view(app, design):

@@ -1,29 +1,103 @@
 {
-  "INV": {
-    "area": 0.6,
-    "size_x": 1,
-    "size_y": 1,
+  "INV_X1": {
+    "area": 0.4,
+    "size_x": 0.4,
+    "size_y": 1.0,
     "is_inverter": true,
     "is_SVT": true
   },
-  "BUF": {
-    "area": 1.2,
-    "size_x": 1,
-    "size_y": 2,
+  "INV_X2": {
+    "area": 0.6,
+    "size_x": 0.6,
+    "size_y": 1.0,
+    "is_inverter": true,
+    "is_LVT": true
+  },
+  "BUF_X2": {
+    "area": 0.8,
+    "size_x": 0.8,
+    "size_y": 1.0,
     "is_buffer": true,
     "is_LVT": true
   },
-  "DFF": {
-    "area": 5.0,
-    "size_x": 2,
-    "size_y": 1,
-    "is_register_cell": true,
+  "NAND2_X1": {
+    "area": 0.8,
+    "size_x": 0.8,
+    "size_y": 1.0,
+    "is_combinational_cell": true,
+    "is_SVT": true
+  },
+  "NOR2_X1": {
+    "area": 0.8,
+    "size_x": 0.8,
+    "size_y": 1.0,
+    "is_combinational_cell": true,
+    "is_LVT": true
+  },
+  "AND2_X1": {
+    "area": 1.0,
+    "size_x": 1.0,
+    "size_y": 1.0,
+    "is_combinational_cell": true,
+    "is_SVT": true
+  },
+  "OR2_X1": {
+    "area": 1.0,
+    "size_x": 1.0,
+    "size_y": 1.0,
+    "is_combinational_cell": true,
+    "is_LVT": true
+  },
+  "XOR2_X1": {
+    "area": 1.4,
+    "size_x": 1.4,
+    "size_y": 1.0,
+    "is_combinational_cell": true,
     "is_ULVT": true
   },
+  "MUX2_X1": {
+    "area": 1.2,
+    "size_x": 1.2,
+    "size_y": 1.0,
+    "is_combinational_cell": true,
+    "is_LVT": true
+  },
+  "DFF_X1": {
+    "area": 1.6,
+    "size_x": 1.6,
+    "size_y": 1.0,
+    "is_register_cell": true,
+    "register_bit_count": 1,
+    "is_SVT": true
+  },
+  "DFF_X2": {
+    "area": 2.0,
+    "size_x": 2.0,
+    "size_y": 1.0,
+    "is_register_cell": true,
+    "register_bit_count": 2,
+    "is_LVT": true
+  },
+  "CLKBUF_X2": {
+    "area": 0.8,
+    "size_x": 0.8,
+    "size_y": 1.0,
+    "is_clock_cell": true,
+    "is_buffer": true,
+    "is_LVT": true
+  },
+  "ICG_X1": {
+    "area": 1.0,
+    "size_x": 1.0,
+    "size_y": 1.0,
+    "is_integrated_clock_gating_cell": true,
+    "is_clock_cell": true,
+    "is_LVT": true
+  },
   "SRAM": {
-    "area": 2000.0,
-    "size_x": 50,
-    "size_y": 40,
+    "area": 1280.0,
+    "size_x": 40.0,
+    "size_y": 32.0,
     "is_macro": true,
     "is_sram": true
   }

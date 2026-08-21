@@ -41,6 +41,9 @@ class MainWindow(QMainWindow):
             splitter.setStretchFactor(0, 3)
             splitter.setStretchFactor(1, 4)
             self.setCentralWidget(splitter)
+            self._hover_label = QLabel("")
+            self.statusBar().addPermanentWidget(self._hover_label)
+            self._layout.hover_changed.connect(self._hover_label.setText)
         else:
             self.setCentralWidget(self._stack)
 

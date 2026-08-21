@@ -1,0 +1,47 @@
+{
+  "top_name": "CORE",
+  "boundary": [
+    [
+      0.0,
+      0.0
+    ],
+    [
+      210.0,
+      0.0
+    ],
+    [
+      210.0,
+      210.0
+    ],
+    [
+      0.0,
+      210.0
+    ]
+  ],
+  "instances": {
+    "ifu": {
+      "cell_name": "IFU",
+      "orient": "N",
+      "leakage_power": 0.0117,
+      "dynamic_power": 0.0949,
+      "location_x": 0.0,
+      "location_y": 0.0
+    },
+    "iex": {
+      "cell_name": "IEX",
+      "orient": "N",
+      "leakage_power": 0.0544,
+      "dynamic_power": 0.0329,
+      "location_x": 0.0,
+      "location_y": 67.2
+    },
+    "lsu": {
+      "cell_name": "LSU",
+      "orient": "N",
+      "leakage_power": 0.0252,
+      "dynamic_power": 0.0839,
+      "location_x": 105.0,
+      "location_y": 67.2
+    }
+  }
+}

@@ -25,6 +25,9 @@ def parse_args(argv=None):
     parser.add_argument(
         "--min-instances", type=int, default=config.DEFAULT_MIN_INST_COUNT, metavar="N",
         help="hide hierarchies with fewer than N instances (default: %(default)s)")
+    parser.add_argument(
+        "--grid_size", type=float, default=config.DEFAULT_GRID_SIZE, metavar="N",
+        help="physical-mode heat-map grid cell size (default: %(default)s)")
     parser.add_argument("--include-macros", action="store_true",
                         help="show macro count/area columns")
     parser.add_argument("--cache-dir", metavar="DIR",
@@ -49,9 +52,8 @@ def main(argv=None):
         design2 = None
         if args.physical_mode:
             from .physical import build_physical
-            physical = build_physical(args.block_info, args.cell_info)
-            physical._src_paths = list(args.block_info)
-            physical._src_cell_path = args.cell_info
+            physical = build_physical(args.block_info, args.cell_info,
+                                      grid_size=args.grid_size)
         elif args.compare_block_info:
             design2 = load_or_build(args.compare_block_info, args.cell_info,
                                     cache_dir=args.cache_dir, force=args.force)

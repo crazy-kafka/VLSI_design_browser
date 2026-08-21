@@ -5,3 +5,6 @@ DEFAULT_MIN_INST_COUNT = 100
 
 # Directory name for the pickle cache, created beside the input JSONs.
 CACHE_DIR_NAME = ".vlsi_cache"
+
+# Physical-mode heat-map grid cell size.
+DEFAULT_GRID_SIZE = 3.0

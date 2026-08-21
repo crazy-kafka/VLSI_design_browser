@@ -1,9 +1,9 @@
 """Layout view: 2-D heat map + boundary outlines, driven by GenericGraphicsView."""
-from PyQt5.QtCore import QPointF, Qt
+from PyQt5.QtCore import QPointF, Qt, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QPolygonF
 from PyQt5.QtWidgets import (
     QComboBox, QDoubleSpinBox, QGraphicsPixmapItem, QGraphicsPolygonItem,
-    QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
 
 from .genericView import GenericGraphicsView
@@ -21,16 +21,20 @@ class LayoutView(QWidget):
     vertically and boundary vertices are mapped ``(x, y) -> (x, y0 + y1 - y)``.
     """
 
+    hover_changed = pyqtSignal(str)
+
     def __init__(self, physical: PhysicalData, parent=None):
         super().__init__(parent)
         self._physical = physical
         self._kind = "density"
         self._lo = 0.0
         self._hi = 1.0
+        self._last_scene_pt = None
 
         self._build_controls()
         self._view = GenericGraphicsView(self)
         self._view.enableFitKet(Qt.Key_F)
+        self._view.sigSceneMouseMoved.connect(self._on_hover)
         scene = self._view.scene()
         self._pix_item = QGraphicsPixmapItem()
         scene.addItem(self._pix_item)
@@ -68,13 +72,6 @@ class LayoutView(QWidget):
         self.max_spin.valueChanged.connect(self._apply_range)
         self._controls_row.addWidget(self.max_spin)
 
-        self._controls_row.addWidget(QLabel("Grid:"))
-        self.grid_spin = QSpinBox()
-        self.grid_spin.setRange(1, 1000)
-        self.grid_spin.setValue(int(self._physical.grid_size))
-        self.grid_spin.valueChanged.connect(self._on_grid)
-        self._controls_row.addWidget(self.grid_spin)
-
         fit_btn = QPushButton("Fit")
         fit_btn.clicked.connect(self._fit)
         self._controls_row.addWidget(fit_btn)
@@ -99,15 +96,8 @@ class LayoutView(QWidget):
         self._kind = HEAT_TYPES[idx][0]
         self._autoset_range()
         self.refresh()
-
-    def _on_grid(self, _v):
-        from . import physical as ph
-        self._physical = ph.build_physical(
-            self._physical._src_paths, self._physical._src_cell_path,
-            grid_size=float(self.grid_spin.value()))
-        self._autoset_range()
-        self.refresh()
-        self._fit()
+        if self._last_scene_pt is not None:
+            self._on_hover(self._last_scene_pt)
 
     def _apply_range(self):
         self._lo = self.min_spin.value()
@@ -129,6 +119,22 @@ class LayoutView(QWidget):
         self._lo, self._hi = lo, hi if hi > 0 else 1.0
         self.legend_lo.setText(f"{self._lo:.3g}")
         self.legend_hi.setText(f"{self._hi:.3g}")
+
+    def _on_hover(self, scene_pt):
+        """Emit the physical coordinates + heat value for the hovered scene pt."""
+        self._last_scene_pt = scene_pt
+        x0, y0, x1, y1 = self._physical.extent
+        px = scene_pt.x()
+        py = y0 + y1 - scene_pt.y()          # invert _flip_y
+        g = self._physical.grid_size
+        ix = int((px - x0) // g)
+        iy = int((py - y0) // g)
+        if 0 <= ix < self._physical.cols and 0 <= iy < self._physical.rows:
+            val = self._physical.heat(self._kind)[iy, ix]
+            self.hover_changed.emit(
+                f"x={px:.2f}  y={py:.2f}   {self._kind}[{iy},{ix}] = {val:.3f}")
+        else:
+            self.hover_changed.emit(f"x={px:.2f}  y={py:.2f}")
 
     def _flip_y(self, x, y):
         x0, y0, _x1, y1 = self._physical.extent

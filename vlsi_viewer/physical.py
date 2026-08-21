@@ -84,13 +84,15 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0) -> PhysicalDa
     sizes = {name: (row["size_x"], row["size_y"])
              for name, row in cells.iterrows()}
 
-    chain = []        # deepest-first list of (orient, origin) container frames
+    chain = []        # outermost-first list of (orient, origin) container frames
     boundary_polys = []
     boxes = []
 
     def global_pt(pt):
+        # A leaf's point is in its innermost block's local frame; compose the
+        # container frames innermost-first (reverse push order) to reach global.
         x, y = pt
-        for orient, origin in chain:
+        for orient, origin in reversed(chain):
             x, y = CoordinateProcess.dbTransform("to_global", (x, y), orient, origin)
         return x, y
 
@@ -169,6 +171,12 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0) -> PhysicalDa
                 frac = ov / box_area
                 leakage[iy, ix] += frac * leak
                 dynamic[iy, ix] += frac * dyn
+
+    # Density is a ratio in [0, 1]. Clamp float round-off so fully-packed bins
+    # land on exactly 1.0 (the heat map renders 100% density as white) instead
+    # of 1.0 +/- 1e-13.
+    density = np.clip(density, 0.0, 1.0)
+    density[density > 1.0 - 1e-9] = 1.0
 
     logger.info("physical: %d cell box(es), grid %d x %d, extent %s",
                 len(boxes), rows, cols, extent)
