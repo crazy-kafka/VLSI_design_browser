@@ -1,0 +1,30 @@
+{
+  "INV": {
+    "area": 0.6,
+    "size_x": 1,
+    "size_y": 1,
+    "is_inverter": true,
+    "is_SVT": true
+  },
+  "BUF": {
+    "area": 1.2,
+    "size_x": 1,
+    "size_y": 2,
+    "is_buffer": true,
+    "is_LVT": true
+  },
+  "DFF": {
+    "area": 5.0,
+    "size_x": 2,
+    "size_y": 1,
+    "is_register_cell": true,
+    "is_ULVT": true
+  },
+  "SRAM": {
+    "area": 2000.0,
+    "size_x": 50,
+    "size_y": 40,
+    "is_macro": true,
+    "is_sram": true
+  }
+}

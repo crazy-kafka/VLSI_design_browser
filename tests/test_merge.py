@@ -4,8 +4,8 @@ import logging
 from vlsi_viewer.metrics import build_design, load_blocks
 
 
-def _block(tmp_path, name, instances):
-    p = tmp_path / f"{name}.json"
+def _block(tmp_path, name, instances, fname=None):
+    p = tmp_path / (fname or f"{name}.json")
     p.write_text(json.dumps({"top_name": name, "instances": instances}))
     return str(p)
 
@@ -13,6 +13,28 @@ def _block(tmp_path, name, instances):
 def test_single_block_relative_paths(tmp_path):
     df = load_blocks([_block(tmp_path, "TOP", {"a/leaf": {"cell_name": "C1"}})])
     assert df["leaf_instance_name"].tolist() == ["TOP/a/leaf"]
+
+
+def test_duplicate_top_name_merges_earlier_wins(tmp_path):
+    a1 = _block(tmp_path, "A", {
+        "x": {"cell_name": "C1", "is_physical_only": False},
+        "shared": {"cell_name": "C1"},
+    }, fname="A1.json")
+    a2 = _block(tmp_path, "A", {
+        "shared": {"cell_name": "C2"},   # conflicts -> A1 wins
+        "y": {"cell_name": "C2"},
+    }, fname="A2.json")
+    a3 = _block(tmp_path, "A", {
+        "shared": {"cell_name": "C3"},   # conflicts -> A1 wins
+        "z": {"cell_name": "C3"},
+    }, fname="A3.json")
+    df = load_blocks([a1, a2, a3]).set_index("leaf_instance_name")
+    # union of all leaves present
+    assert set(df.index) == {"A/x", "A/shared", "A/y", "A/z"}
+    # earlier file wins on the conflicting leaf
+    assert df.loc["A/shared", "cell_name"] == "C1"
+    assert df.loc["A/y", "cell_name"] == "C2"
+    assert df.loc["A/z", "cell_name"] == "C3"
 
 
 def test_subblock_nested_under_parent(tmp_path):

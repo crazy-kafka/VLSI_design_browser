@@ -14,6 +14,21 @@ from vlsi_viewer.ui_search import SearchDialog
 from vlsi_viewer.ui_tree import BAR_COLOR_ROLE, BAR_ROLE, HierarchyTree
 
 
+def _tiny_physical(tmp_path):
+    import json
+    from vlsi_viewer.physical import build_physical
+    cell = tmp_path / "cell.json"
+    cell.write_text(json.dumps({"C1": {"area": 4, "size_x": 2, "size_y": 2}}))
+    top = tmp_path / "top.json"
+    top.write_text(json.dumps({
+        "top_name": "TOP",
+        "boundary": [(0, 0), (20, 20)],
+        "instances": {"c": {"cell_name": "C1", "location_x": 0, "location_y": 0,
+                            "leakage_power": 1.0, "dynamic_power": 2.0}},
+    }))
+    return build_physical([str(top)], str(cell), grid_size=4.0)
+
+
 @pytest.fixture(scope="module")
 def app():
     return QApplication.instance() or QApplication([])
@@ -108,6 +123,29 @@ def test_gradient_range_sync_between_tabs(app, design):
         assert top_v2.data(3, BAR_ROLE) == pytest.approx(7 / 11.5)
     finally:
         schema.set_gradient_range("ulvt_ratio", 0.0, 0.35)
+
+
+def test_layout_view_builds(app, tmp_path):
+    from vlsi_viewer.genericView import GenericGraphicsView
+    from vlsi_viewer.ui_layout import LayoutView
+    pd_ = _tiny_physical(tmp_path)
+    view = LayoutView(pd_)
+    assert isinstance(view._view, GenericGraphicsView)
+    assert len(view._view.scene().items()) >= 2  # pixmap + boundary outline
+    assert len(view._boundary_items) == 1
+    assert view._pix_item.pixmap() is not None and not view._pix_item.pixmap().isNull()
+
+
+def test_mainwindow_physical(app, design, tmp_path):
+    pd_ = _tiny_physical(tmp_path)
+    pd_._src_paths = [str(tmp_path / "top.json")]
+    pd_._src_cell_path = str(tmp_path / "cell.json")
+    w = MainWindow(design, physical=pd_)
+    assert hasattr(w, "_layout")
+    assert w.statusBar().currentMessage().startswith("Physical mode")
+    # hierarchy tree is populated beside the layout
+    assert w._tree.topLevelItemCount() == 1
+    assert w._tree.topLevelItem(0).data(0, Qt.UserRole) == "TOP"
 
 
 def test_diff_view(app, design):

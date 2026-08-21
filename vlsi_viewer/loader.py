@@ -47,8 +47,50 @@ def _cast(df, specs):
     return df
 
 
+def _parse_boundary(raw):
+    """Validate a block boundary -> list of (x, y) points, or None.
+
+    Two points are expanded to a 4-point rectangle. Otherwise the points must
+    form a rectilinear polygon (axis-aligned edges, non-degenerate).
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+        raise ValueError("boundary must be a list of 2 or more (x, y) points")
+    pts = []
+    for p in raw:
+        if not isinstance(p, (list, tuple)) or len(p) != 2:
+            raise ValueError(f"invalid boundary point: {p!r}")
+        pts.append((float(p[0]), float(p[1])))
+
+    if len(pts) == 2:
+        # two opposite corners -> axis-aligned rectangle
+        (x0, y0), (x1, y1) = pts
+        return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+
+    if pts[0] == pts[-1]:
+        pts = pts[:-1]  # strip an explicit closing duplicate
+    if len(pts) < 4:
+        raise ValueError("boundary polygon must have at least 4 distinct points")
+
+    for i in range(len(pts)):
+        ax, ay = pts[i]
+        bx, by = pts[(i + 1) % len(pts)]
+        if ax != bx and ay != by:
+            raise ValueError("boundary must be a rectilinear polygon (axis-aligned edges)")
+
+    area = 0.0
+    for i in range(len(pts)):
+        ax, ay = pts[i]
+        bx, by = pts[(i + 1) % len(pts)]
+        area += ax * by - bx * ay
+    if abs(area) < 1e-9:
+        raise ValueError("boundary polygon is degenerate (zero area)")
+    return pts
+
+
 def load_block(path: str):
-    """Load one instance_info.json block -> ``(top_name, instances DataFrame)``."""
+    """Load one instance_info.json block -> ``(top_name, instances, boundary)``."""
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -66,8 +108,9 @@ def load_block(path: str):
 
     df = pd.DataFrame(records, columns=["leaf_instance_name"] + [s.name for s in schema.INSTANCE_ATTRS])
     _cast(df, schema.INSTANCE_ATTRS)
+    boundary = _parse_boundary(data.get("boundary"))
     logger.info("Loaded block '%s' with %d instance(s) from %s", top_name, len(df), path)
-    return top_name, df
+    return top_name, df, boundary
 
 
 def load_cell_info(path: str) -> pd.DataFrame:

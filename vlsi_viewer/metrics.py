@@ -39,17 +39,33 @@ def _join(prefix: str, rel: str) -> str:
     return f"{prefix}/{rel}" if prefix else rel
 
 
+def _merge_blocks(earlier: pd.DataFrame, later: pd.DataFrame) -> pd.DataFrame:
+    """Merge two same-top_name blocks; the earlier file wins on duplicate leaves."""
+    if len(earlier) == 0:
+        return later
+    if len(later) == 0:
+        return earlier
+    a = earlier.set_index("leaf_instance_name")
+    b = later.set_index("leaf_instance_name")
+    merged = a.combine_first(b)  # a (earlier) takes precedence
+    return merged.reset_index()
+
+
 def load_blocks(block_paths) -> pd.DataFrame:
     """Load every block and merge them into flat leaves with absolute paths.
 
     A leaf whose ``cell_name`` matches another block's ``top_name`` is a block
     instance: that block's leaves are nested at the leaf's absolute path.
+
+    Files sharing a ``top_name`` are merged; the earlier file takes precedence
+    on duplicate leaf paths (A.1 absorbs A.2, which absorbs A.3).
     """
     blocks = {}
     for p in block_paths:
-        name, df = load_block(p)
+        name, df, _boundary = load_block(p)
         if name in blocks:
-            logger.warning("duplicate top_name '%s'; overriding with %s", name, p)
+            logger.warning("duplicate top_name '%s'; merging %s (earlier file wins)", name, p)
+            df = _merge_blocks(blocks[name], df)
         blocks[name] = df
 
     names = set(blocks)

@@ -16,9 +16,12 @@ def parse_args(argv=None):
                         help="path to cell_info.json")
     parser.add_argument("--block_info", required=True, nargs="+", metavar="BLOCK",
                         help="one or more instance_info.json block files")
-    parser.add_argument("--compare_block_info", nargs="+", metavar="BLOCK",
-                        help="instance_info.json block files for the second design "
-                             "(reuses --cell_info)")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--compare_block_info", nargs="+", metavar="BLOCK",
+                      help="instance_info.json block files for the second design "
+                           "(reuses --cell_info)")
+    mode.add_argument("--physical_mode", action="store_true",
+                      help="render a 2-D heat map (layout view) instead of compare")
     parser.add_argument(
         "--min-instances", type=int, default=config.DEFAULT_MIN_INST_COUNT, metavar="N",
         help="hide hierarchies with fewer than N instances (default: %(default)s)")
@@ -39,11 +42,17 @@ def main(argv=None):
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(levelname)s %(name)s: %(message)s")
 
+    physical = None
     try:
         design1 = load_or_build(args.block_info, args.cell_info,
                                 cache_dir=args.cache_dir, force=args.force)
         design2 = None
-        if args.compare_block_info:
+        if args.physical_mode:
+            from .physical import build_physical
+            physical = build_physical(args.block_info, args.cell_info)
+            physical._src_paths = list(args.block_info)
+            physical._src_cell_path = args.cell_info
+        elif args.compare_block_info:
             design2 = load_or_build(args.compare_block_info, args.cell_info,
                                     cache_dir=args.cache_dir, force=args.force)
     except Exception as exc:  # surface load errors on the CLI, no window needed
@@ -57,7 +66,7 @@ def main(argv=None):
 
     app = QApplication(sys.argv)
     theme.apply_theme(app)
-    win = MainWindow(design1, design2,
+    win = MainWindow(design1, design2, physical=physical,
                      threshold=args.min_instances, include_macros=args.include_macros)
     win.show()
     return app.exec_()

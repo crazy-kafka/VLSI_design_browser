@@ -3,12 +3,13 @@ import logging
 
 from PyQt5.QtWidgets import (
     QAction, QCheckBox, QComboBox, QLabel, QLineEdit, QMainWindow, QSpinBox,
-    QStackedWidget, QToolBar,
+    QSplitter, QStackedWidget, QToolBar,
 )
 
 from . import config
 from .model import view_for_single
 from .ui_compare import CompareWidget
+from .ui_layout import LayoutView
 from .ui_search import SearchDialog
 from .ui_tree import HierarchyTree
 
@@ -16,21 +17,32 @@ logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, design1=None, design2=None,
+    def __init__(self, design1=None, design2=None, physical=None,
                  threshold=config.DEFAULT_MIN_INST_COUNT, include_macros=False):
         super().__init__()
         self.setWindowTitle("VLSI Hierarchy Analyzer")
-        self.resize(1200, 700)
+        self.resize(1400, 800)
 
         self._design1 = design1
         self._design2 = design2
+        self._physical = physical
 
         self._stack = QStackedWidget()
         self._tree = HierarchyTree()
         self._compare = CompareWidget()
         self._stack.addWidget(self._tree)
         self._stack.addWidget(self._compare)
-        self.setCentralWidget(self._stack)
+
+        if physical is not None:
+            self._layout = LayoutView(physical)
+            splitter = QSplitter()
+            splitter.addWidget(self._stack)
+            splitter.addWidget(self._layout)
+            splitter.setStretchFactor(0, 3)
+            splitter.setStretchFactor(1, 4)
+            self.setCentralWidget(splitter)
+        else:
+            self.setCentralWidget(self._stack)
 
         self._tree.sort_changed.connect(self._on_sort_changed)
         for t in (self._compare.v1, self._compare.v2, self._compare.diff):
@@ -120,6 +132,11 @@ class MainWindow(QMainWindow):
             tree.expand_to(path)
 
     def _show_status(self):
+        if self._physical is not None:
+            self.statusBar().showMessage(
+                f"Physical mode · {self._physical.rows}×{self._physical.cols} grid · "
+                f"top {self._physical.top_name}")
+            return
         if self._design1 is None:
             self.statusBar().showMessage("No data loaded.")
             return
