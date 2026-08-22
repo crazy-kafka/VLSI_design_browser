@@ -3,6 +3,7 @@ import hashlib
 import logging
 import os
 import pickle
+import time
 
 import numpy as np
 import pandas as pd
@@ -244,10 +245,22 @@ def _children_map(hier: pd.DataFrame):
 
 def build_design(block_paths, cell_path: str) -> DesignData:
     """Load all blocks, merge into one hierarchy, and build the preprocessed design."""
+    t0 = time.perf_counter()
     inst = load_blocks(block_paths)
+    logger.info("tree: loaded %d leaf instance(s) (%.1fs)", len(inst),
+                time.perf_counter() - t0)
+    t0 = time.perf_counter()
     cells = load_cell_info(cell_path)
+    logger.info("tree: loaded %d cell(s) from cell library (%.1fs)", len(cells),
+                time.perf_counter() - t0)
+    t0 = time.perf_counter()
     leaves = _build_leaves(inst, cells)
+    logger.info("tree: joined cell attributes -> %d leaf(s) (%.1fs)", len(leaves),
+                time.perf_counter() - t0)
+    t0 = time.perf_counter()
     hier = _flatten(leaves)
+    logger.info("tree: flattened %d hierarchy node(s) (%.1fs)", hier.shape[0],
+                time.perf_counter() - t0)
 
     missing = sorted(
         leaves.loc[leaves["is_missing"], "cell_name"].dropna().astype(str).unique().tolist()

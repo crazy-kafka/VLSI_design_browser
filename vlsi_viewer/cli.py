@@ -28,6 +28,10 @@ def parse_args(argv=None):
     parser.add_argument(
         "--grid_size", type=float, default=config.DEFAULT_GRID_SIZE, metavar="N",
         help="physical-mode heat-map grid cell size (default: %(default)s)")
+    parser.add_argument(
+        "--contour_gap", type=float, default=None, metavar="N",
+        help="physical-mode hierarchy contour merge gap; defaults to "
+             f"{config.DEFAULT_CONTOUR_GAP_FACTOR} x grid_size")
     parser.add_argument("--include-macros", action="store_true",
                         help="show macro count/area columns")
     parser.add_argument("--cache-dir", metavar="DIR",
@@ -53,7 +57,8 @@ def main(argv=None):
         if args.physical_mode:
             from .physical import build_physical
             physical = build_physical(args.block_info, args.cell_info,
-                                      grid_size=args.grid_size)
+                                      grid_size=args.grid_size,
+                                      contour_gap=args.contour_gap)
         elif args.compare_block_info:
             design2 = load_or_build(args.compare_block_info, args.cell_info,
                                     cache_dir=args.cache_dir, force=args.force)

@@ -96,6 +96,50 @@ def test_nested_rotated_block_two_levels(tmp_path):
     assert pd_.boxes[0][3] == pytest.approx(17.0)
 
 
+def test_ulvt_density_grid(tmp_path):
+    """The ULVT density grid counts only is_ULVT cells (area / bin area)."""
+    import json as _json
+    cell = tmp_path / "cell.json"
+    cell.write_text(_json.dumps({
+        "U": {"area": 4, "size_x": 2, "size_y": 2, "is_ULVT": True},
+        "S": {"area": 4, "size_x": 2, "size_y": 2, "is_SVT": True},
+    }))
+    b = _block(tmp_path, "TOP",
+               {"u": {"cell_name": "U", "location_x": 0, "location_y": 0},
+                "s": {"cell_name": "S", "location_x": 10, "location_y": 0}},
+               boundary=[(0, 0), (20, 20)])
+    pd_ = build_physical([b], str(cell), grid_size=4.0)
+    assert pd_.density[0, 0] == pytest.approx(4 / 16)   # ULVT cell
+    assert pd_.ulvt[0, 0] == pytest.approx(4 / 16)
+    assert pd_.density[0, 2] == pytest.approx(4 / 16)   # SVT cell at x=10
+    assert pd_.ulvt[0, 2] == 0.0                        # SVT excluded from ulvt
+
+
+def test_path_tagging_and_hierarchy_density(tmp_path):
+    import json as _json
+    cell = tmp_path / "cell.json"
+    cell.write_text(_json.dumps({
+        "M": {"area": 4, "size_x": 2, "size_y": 2, "is_macro": True},
+        "S": {"area": 4, "size_x": 2, "size_y": 2, "is_SVT": True},
+    }))
+    b = _block(tmp_path, "TOP",
+               {"m": {"cell_name": "M", "location_x": 0, "location_y": 0},
+                "s": {"cell_name": "S", "location_x": 5, "location_y": 0}},
+               boundary=[(0, 0), (20, 20)])
+    pd_ = build_physical([b], str(cell), grid_size=4.0)
+    # boxes carry their full hierarchy path and macro flag
+    paths = {box[7] for box in pd_.boxes}
+    assert paths == {"TOP/m", "TOP/s"}
+    macro_flags = {box[7]: box[8] for box in pd_.boxes}
+    assert macro_flags["TOP/m"] is True and macro_flags["TOP/s"] is False
+    # slice-based path access returns exactly that hierarchy's boxes
+    assert len(pd_.boxes_for("TOP")) == 2
+    assert len(pd_.boxes_for("TOP/m")) == 1
+    # density = non_macro_area / (contour_area - macro_area); both in [0,1]
+    d = pd_.density_for("TOP")
+    assert 0.0 <= d <= 1.0
+
+
 def test_density_clamped_to_one(tmp_path):
     """Two fully-overlapping cells produce raw density 2.0; the grid clamps it
     to exactly 1.0 so fully-packed bins render white (not red/white noise)."""

@@ -136,6 +136,47 @@ def test_layout_view_builds(app, tmp_path):
     assert view._pix_item.pixmap() is not None and not view._pix_item.pixmap().isNull()
 
 
+def test_layout_contour_toggle(app, tmp_path):
+    import json as _json
+    from vlsi_viewer.physical import build_physical
+    from vlsi_viewer.ui_layout import LayoutView
+    cell = tmp_path / "cell.json"
+    cell.write_text(_json.dumps({"C1": {"area": 4, "size_x": 2, "size_y": 2}}))
+    top = tmp_path / "top.json"
+    top.write_text(_json.dumps({
+        "top_name": "TOP",
+        "boundary": [(0, 0), (20, 20)],
+        "instances": {
+            "a": {"cell_name": "C1", "location_x": 0, "location_y": 0},
+            "b": {"cell_name": "C1", "location_x": 2, "location_y": 0},
+        },
+    }))
+    pd_ = build_physical([str(top)], str(cell), grid_size=4.0)
+    view = LayoutView(pd_)
+    assert view._contour_path is None
+    view.toggle_contour("TOP")           # show
+    assert view._contour_path == "TOP"
+    assert len(view._contour_items) >= 1
+    # contour items are above the boundary outlines (z=20)
+    assert view._contour_items[0].zValue() == 20
+    view.toggle_contour("TOP")           # click again -> hide
+    assert view._contour_path is None
+    assert view._contour_items == []
+
+
+def test_layout_legend_overlay(app, tmp_path):
+    from vlsi_viewer.ui_layout import LayoutView
+    pd_ = _tiny_physical(tmp_path)
+    view = LayoutView(pd_)
+    # legend is a fixed child of the graphics view (not a scene item)
+    assert view._legend is not None
+    assert view._legend.parent() is view._view
+    # set_range stores the range (drives the 0/25/50/75/100% tick values)
+    view._legend.set_range(0.2, 0.8)
+    assert view._legend._lo == 0.2
+    assert view._legend._hi == 0.8
+
+
 def test_mainwindow_physical(app, design, tmp_path):
     pd_ = _tiny_physical(tmp_path)
     w = MainWindow(design, physical=pd_)

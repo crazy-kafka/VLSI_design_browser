@@ -1,5 +1,5 @@
 """Layout view: 2-D heat map + boundary outlines, driven by GenericGraphicsView."""
-from PyQt5.QtCore import QPointF, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QPointF, Qt, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QPolygonF
 from PyQt5.QtWidgets import (
     QComboBox, QDoubleSpinBox, QGraphicsPixmapItem, QGraphicsPolygonItem,
@@ -7,11 +7,11 @@ from PyQt5.QtWidgets import (
 )
 
 from .genericView import GenericGraphicsView
-from .heatmap import grid_to_image
+from .heatmap import grid_to_image, thermal_color
 from .physical import PhysicalData
 
 HEAT_TYPES = [("density", "Cell density"), ("leakage", "Leakage power"),
-              ("dynamic", "Dynamic power")]
+              ("dynamic", "Dynamic power"), ("ulvt", "ULVT density")]
 
 
 class LayoutView(QWidget):
@@ -39,12 +39,14 @@ class LayoutView(QWidget):
         self._pix_item = QGraphicsPixmapItem()
         scene.addItem(self._pix_item)
         self._boundary_items = []
+        self._contour_items = []
+        self._contour_path = None
 
         root = QVBoxLayout(self)
         root.addLayout(self._controls_row)
         root.addWidget(self._view, 1)
-        root.addLayout(self._legend_row())
 
+        self._build_legend()
         self._autoset_range()
         self.refresh()
         self._fit()
@@ -77,19 +79,21 @@ class LayoutView(QWidget):
         self._controls_row.addWidget(fit_btn)
         self._controls_row.addStretch(1)
 
-    def _legend_row(self):
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Legend"))
-        bar = QLabel()
-        bar.setFixedSize(120, 14)
-        bar.setPixmap(_legend_pixmap())
-        row.addWidget(bar)
-        self.legend_lo = QLabel("0")
-        self.legend_hi = QLabel("1")
-        row.addWidget(self.legend_lo)
-        row.addWidget(self.legend_hi)
-        row.addStretch(1)
-        return row
+    # -- fixed overlay legend ---------------------------------------------
+    def _build_legend(self):
+        """Create a vertical legend widget pinned to the view's top-right."""
+        self._legend = LegendWidget(self._view)
+        self._view.installEventFilter(self)
+        self._position_legend()
+
+    def _position_legend(self):
+        m = 8
+        self._legend.move(self._view.width() - self._legend.width() - m, m)
+
+    def eventFilter(self, obj, ev):
+        if obj is self._view and ev.type() == QEvent.Resize:
+            self._position_legend()
+        return super().eventFilter(obj, ev)
 
     # -- rendering ---------------------------------------------------------
     def _on_type(self, idx):
@@ -102,13 +106,14 @@ class LayoutView(QWidget):
     def _apply_range(self):
         self._lo = self.min_spin.value()
         self._hi = max(self.max_spin.value(), self._lo + 1e-9)
+        self._legend.set_range(self._lo, self._hi)
         self.refresh()
 
     def _autoset_range(self):
         arr = self._physical.heat(self._kind)
         hi = float(arr.max()) if arr.size else 1.0
         lo = 0.0
-        if self._kind != "density":
+        if self._kind not in ("density", "ulvt"):
             hi = max(hi, 1e-6)
         self.min_spin.blockSignals(True)
         self.max_spin.blockSignals(True)
@@ -117,8 +122,7 @@ class LayoutView(QWidget):
         self.min_spin.blockSignals(False)
         self.max_spin.blockSignals(False)
         self._lo, self._hi = lo, hi if hi > 0 else 1.0
-        self.legend_lo.setText(f"{self._lo:.3g}")
-        self.legend_hi.setText(f"{self._hi:.3g}")
+        self._legend.set_range(self._lo, self._hi)
 
     def _on_hover(self, scene_pt):
         """Emit the physical coordinates + heat value for the hovered scene pt."""
@@ -153,6 +157,32 @@ class LayoutView(QWidget):
             self._view.scene().addItem(item)
             self._boundary_items.append(item)
 
+    # -- hierarchy contour overlay ----------------------------------------
+    def toggle_contour(self, path: str):
+        """Show the contour for ``path``; click again (same path) hides it."""
+        if self._contour_path == path:
+            self._clear_contour()
+        else:
+            self._clear_contour()
+            loops, _ = self._physical.contour_for(path)
+            for loop in loops:
+                poly = QPolygonF([self._flip_y(x, y) for (x, y) in loop])
+                item = QGraphicsPolygonItem(poly)
+                pen = QPen(QColor(0xFF, 0xD4, 0x00), 2)
+                pen.setStyle(Qt.DashLine)
+                item.setPen(pen)
+                item.setBrush(QBrush(Qt.NoBrush))
+                item.setZValue(20)  # above boundary outlines (z=10)
+                self._view.scene().addItem(item)
+                self._contour_items.append(item)
+            self._contour_path = path
+
+    def _clear_contour(self):
+        for it in self._contour_items:
+            self._view.scene().removeItem(it)
+        self._contour_items = []
+        self._contour_path = None
+
     def refresh(self):
         x0, y0, x1, y1 = self._physical.extent
         arr = self._physical.heat(self._kind)
@@ -168,15 +198,51 @@ class LayoutView(QWidget):
         self._view.fit()
 
 
-def _legend_pixmap(width=120, height=14):
-    """A horizontal thermal gradient swatch for the legend."""
-    from .heatmap import thermal_color
-    pm = QPixmap(width, height)
-    pm.fill(Qt.white)
-    painter = QPainter(pm)
-    for x in range(width):
-        c = QColor(*thermal_color(x / (width - 1)))
-        painter.setPen(c)
-        painter.drawLine(x, 0, x, height)
-    painter.end()
-    return pm
+class LegendWidget(QWidget):
+    """A vertical thermal legend overlaid on the layout view.
+
+    Paints a black(0) -> white(1) gradient bar with value ticks at 0/25/50/75/100%
+    of the current (lo, hi) range. It is a child widget of the graphics view (not
+    a scene item), so pan / zoom / fit never move it.
+    """
+
+    _W = 92
+    _H = 200
+    _BAR_W = 18
+    _BAR_X = 6
+    _TOP = 8
+    _BOTTOM = 190
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._lo = 0.0
+        self._hi = 1.0
+        self.setFixedSize(self._W, self._H)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+    def set_range(self, lo, hi):
+        self._lo = lo
+        self._hi = hi
+        self.update()
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(0, 0, 0, 110))  # readable backdrop
+        bar_h = self._BOTTOM - self._TOP
+
+        for y in range(self._TOP, self._BOTTOM):
+            t = 1.0 - (y - self._TOP) / max(1, bar_h - 1)
+            p.setPen(QColor(*thermal_color(t)))
+            p.drawLine(self._BAR_X, y, self._BAR_X + self._BAR_W, y)
+
+        p.setPen(QColor(0xE8, 0xEE, 0xF2))
+        p.drawRect(self._BAR_X, self._TOP, self._BAR_W, bar_h)
+
+        for f in (0.0, 0.25, 0.5, 0.75, 1.0):
+            y = self._BOTTOM - int(round(f * bar_h))  # 0% at bottom, 100% at top
+            val = self._lo + f * (self._hi - self._lo)
+            p.setPen(QColor(0xE8, 0xEE, 0xF2))
+            p.drawLine(self._BAR_X + self._BAR_W, y, self._BAR_X + self._BAR_W + 4, y)
+            p.setPen(QColor(255, 255, 255))
+            p.drawText(self._BAR_X + self._BAR_W + 7, y + 4, f"{val:.3g}")
+        p.end()

@@ -1,6 +1,8 @@
 """Column/view abstractions bridging :class:`DesignData` to the Qt tree widgets."""
 import fnmatch
+import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Callable, List
 
@@ -9,6 +11,8 @@ import pandas as pd
 
 from . import schema
 from .metrics import diff_table
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -76,6 +80,37 @@ class TreeView:
     counts: pd.Series       # path -> instance count (threshold filtering)
     columns: List[Column]
     paths: List[str]        # all hierarchy paths (for search)
+
+
+class _LazyDensity:
+    """Series-like mapping that computes a hierarchy's density on first access.
+
+    The tree only calls ``.get(path)`` for rows it actually renders (lazily on
+    expand), so a large design computes density only for the nodes the user sees
+    instead of every node at startup. Each result is cached.
+    """
+
+    def __init__(self, physical):
+        self._physical = physical
+        self._cache = {}
+
+    def get(self, path, default=None):
+        if path not in self._cache:
+            t0 = time.perf_counter()
+            self._cache[path] = self._physical.density_for(path)
+            logger.info("hierarchy density: %s (%.1fs)", path,
+                        time.perf_counter() - t0)
+        return self._cache[path]
+
+
+def density_column(physical) -> Column:
+    """Physical-only "Density%" column (higher-better, gradient range 20%-65%).
+
+    Values are computed lazily per rendered hierarchy node (see _LazyDensity).
+    """
+    return Column(label="Density%", series=_LazyDensity(physical),
+                  fmt=lambda v: schema.format_metric("percent", v),
+                  gradient="higher_better", key="density")
 
 
 def view_for_single(design, include_macros: bool = False) -> TreeView:

@@ -8,3 +8,6 @@ CACHE_DIR_NAME = ".vlsi_cache"
 
 # Physical-mode heat-map grid cell size.
 DEFAULT_GRID_SIZE = 3.0
+
+# Hierarchy contour: merge instances closer than this many grid cells.
+DEFAULT_CONTOUR_GAP_FACTOR = 2.0

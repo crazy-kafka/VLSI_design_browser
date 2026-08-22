@@ -111,6 +111,7 @@ _GRADIENT_RANGES = {
     "ulvt_ratio": [0.0, 0.35],
     "mb_ratio": [0.50, 0.90],
     "d1d2_ratio": [0.55, 0.90],
+    "density": [0.20, 0.65],   # physical-mode hierarchy density (higher better)
 }
 # default range for compare-mode relative-difference columns (ΔX%)
 for _m in METRICS:

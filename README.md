@@ -24,17 +24,21 @@ two-version diff view and an optional physical layout view (2-D heat map).
 - **Min-instance threshold** — hide small hierarchies from the tree (UI-only).
 - **Two-version comparison** — V1 / V2 / Diff tabs with per-metric Δabs and Δrel.
 - **Physical layout mode** — `--physical_mode` renders the placed design as a
-  2-D heat map (cell density / leakage power / dynamic power) beside the
-  hierarchy tree. Interactive pan/zoom/fit, adjustable grid size and color range,
-  thermal legend, and outlined block boundaries. Placement follows DEF semantics
-  (lower-left `location_x/y` + `orient`); nested sub-blocks are composed through
-  their placement frame.
+  2-D heat map (cell density / leakage power / dynamic power / ULVT density)
+  beside the hierarchy tree. Interactive pan/zoom/fit, a color range adjustable
+  in the UI, a fixed vertical thermal legend, and outlined block boundaries.
+  Hovering reports the cursor coordinates + grid value; clicking a hierarchy node
+  draws a dashed contour around its instances (multiple loops for
+  scatter-distributed blocks), and a "Density%" column reports each hierarchy's
+  spacing density. Placement follows DEF semantics (lower-left `location_x/y` +
+  `orient`); nested sub-blocks are composed through their placement frame.
 - **Pickle cache** — fast re-loads via a cache keyed on input file metadata + schema version.
 
 ## Requirements & install
 
 - Python 3.9+
 - pandas, numpy, PyQt5
+- shapely (contour geometry); scipy (clustering fallback when shapely is absent)
 
 ```bash
 pip install -r requirements.txt
@@ -79,7 +83,8 @@ python main.py --cell_info c.json --block_info a.json --force
 
 `python -m vlsi_viewer …` is equivalent. Run `python main.py --help` for all
 options (`--block_info`, `--compare_block_info`, `--physical_mode`,
-`--min-instances`, `--grid_size`, `--include-macros`, `--cache-dir`, `--force`,
+`--min-instances`, `--grid_size`, `--contour_gap`, `--include-macros`,
+`--cache-dir`, `--force`,
 `--verbose`, `--version`). `--physical_mode` and `--compare_block_info` are
 mutually exclusive. In physical mode, hover the layout view to read the cursor
 coordinates and the heat-map grid value in the bottom-right status bar.
@@ -201,20 +206,33 @@ Macro columns (shown with `--include-macros`): **Macro Cnt** = count(`is_macro`)
 
 `--physical_mode` replaces the compare view with an interactive **layout view**
 to the right of the hierarchy tree. The design is cut into an equal-size square
-grid (default cell **3.0 × 3.0** in physical units, adjustable in the UI), and
-each grid square is colored by one of three heat maps:
+grid (cell size set via `--grid_size`, default **3.0 × 3.0** in physical units),
+and each grid square is colored by one of four heat maps:
 
 | Layer | Per-grid value | Default range |
 |---|---|---|
 | Cell density | Σ(instance area overlapping the grid) / grid_area | 0.0 – 1.0 |
 | Leakage power | Σ(instance_area_ratio_in_grid × leakage_power) | 0.0 – max |
 | Dynamic power | Σ(instance_area_ratio_in_grid × dynamic_power) | 0.0 – max |
+| ULVT density | Σ(ULVT-instance area overlapping the grid) / grid_area | 0.0 – 1.0 |
 
 Both standard cells and macros contribute (`is_physical_only` and missing-cell
-instances are skipped). The heat-color **min/max range** and the **grid size**
-are adjustable from the layout controls; values above the max render white, and
-a thermal legend shows the current range. Pan/zoom with the mouse wheel and
-press **`F`** to fit the design to the view.
+instances are skipped). The heat-color **min/max range** is adjustable from the
+layout controls; a fully-packed bin (density 100%) renders white, and a fixed
+vertical thermal legend (black → dark blue → cyan → green → yellow → red →
+white) shows the current range with 0/25/50/75/100% value ticks. Pan/zoom with
+the mouse wheel, press **`F`** to fit, and hover to read the cursor coordinates
+and grid value in the bottom-right status bar.
+
+#### Hierarchy contours & density
+
+Clicking a hierarchy node in the tree draws a dashed outline around that node's
+instances; clicking the same node again hides it, and clicking another node swaps
+it. Instances scattered beyond `--contour_gap` (default `2 × grid_size`) become
+**multiple loops**. A **Density%** column reports each hierarchy's spacing density
+`non-macro area / (contour area − macro area)` (higher-better gradient, range
+20%–65%). Contours/densities are computed lazily and cached, and boxes are
+pre-merged (exact) so the geometry scales to large (10M-instance) subsystems.
 
 ## Architecture
 
@@ -230,9 +248,10 @@ press **`F`** to fit the design to the view.
 | `vlsi_viewer/ui_compare.py` | V1 / V2 / Diff tabs |
 | `vlsi_viewer/ui_main.py` | main window (toolbar + wiring) |
 | `vlsi_viewer/cli.py` | command-line entry point |
-| `vlsi_viewer/physical.py` | physical mode: heat-map grid construction |
+| `vlsi_viewer/physical.py` | physical mode: heat-map grids + per-hierarchy contour/density |
+| `vlsi_viewer/contour.py` | rectilinear union geometry (shapely, scipy+manual fallback) + box pre-merge |
 | `vlsi_viewer/heatmap.py` | thermal colormap, grid array → QImage |
-| `vlsi_viewer/ui_layout.py` | layout view widget (heat map, controls, legend) |
+| `vlsi_viewer/ui_layout.py` | layout view widget (heat map, controls, legend, contour overlay) |
 | `vlsi_viewer/genericView.py` | interactive QGraphicsView (pan / zoom / fit) |
 | `vlsi_viewer/coordinateProcess.py` | DEF-style orient & coordinate transforms |
 | `vlsi_viewer/Point.py`, `utils.py` | small shared helpers |
@@ -247,5 +266,5 @@ python -m pytest
 
 The suite covers metric formulas (against hand-computed values), filtering
 (missing / macro / physical-only), hierarchy construction, pickle round-trip,
-diff, physical-mode grid construction, boundary validation, and headless GUI
-construction.
+diff, physical-mode grid construction, boundary validation, contour geometry
+(both backends, incl. box pre-merge exactness), and headless GUI construction.

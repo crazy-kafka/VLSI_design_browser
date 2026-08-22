@@ -15,6 +15,7 @@ def test_defaults():
     assert args.force is False
     assert args.verbose is False
     assert args.grid_size == config.DEFAULT_GRID_SIZE
+    assert args.contour_gap is None
 
 
 def test_multiple_blocks_and_flags():
@@ -28,6 +29,7 @@ def test_multiple_blocks_and_flags():
         "--force",
         "--verbose",
         "--grid_size", "5.0",
+        "--contour_gap", "12.0",
     ])
     assert args.block_info == ["a.json", "b.json", "c.json"]
     assert args.compare_block_info == ["a2.json", "b2.json"]
@@ -37,6 +39,7 @@ def test_multiple_blocks_and_flags():
     assert args.force is True
     assert args.verbose is True
     assert args.grid_size == 5.0
+    assert args.contour_gap == 12.0
 
 
 def test_required_flags():

@@ -48,6 +48,7 @@ class MainWindow(QMainWindow):
             self.setCentralWidget(self._stack)
 
         self._tree.sort_changed.connect(self._on_sort_changed)
+        self._tree.node_clicked.connect(self._on_node_clicked)
         for t in (self._compare.v1, self._compare.v2, self._compare.diff):
             t.sort_changed.connect(self._on_sort_changed)
 
@@ -108,12 +109,21 @@ class MainWindow(QMainWindow):
         if self._design2 is None:
             self._tree.set_threshold(threshold)
             if self._design1 is not None:
-                self._tree.set_view(view_for_single(self._design1, include_macros))
+                view = view_for_single(self._design1, include_macros)
+                if self._physical is not None:
+                    from .model import density_column
+                    view.columns.append(density_column(self._physical))
+                self._tree.set_view(view)
         else:
             self._compare.configure(threshold, include_macros)
 
     def _on_sort_changed(self, msg: str):
         self.statusBar().showMessage(msg)
+
+    def _on_node_clicked(self, path: str):
+        """Clicking a hierarchy node toggles its contour in the layout view."""
+        if self._layout is not None:
+            self._layout.toggle_contour(path)
 
     def _do_search(self):
         if self._design1 is None:

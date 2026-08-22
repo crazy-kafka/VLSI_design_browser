@@ -124,6 +124,7 @@ class GradientRangeDialog(QDialog):
 class HierarchyTree(QTreeWidget):
     sort_changed = pyqtSignal(str)  # human-readable sort summary
     gradient_range_changed = pyqtSignal()  # a gradient range was edited here
+    node_clicked = pyqtSignal(str)  # a hierarchy path was clicked (for contours)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -141,10 +142,17 @@ class HierarchyTree(QTreeWidget):
         self.header().setSectionsClickable(True)
         self.header().sectionClicked.connect(self._on_header_clicked)
         self.itemExpanded.connect(self._on_expand)
+        self.itemClicked.connect(self._on_item_clicked)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._on_context_menu)
         self.header().setContextMenuPolicy(Qt.CustomContextMenu)
         self.header().customContextMenuRequested.connect(self._on_header_context_menu)
+
+    def _on_item_clicked(self, item, _col):
+        """Emit the clicked hierarchy path (skip the lazy-expand placeholder)."""
+        path = item.data(0, Qt.UserRole)
+        if path is not None:
+            self.node_clicked.emit(path)
 
     # -- configuration -----------------------------------------------------
     def set_view(self, view: TreeView):
