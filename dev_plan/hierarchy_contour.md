@@ -57,8 +57,21 @@ Contour + density are lazy and cached. Two changes scale them to large designs
    computed only when the tree renders that node (lazily on expand), cached
    afterwards, so startup no longer precomputes every node.
 
-Bundled-sample timings: contour of a sub-block ~0.1 s, a core ~0.5 s, the whole
-die ~1.5 s (all cached). `--verbose` logs each contour/density computation.
+4. **Area-only contour for density** (`contour.contour_area`): the density metric
+   needs only the union area, so it no longer extracts loop coordinates (which
+   materialized large Python lists for a big contour). `contour_for` (drawing)
+   and `density_for` (area) use separate cache keys.
+5. **Vectorized grid rasterization** (`build_physical`): the per-box/per-cell
+   Python loop is replaced by bincount accumulation of separable
+   `outer(oy, ox)/grid_area` patches for std cells (1x1 / 1x2 / 2x1 / 2x2) and a
+   per-box outer-product update for macros — bit-exact, verified by the grid tests.
+6. **Translation-only walk fast path**: when every ancestor frame is orient N
+   (pure translation), a leaf's global box is its local box + the accumulated
+   origin, skipping `dbTransform` and the 4-corner min/max.
+
+Bundled-sample timings: build_physical ~1.7 s, contour of a sub-block ~0.1 s, a
+core ~0.5 s, the whole die ~1.5 s (all cached). A synthetic 1M-cell build takes
+~6.8 s (walk ~2.3 s/M). `--verbose` logs each contour/density computation.
 
 ## Verification
 - `python -m pytest -q` (79 passed) incl. cross-backend contour tests

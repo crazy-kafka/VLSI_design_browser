@@ -77,24 +77,41 @@ class PhysicalData:
         return self._geom[self._slice_for(path)]
 
     def _contour(self, path: str, gap: float):
-        """Cached (loops, area) for a path at a specific gap (thread-safe)."""
+        """Cached contour loops for a path at a gap (thread-safe)."""
         from . import contour
-        key = (path, gap)
+        key = ("loops", path, gap)
         with self._contour_lock:
             cached = self._contour_cache.get(key)
             if cached is not None:
                 return cached
         boxes = self._geom[self._slice_for(path)]
         t0 = time.perf_counter()
-        loops, area = contour.contour_geometry(boxes, gap)
+        loops = contour.contour_loops(boxes, gap)
         with self._contour_lock:
-            self._contour_cache[key] = (loops, area)
-        logger.info("contour: %s (gap %g, %d boxes) -> %d loop(s), area %.0f (%.1fs)",
-                    path, gap, len(boxes), len(loops), area, time.perf_counter() - t0)
-        return loops, area
+            self._contour_cache[key] = loops
+        logger.info("contour: %s (gap %g, %d boxes) -> %d loop(s) (%.1fs)",
+                    path, gap, len(boxes), len(loops), time.perf_counter() - t0)
+        return loops
+
+    def _contour_area(self, path: str, gap: float) -> float:
+        """Cached contour area for a path at a gap (thread-safe)."""
+        from . import contour
+        key = ("area", path, gap)
+        with self._contour_lock:
+            cached = self._contour_cache.get(key)
+            if cached is not None:
+                return cached
+        boxes = self._geom[self._slice_for(path)]
+        t0 = time.perf_counter()
+        area = contour.contour_area(boxes, gap)
+        with self._contour_lock:
+            self._contour_cache[key] = area
+        logger.info("contour area: %s (gap %g, %d boxes) -> %.0f (%.1fs)",
+                    path, gap, len(boxes), area, time.perf_counter() - t0)
+        return area
 
     def contour_for(self, path: str):
-        """Closed contour loops + enclosed area for a hierarchy path (cached)."""
+        """Closed contour loops for a hierarchy path (cached)."""
         return self._contour(path, self.contour_gap)
 
     def density_for(self, path: str) -> float:
@@ -104,7 +121,7 @@ class PhysicalData:
         so a hierarchy's internal spacing lowers its density. Returns NaN when
         undefined (no non-macro area or denominator <= 0).
         """
-        _, area = self._contour(path, self.contour_gap)
+        area = self._contour_area(path, self.contour_gap)
         sl = self._slice_for(path)
         box_area = (self._geom[sl, 2] - self._geom[sl, 0]) * (self._geom[sl, 3] - self._geom[sl, 1])
         mac = float(box_area[self._is_macro[sl]].sum())
@@ -190,7 +207,14 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
             x, y = CoordinateProcess.dbTransform("to_global", (x, y), orient, origin)
         return x, y
 
+    # Fast path: when every ancestor frame is orient N (pure translation), a
+    # leaf's global box is just its local box translated by the accumulated
+    # origins — no per-leaf transform or 4-corner min/max needed.
+    tx, ty = 0.0, 0.0
+    trans_only = True
+
     def walk(name, prefix, visiting):
+        nonlocal tx, ty, trans_only
         if name in visiting:
             raise ValueError(f"cyclic block reference in physical mode: {name}")
         visiting.add(name)
@@ -201,9 +225,20 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
             cell = getattr(row, "cell_name")
             if cell in blocks:
                 orient = getattr(row, "orient") or "N"
-                chain.append((orient, (float(getattr(row, "location_x")),
-                                       float(getattr(row, "location_y")))))
+                ox = float(getattr(row, "location_x"))
+                oy = float(getattr(row, "location_y"))
+                chain.append((orient, (ox, oy)))
+                was_trans = trans_only
+                if orient == "N":
+                    tx += ox
+                    ty += oy
+                else:
+                    trans_only = False
                 walk(cell, _join(prefix, getattr(row, "leaf_instance_name")), visiting)
+                if orient == "N":
+                    tx -= ox
+                    ty -= oy
+                trans_only = was_trans
                 chain.pop()
                 continue
             if getattr(row, "is_physical_only"):
@@ -215,12 +250,16 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
                 raise ValueError(f"invalid orient {orient!r}")
             ex, ey = _oriented_extent(orient, *sizes[cell])
             lx, ly = float(getattr(row, "location_x")), float(getattr(row, "location_y"))
-            g = [global_pt(c) for c in
-                 ((lx, ly), (lx + ex, ly), (lx, ly + ey), (lx + ex, ly + ey))]
-            xs = [c[0] for c in g]
-            ys = [c[1] for c in g]
-            _xs0.append(min(xs)); _ys0.append(min(ys))
-            _xs1.append(max(xs)); _ys1.append(max(ys))
+            if trans_only:
+                _xs0.append(lx + tx); _ys0.append(ly + ty)
+                _xs1.append(lx + tx + ex); _ys1.append(ly + ty + ey)
+            else:
+                g = [global_pt(c) for c in
+                     ((lx, ly), (lx + ex, ly), (lx, ly + ey), (lx + ex, ly + ey))]
+                xs = [c[0] for c in g]
+                ys = [c[1] for c in g]
+                _xs0.append(min(xs)); _ys0.append(min(ys))
+                _xs1.append(max(xs)); _ys1.append(max(ys))
             _leaks.append(float(getattr(row, "leakage_power")))
             _dyns.append(float(getattr(row, "dynamic_power")))
             _ulvts.append(is_ulvt.get(cell, False))
@@ -257,41 +296,104 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
     leakage = np.zeros((rows, cols), dtype="float64")
     dynamic = np.zeros((rows, cols), dtype="float64")
     ulvt = np.zeros((rows, cols), dtype="float64")
-    grid_area = grid_size * grid_size
+    gs = grid_size
+    gs2 = gs * gs
 
-    for i in range(n):
-        bx0, by0, bx1, by1 = geom[i]
-        bx0, by0 = max(bx0, x0), max(by0, y0)
-        bx1, by1 = min(bx1, x1), min(by1, y1)
-        if bx1 <= bx0 or by1 <= by0:
-            continue
-        ix0 = max(0, min(cols - 1, int((bx0 - x0) // grid_size)))
-        ix1 = max(0, min(cols - 1, int((bx1 - x0) // grid_size)))
-        iy0 = max(0, min(rows - 1, int((by0 - y0) // grid_size)))
-        iy1 = max(0, min(rows - 1, int((by1 - y0) // grid_size)))
-        box_area = (bx1 - bx0) * (by1 - by0)
-        ul = bool(is_ulvt[i])
-        lk = float(leak[i])
-        dy = float(dyn[i])
-        for iy in range(iy0, iy1 + 1):
-            gy0 = y0 + iy * grid_size
-            gy1 = gy0 + grid_size
-            oy = max(0.0, min(gy1, by1) - max(gy0, by0))
-            if oy <= 0:
-                continue
-            for ix in range(ix0, ix1 + 1):
-                gx0 = x0 + ix * grid_size
-                gx1 = gx0 + grid_size
-                ox = max(0.0, min(gx1, bx1) - max(gx0, bx0))
-                if ox <= 0:
-                    continue
-                ov = ox * oy
-                density[iy, ix] += ov / grid_area
-                if ul:
-                    ulvt[iy, ix] += ov / grid_area
-                frac = ov / box_area
-                leakage[iy, ix] += frac * lk
-                dynamic[iy, ix] += frac * dy
+    # --- vectorized rasterization ------------------------------------------
+    # A box's contribution to its cell patch is separable (outer(oy, ox)/gs2),
+    # so std cells (<= 2x2 patch) accumulate via bincount and macros via a
+    # per-box outer-product update.
+    bx0 = np.maximum(geom[:, 0], x0)
+    by0 = np.maximum(geom[:, 1], y0)
+    bx1 = np.minimum(geom[:, 2], x1)
+    by1 = np.minimum(geom[:, 3], y1)
+    keep = (bx1 > bx0) & (by1 > by0)
+    bx0, by0, bx1, by1 = bx0[keep], by0[keep], bx1[keep], by1[keep]
+    ul = is_ulvt[keep]
+    lk = leak[keep]
+    dynv = dyn[keep]
+    box_area = (bx1 - bx0) * (by1 - by0)
+    ix0 = np.maximum(0, np.minimum(cols - 1, ((bx0 - x0) // gs).astype(np.intp)))
+    ix1 = np.maximum(0, np.minimum(cols - 1, ((bx1 - x0) // gs).astype(np.intp)))
+    iy0 = np.maximum(0, np.minimum(rows - 1, ((by0 - y0) // gs).astype(np.intp)))
+    iy1 = np.maximum(0, np.minimum(rows - 1, ((by1 - y0) // gs).astype(np.intp)))
+    dx = ix1 - ix0
+    ddy = iy1 - iy0
+
+    def _acc(flat, ov, ba, lk_, dy_, ul_):
+        """bincount-accumulate one group of (flat, overlap-area) pairs."""
+        frac = ov / ba
+        dens = ov / gs2
+        density[...] += np.bincount(flat, weights=dens, minlength=rows * cols).reshape(rows, cols)
+        ulvt[...] += np.bincount(flat, weights=np.where(ul_, dens, 0.0),
+                                 minlength=rows * cols).reshape(rows, cols)
+        leakage[...] += np.bincount(flat, weights=frac * lk_, minlength=rows * cols).reshape(rows, cols)
+        dynamic[...] += np.bincount(flat, weights=frac * dy_, minlength=rows * cols).reshape(rows, cols)
+
+    # 1x1 patch: box fully inside one cell
+    m = (dx == 0) & (ddy == 0)
+    if m.any():
+        _acc(iy0[m] * cols + ix0[m], box_area[m], box_area[m], lk[m], dynv[m], ul[m])
+
+    # 1x2 patch: one column, two rows (crosses a horizontal grid line)
+    m = (dx == 0) & (ddy == 1)
+    if m.any():
+        w = bx1[m] - bx0[m]
+        oy0 = (y0 + (iy0[m] + 1) * gs) - by0[m]
+        oy1 = by1[m] - (y0 + (iy0[m] + 1) * gs)
+        flat = np.concatenate([iy0[m] * cols + ix0[m], (iy0[m] + 1) * cols + ix0[m]])
+        ov = np.concatenate([w * oy0, w * oy1])
+        ba = np.concatenate([box_area[m], box_area[m]])
+        _acc(flat, ov, ba, np.concatenate([lk[m], lk[m]]),
+             np.concatenate([dynv[m], dynv[m]]), np.concatenate([ul[m], ul[m]]))
+
+    # 2x1 patch: two columns, one row (crosses a vertical grid line)
+    m = (dx == 1) & (ddy == 0)
+    if m.any():
+        h = by1[m] - by0[m]
+        ox0 = (x0 + (ix0[m] + 1) * gs) - bx0[m]
+        ox1 = bx1[m] - (x0 + (ix0[m] + 1) * gs)
+        flat = np.concatenate([iy0[m] * cols + ix0[m], iy0[m] * cols + (ix0[m] + 1)])
+        ov = np.concatenate([h * ox0, h * ox1])
+        ba = np.concatenate([box_area[m], box_area[m]])
+        _acc(flat, ov, ba, np.concatenate([lk[m], lk[m]]),
+             np.concatenate([dynv[m], dynv[m]]), np.concatenate([ul[m], ul[m]]))
+
+    # 2x2 patch: crosses both a horizontal and a vertical grid line
+    m = (dx == 1) & (ddy == 1)
+    if m.any():
+        ox0 = (x0 + (ix0[m] + 1) * gs) - bx0[m]
+        ox1 = bx1[m] - (x0 + (ix0[m] + 1) * gs)
+        oy0 = (y0 + (iy0[m] + 1) * gs) - by0[m]
+        oy1 = by1[m] - (y0 + (iy0[m] + 1) * gs)
+        f00 = iy0[m] * cols + ix0[m]
+        f01 = iy0[m] * cols + (ix0[m] + 1)
+        f10 = (iy0[m] + 1) * cols + ix0[m]
+        f11 = (iy0[m] + 1) * cols + (ix0[m] + 1)
+        flat = np.concatenate([f00, f01, f10, f11])
+        ov = np.concatenate([oy0 * ox0, oy0 * ox1, oy1 * ox0, oy1 * ox1])
+        ba = np.concatenate([box_area[m]] * 4)
+        lk4 = np.concatenate([lk[m]] * 4)
+        dy4 = np.concatenate([dynv[m]] * 4)
+        ul4 = np.concatenate([ul[m]] * 4)
+        _acc(flat, ov, ba, lk4, dy4, ul4)
+
+    # Larger patches (macros): few, so a per-box outer-product update is fine.
+    for i in np.flatnonzero(~((dx <= 1) & (ddy <= 1))):
+        r0, r1, c0, c1 = int(iy0[i]), int(iy1[i]), int(ix0[i]), int(ix1[i])
+        col_l = x0 + np.arange(c0, c1 + 1) * gs
+        col_r = x0 + (np.arange(c0, c1 + 1) + 1) * gs
+        ox = np.minimum(bx1[i], col_r) - np.maximum(bx0[i], col_l)
+        row_b = y0 + np.arange(r0, r1 + 1) * gs
+        row_t = y0 + (np.arange(r0, r1 + 1) + 1) * gs
+        oy = np.minimum(by1[i], row_t) - np.maximum(by0[i], row_b)
+        patch = np.outer(oy, ox) / gs2
+        density[r0:r1 + 1, c0:c1 + 1] += patch
+        if ul[i]:
+            ulvt[r0:r1 + 1, c0:c1 + 1] += patch
+        frac = patch / box_area[i]
+        leakage[r0:r1 + 1, c0:c1 + 1] += frac * lk[i]
+        dynamic[r0:r1 + 1, c0:c1 + 1] += frac * dynv[i]
 
     # Density ratios are in [0, 1]. Clamp float round-off so fully-packed bins
     # land on exactly 1.0 (the heat map renders 100% density as white) instead

@@ -74,6 +74,12 @@ def merge_boxes(boxes):
     return list(merged[["x0", "y0", "x1", "y1"]].itertuples(index=False, name=None))
 
 
+def _union(boxes, gap):
+    """Union geometry of ``boxes`` padded by ``gap/2`` (pre-merged)."""
+    expanded = merge_boxes(_expanded(boxes, gap))
+    return _unary_union([_sbox(*b) for b in expanded])
+
+
 def geom_loops_area(geom):
     """Extract closed loops + area from a shapely geometry (MultiPolygon ok)."""
     loops = []
@@ -95,16 +101,18 @@ def contour_geometry(boxes, gap=0.0):
     ``loops`` is a list of closed ``[(x, y), ...]`` rings; ``area`` is the area
     enclosed by them.
     """
-    expanded = merge_boxes(_expanded(boxes, gap))
-    geom = _unary_union([_sbox(*b) for b in expanded])
-    return geom_loops_area(geom)
+    return geom_loops_area(_union(boxes, gap))
 
 
 def contour_loops(boxes, gap=0.0):
     """Closed outline loop(s) around ``boxes``, bridging gaps < ``gap``."""
-    return contour_geometry(boxes, gap)[0]
+    return geom_loops_area(_union(boxes, gap))[0]
 
 
 def contour_area(boxes, gap=0.0):
-    """Area enclosed by the contour loop(s) around ``boxes`` (spacing scope)."""
-    return contour_geometry(boxes, gap)[1]
+    """Area enclosed by the contour loop(s) around ``boxes`` (spacing scope).
+
+    Only the union area is computed; loop coordinates are not extracted, so
+    density lookups avoid materializing large coordinate lists.
+    """
+    return _union(boxes, gap).area

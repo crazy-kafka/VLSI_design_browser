@@ -164,7 +164,7 @@ class LayoutView(QWidget):
             self._clear_contour()
         else:
             self._clear_contour()
-            loops, _ = self._physical.contour_for(path)
+            loops = self._physical.contour_for(path)
             for loop in loops:
                 poly = QPolygonF([self._flip_y(x, y) for (x, y) in loop])
                 item = QGraphicsPolygonItem(poly)
