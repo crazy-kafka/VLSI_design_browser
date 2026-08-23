@@ -134,6 +134,8 @@ class HierarchyTree(QTreeWidget):
         self._sort_order = Qt.AscendingOrder
         self._sort_active = False
         self._populated_once = False
+        self._path_items = {}   # hierarchy path -> item (for lazy density updates)
+        self._density_col = None
         self.setAlternatingRowColors(True)
         self.setUniformRowHeights(True)
         self.setItemDelegate(BarDelegate(self))
@@ -168,11 +170,15 @@ class HierarchyTree(QTreeWidget):
     def rebuild(self):
         expanded = self._expanded_paths() if self._populated_once else None
         self.clear()
+        self._path_items = {}
         if self._view is None:
             return
         labels = ["Hierarchy"] + [c.label for c in self._view.columns]
         self.setColumnCount(len(labels))
         self.setHeaderLabels(labels)
+        # the density column is the last (physical-only); refresh it via update_density
+        self._density_col = next((ci for ci, c in enumerate(self._view.columns, 1)
+                                  if c.key == "density"), None)
         # hierarchy name fits its content; metric columns stretch evenly
         self.header().setSectionResizeMode(0, QHeaderView.Interactive)
         for ci in range(1, len(labels)):
@@ -198,6 +204,7 @@ class HierarchyTree(QTreeWidget):
     def _make_item(self, path: str) -> HierarchyItem:
         item = HierarchyItem([path.rsplit("/", 1)[-1]])
         item.setData(0, Qt.UserRole, path)
+        self._path_items[path] = item
         for ci, col in enumerate(self._view.columns, start=1):
             v = col.series.get(path, None)
             item.setText(ci, col.fmt(v))
@@ -210,6 +217,17 @@ class HierarchyTree(QTreeWidget):
             # placeholder child so the expand arrow is shown before lazy population
             item.addChild(QTreeWidgetItem())
         return item
+
+    def update_density(self, path: str, value: float):
+        """Refresh one hierarchy's Density% cell after a background computation."""
+        item = self._path_items.get(path)
+        col = self._density_col
+        if item is None or col is None or self._view is None:
+            return
+        column = self._view.columns[col - 1]
+        item.setText(col, column.fmt(value))
+        item.setData(col, Qt.UserRole, _sortable(value))
+        self._set_gradient_bar(item, col, column, value)
 
     def _set_gradient_bar(self, item, ci, col, v):
         if v is None:

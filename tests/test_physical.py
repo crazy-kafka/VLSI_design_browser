@@ -140,6 +140,44 @@ def test_path_tagging_and_hierarchy_density(tmp_path):
     assert 0.0 <= d <= 1.0
 
 
+def test_slice_for_excludes_path_extending_sibling(tmp_path):
+    """`TOP/cpu` must not include the sibling `TOP/cpu_aux`."""
+    import json as _json
+    cell = tmp_path / "cell.json"
+    cell.write_text(_json.dumps({"C1": {"area": 4, "size_x": 2, "size_y": 2}}))
+    b = _block(tmp_path, "TOP",
+               {"cpu": {"cell_name": "C1", "location_x": 0, "location_y": 0},
+                "cpu_aux": {"cell_name": "C1", "location_x": 10, "location_y": 0}},
+               boundary=[(0, 0), (30, 20)])
+    pd_ = build_physical([b], str(cell), grid_size=4.0)
+    assert {box[7] for box in pd_.boxes} == {"TOP/cpu", "TOP/cpu_aux"}
+    assert len(pd_.boxes_for("TOP/cpu")) == 1
+    assert len(pd_.boxes_for("TOP/cpu_aux")) == 1
+    assert len(pd_.boxes_for("TOP")) == 2
+
+
+def test_negative_contour_gap_rejected(tmp_path):
+    cell = tmp_path / "cell.json"
+    _cell(cell, "C1", area=4, size_x=2, size_y=2)
+    b = _block(tmp_path, "TOP", {"c": {"cell_name": "C1"}},
+               boundary=[(0, 0), (10, 10)])
+    with pytest.raises(ValueError, match="contour gap"):
+        build_physical([b], str(cell), grid_size=4.0, contour_gap=-1.0)
+
+
+def test_density_nan_not_one_when_undefined(tmp_path):
+    """Density must be NaN (not 1.0) when there is no non-macro area."""
+    import json as _json
+    import math
+    cell = tmp_path / "cell.json"
+    cell.write_text(_json.dumps({"M": {"area": 4, "size_x": 2, "size_y": 2, "is_macro": True}}))
+    b = _block(tmp_path, "TOP",
+               {"m": {"cell_name": "M", "location_x": 0, "location_y": 0}},
+               boundary=[(0, 0), (20, 20)])
+    pd_ = build_physical([b], str(cell), grid_size=4.0)
+    assert math.isnan(pd_.density_for("TOP"))  # all-macro -> no non-macro area
+
+
 def test_density_clamped_to_one(tmp_path):
     """Two fully-overlapping cells produce raw density 2.0; the grid clamps it
     to exactly 1.0 so fully-packed bins render white (not red/white noise)."""

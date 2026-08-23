@@ -6,22 +6,18 @@ node's instances in the layout view; clicking the same node again hides it;
 clicking another node swaps the contour. Multiple loops are drawn when the
 instances are scatter-distributed (each scatter group gets its own loop).
 
-- `vlsi_viewer/contour.py` (new): dual-backend rectilinear-union geometry.
-  - **shapely backend** (primary): `unary_union` of the gap-expanded boxes gives
-    exact exterior/interior rings and disjoint scatter groups; no manual
-    clustering needed.
-  - **scipy + manual fallback** (used when shapely is not importable): clusters
-    boxes with `scipy.spatial.cKDTree` (+ `connected_components`) and computes
-    the rectilinear union boundary with a plane sweep implemented here.
-  - `contour_geometry(boxes, gap)` -> (loops, area); boxes are padded by
-    `gap/2` so instances closer than `gap` merge into one loop (the hierarchy's
-    "spacing scope") while genuine scatter stays as multiple loops.
-  - `union_geometry` / `geom_loops_area` support child-reuse of cached polygons.
+- `vlsi_viewer/contour.py`: shapely-only rectilinear-union geometry.
+  `contour_geometry(boxes, gap)` -> (loops, area); boxes are pre-merged
+  (`merge_boxes`) and padded by `gap/2` so instances closer than `gap` merge
+  into one loop (the hierarchy's "spacing scope") while genuine scatter stays
+  as multiple loops. (The earlier scipy + manual-union fallback was removed —
+  shapely is a hard dependency — which also eliminated several fallback-only
+  sweep/stitch bugs found in review.)
 - `vlsi_viewer/physical.py`: `build_physical` threads a prefix through `walk` and
-  tags every box with its full hierarchy path + `is_macro`. `PhysicalData` keeps
-  per-path aggregates (`path_boxes`, non/macro area) and cached
-  `contour_for(path)` / `density_for(path)` (parents reuse children's cached
-  geometries when computed bottom-up).
+  stores leaf geometry as compact float32 numpy arrays sorted by path, with a
+  searchsorted `_slice_for(path)` slice per hierarchy (no per-ancestor
+  duplication). `contour_for(path)` / `density_for(path)` slice the arrays and
+  cache `(loops, area)` per `(path, gap)` under a `threading.Lock`.
 - `vlsi_viewer/ui_tree.py`: `node_clicked` signal on item click (skips the
   lazy-expand placeholder); `vlsi_viewer/ui_main.py` forwards it to
   `LayoutView.toggle_contour(path)`; `ui_layout.py` draws dashed
@@ -29,10 +25,15 @@ instances are scatter-distributed (each scatter group gets its own loop).
 
 ## Density metric
 `density = non_macro_area / (contour_area - macro_area)` per hierarchy path,
-a percentage with a "higher better" gradient (default range 20%-65%). It is
+where `contour_area` is the gap-padded spacing scope (`--contour_gap`), so
+internal routing spacing lowers density. A percentage with a "higher better"
+gradient (default range 20%-65%); NaN (rendered "—") when undefined. It is
 physical-only (not in `schema.METRICS`); `schema._GRADIENT_RANGES["density"]`
-registers the range and `model.density_column(physical, paths)` appends a
-"Density%" column to the tree in physical mode.
+registers the range and `model.density_column(physical)` appends a "Density%"
+column to the tree in physical mode. Values are computed on a background thread
+(`_LazyDensity`, `QThreadPool`) so startup and expansions never freeze the GUI;
+the column is built once per `MainWindow` so its cache survives settings
+changes.
 
 ## CLI
 `--contour_gap N` overrides the merge gap (default `2 * grid_size`; factor in

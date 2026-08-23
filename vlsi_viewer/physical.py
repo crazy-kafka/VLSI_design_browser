@@ -6,11 +6,12 @@ of N/S/W/E/FN/FS/FW/FE. Nested sub-block instances are composed through their
 placement frame using :mod:`vlsi_viewer.coordinateProcess`.
 """
 import logging
+import threading
 import time
 
 import numpy as np
 
-from . import schema
+from . import config, schema
 from .coordinateProcess import CoordinateProcess, Orient
 from .loader import load_block, load_cell_info
 
@@ -46,7 +47,8 @@ class PhysicalData:
         self._dyn = dyn                        # (N,) float32
         self._leaf_paths = leaf_paths          # (N,) object array, sorted lexicographically
         self.contour_gap = contour_gap
-        self._contour_cache = {}               # path -> (geom|None, loops, area)
+        self._contour_cache = {}               # (path, gap) -> (loops, area)
+        self._contour_lock = threading.Lock()
 
     @property
     def boxes(self):
@@ -64,43 +66,51 @@ class PhysicalData:
 
     def _slice_for(self, path: str):
         """Slice of the sorted arrays covering ``path`` and its descendants."""
+        # The upper bound includes the path separator so a sibling whose name
+        # merely extends the queried path (TOP/cpu vs TOP/cpu_aux) is excluded.
         left = int(np.searchsorted(self._leaf_paths, path, side="left"))
-        right = int(np.searchsorted(self._leaf_paths, path + "￿", side="left"))
+        right = int(np.searchsorted(self._leaf_paths, path + "/￿", side="left"))
         return slice(left, right)
 
     def boxes_for(self, path: str):
         """(k, 4) float32 box array for ``path`` and its descendants."""
         return self._geom[self._slice_for(path)]
 
-    def contour_for(self, path: str):
-        """Closed contour loops + enclosed area for a hierarchy path (cached)."""
+    def _contour(self, path: str, gap: float):
+        """Cached (loops, area) for a path at a specific gap (thread-safe)."""
         from . import contour
-        cached = self._contour_cache.get(path)
-        if cached is not None:
-            return cached[1], cached[2]
-
+        key = (path, gap)
+        with self._contour_lock:
+            cached = self._contour_cache.get(key)
+            if cached is not None:
+                return cached
         boxes = self._geom[self._slice_for(path)]
         t0 = time.perf_counter()
-        if contour._BACKEND == "shapely":
-            geom = contour.union_geometry(boxes, self.contour_gap)
-            loops, area = contour.geom_loops_area(geom)
-        else:
-            geom = None
-            loops, area = contour.contour_geometry(boxes, self.contour_gap)
-        self._contour_cache[path] = (geom, loops, area)
-        logger.info("contour: %s (%d boxes) -> %d loop(s), area %.0f (%.1fs)",
-                    path, len(boxes), len(loops), area, time.perf_counter() - t0)
+        loops, area = contour.contour_geometry(boxes, gap)
+        with self._contour_lock:
+            self._contour_cache[key] = (loops, area)
+        logger.info("contour: %s (gap %g, %d boxes) -> %d loop(s), area %.0f (%.1fs)",
+                    path, gap, len(boxes), len(loops), area, time.perf_counter() - t0)
         return loops, area
 
+    def contour_for(self, path: str):
+        """Closed contour loops + enclosed area for a hierarchy path (cached)."""
+        return self._contour(path, self.contour_gap)
+
     def density_for(self, path: str) -> float:
-        """Hierarchy density = non_macro_area / (contour_area - macro_area)."""
-        _, area = self.contour_for(path)
+        """Hierarchy density = non_macro_area / (contour_area - macro_area).
+
+        ``contour_area`` is the gap-padded spacing scope (``self.contour_gap``),
+        so a hierarchy's internal spacing lowers its density. Returns NaN when
+        undefined (no non-macro area or denominator <= 0).
+        """
+        _, area = self._contour(path, self.contour_gap)
         sl = self._slice_for(path)
         box_area = (self._geom[sl, 2] - self._geom[sl, 0]) * (self._geom[sl, 3] - self._geom[sl, 1])
         mac = float(box_area[self._is_macro[sl]].sum())
         non = float(box_area[~self._is_macro[sl]].sum())
         den = area - mac
-        if den <= 0 or non <= 0:
+        if not (den > 0 and non > 0):
             return float("nan")
         return min(1.0, non / den)
 
@@ -130,15 +140,19 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
     """Build heat-map grids for a single-top-block design.
 
     ``contour_gap`` is the proximity threshold (in physical units) for merging a
-    hierarchy's instances into one contour loop; defaults to ``2 * grid_size``.
+    hierarchy's instances into one contour loop; defaults to
+    ``config.DEFAULT_CONTOUR_GAP_FACTOR * grid_size`` and must be >= 0.
 
     Raises ``ValueError`` if there is not exactly one top-level block, if the top
-    block has no ``boundary``, or if a boundary is not rectilinear.
+    block has no ``boundary``, if a boundary is not rectilinear, or if the grid
+    size / contour gap are invalid.
     """
     if grid_size <= 0:
         raise ValueError("grid size must be > 0")
     if contour_gap is None:
-        contour_gap = 2.0 * grid_size
+        contour_gap = config.DEFAULT_CONTOUR_GAP_FACTOR * grid_size
+    if contour_gap < 0:
+        raise ValueError("contour gap must be >= 0")
     blocks, cells = _load_blocks_and_cells(block_paths, cell_path)
 
     referenced = set()

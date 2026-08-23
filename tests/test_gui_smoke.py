@@ -136,6 +136,13 @@ def test_layout_view_builds(app, tmp_path):
     assert view._pix_item.pixmap() is not None and not view._pix_item.pixmap().isNull()
 
 
+def test_tree_click_without_physical_does_not_raise(app, design):
+    """In default (non-physical) mode, clicking a tree node is a no-op."""
+    w = MainWindow(design)
+    assert w._layout is None
+    w._on_node_clicked("TOP/MACROA/UNIT1")   # must not raise AttributeError
+
+
 def test_layout_contour_toggle(app, tmp_path):
     import json as _json
     from vlsi_viewer.physical import build_physical

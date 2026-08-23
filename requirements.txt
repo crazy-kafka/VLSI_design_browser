@@ -2,4 +2,3 @@ pandas>=1.5
 numpy>=1.23
 PyQt5>=5.15
 shapely>=2.0
-scipy>=1.10

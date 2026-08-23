@@ -38,7 +38,7 @@ two-version diff view and an optional physical layout view (2-D heat map).
 
 - Python 3.9+
 - pandas, numpy, PyQt5
-- shapely (contour geometry); scipy (clustering fallback when shapely is absent)
+- shapely (contour geometry)
 
 ```bash
 pip install -r requirements.txt
@@ -249,7 +249,7 @@ pre-merged (exact) so the geometry scales to large (10M-instance) subsystems.
 | `vlsi_viewer/ui_main.py` | main window (toolbar + wiring) |
 | `vlsi_viewer/cli.py` | command-line entry point |
 | `vlsi_viewer/physical.py` | physical mode: heat-map grids + per-hierarchy contour/density |
-| `vlsi_viewer/contour.py` | rectilinear union geometry (shapely, scipy+manual fallback) + box pre-merge |
+| `vlsi_viewer/contour.py` | rectilinear union geometry (shapely) + box pre-merge |
 | `vlsi_viewer/heatmap.py` | thermal colormap, grid array → QImage |
 | `vlsi_viewer/ui_layout.py` | layout view widget (heat map, controls, legend, contour overlay) |
 | `vlsi_viewer/genericView.py` | interactive QGraphicsView (pan / zoom / fit) |

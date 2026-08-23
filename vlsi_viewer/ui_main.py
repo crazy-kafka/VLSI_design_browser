@@ -26,6 +26,8 @@ class MainWindow(QMainWindow):
         self._design1 = design1
         self._design2 = design2
         self._physical = physical
+        self._layout = None
+        self._density = None
 
         self._stack = QStackedWidget()
         self._tree = HierarchyTree()
@@ -44,6 +46,9 @@ class MainWindow(QMainWindow):
             self._hover_label = QLabel("")
             self.statusBar().addPermanentWidget(self._hover_label)
             self._layout.hover_changed.connect(self._hover_label.setText)
+            from .model import density_column
+            self._density = density_column(physical)
+            self._density.series.ready.connect(self._on_density_ready)
         else:
             self.setCentralWidget(self._stack)
 
@@ -110,9 +115,8 @@ class MainWindow(QMainWindow):
             self._tree.set_threshold(threshold)
             if self._design1 is not None:
                 view = view_for_single(self._design1, include_macros)
-                if self._physical is not None:
-                    from .model import density_column
-                    view.columns.append(density_column(self._physical))
+                if self._density is not None:
+                    view.columns.append(self._density)  # shared cache across rebuilds
                 self._tree.set_view(view)
         else:
             self._compare.configure(threshold, include_macros)
@@ -122,8 +126,12 @@ class MainWindow(QMainWindow):
 
     def _on_node_clicked(self, path: str):
         """Clicking a hierarchy node toggles its contour in the layout view."""
-        if self._layout is not None:
+        if getattr(self, "_layout", None) is not None:
             self._layout.toggle_contour(path)
+
+    def _on_density_ready(self, path: str, value: float):
+        """A background density computation finished -> refresh that tree row."""
+        self._tree.update_density(path, value)
 
     def _do_search(self):
         if self._design1 is None:

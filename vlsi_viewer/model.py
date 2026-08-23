@@ -2,12 +2,12 @@
 import fnmatch
 import logging
 import re
-import time
 from dataclasses import dataclass
 from typing import Callable, List
 
 import numpy as np
 import pandas as pd
+from PyQt5.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
 
 from . import schema
 from .metrics import diff_table
@@ -82,31 +82,60 @@ class TreeView:
     paths: List[str]        # all hierarchy paths (for search)
 
 
-class _LazyDensity:
-    """Series-like mapping that computes a hierarchy's density on first access.
+class _DensityJob(QRunnable):
+    """Compute one hierarchy's density off the GUI thread, then deliver it."""
 
-    The tree only calls ``.get(path)`` for rows it actually renders (lazily on
-    expand), so a large design computes density only for the nodes the user sees
-    instead of every node at startup. Each result is cached.
+    def __init__(self, physical, path, owner):
+        super().__init__()
+        self._physical = physical
+        self._path = path
+        self._owner = owner
+
+    def run(self):
+        try:
+            value = self._physical.density_for(self._path)
+        except Exception:  # a bad path must not kill the thread pool
+            value = float("nan")
+        # Emitting from a worker thread is auto-queued to the main thread.
+        self._owner.ready.emit(self._path, value)
+
+
+class _LazyDensity(QObject):
+    """Series-like mapping that computes density on a background thread.
+
+    ``get(path)`` returns the cached value, or ``default`` while the computation
+    is in flight and emits ``ready(path, value)`` on the main thread when done.
+    The tree renders "—" until then, so a large design stays responsive.
     """
 
+    ready = pyqtSignal(str, float)
+
     def __init__(self, physical):
+        super().__init__()
         self._physical = physical
         self._cache = {}
+        self._pending = set()
+        self._pool = QThreadPool.globalInstance()
+        self.ready.connect(self._record)
 
     def get(self, path, default=None):
-        if path not in self._cache:
-            t0 = time.perf_counter()
-            self._cache[path] = self._physical.density_for(path)
-            logger.info("hierarchy density: %s (%.1fs)", path,
-                        time.perf_counter() - t0)
-        return self._cache[path]
+        if path in self._cache:
+            return self._cache[path]
+        if path not in self._pending:
+            self._pending.add(path)
+            self._pool.start(_DensityJob(self._physical, path, self))
+        return default
+
+    def _record(self, path, value):
+        self._cache[path] = value
+        self._pending.discard(path)
 
 
 def density_column(physical) -> Column:
     """Physical-only "Density%" column (higher-better, gradient range 20%-65%).
 
-    Values are computed lazily per rendered hierarchy node (see _LazyDensity).
+    Values are computed on a background thread per rendered hierarchy node (see
+    _LazyDensity) so startup and expansions never block the GUI.
     """
     return Column(label="Density%", series=_LazyDensity(physical),
                   fmt=lambda v: schema.format_metric("percent", v),
