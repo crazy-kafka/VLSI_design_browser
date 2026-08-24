@@ -22,6 +22,7 @@ class LayoutView(QWidget):
     """
 
     hover_changed = pyqtSignal(str)
+    status_message = pyqtSignal(str)  # transient status (e.g. "computing contour")
 
     def __init__(self, physical: PhysicalData, parent=None):
         super().__init__(parent)
@@ -41,6 +42,10 @@ class LayoutView(QWidget):
         self._boundary_items = []
         self._contour_items = []
         self._contour_path = None
+        self._contour_token = 0
+        from .model import ContourWorker
+        self._contour_worker = ContourWorker()
+        self._contour_worker.contour_ready.connect(self._on_contour_ready)
 
         root = QVBoxLayout(self)
         root.addLayout(self._controls_row)
@@ -159,23 +164,37 @@ class LayoutView(QWidget):
 
     # -- hierarchy contour overlay ----------------------------------------
     def toggle_contour(self, path: str):
-        """Show the contour for ``path``; click again (same path) hides it."""
+        """Show the contour for ``path``; click again (same path) hides it.
+
+        The exact contour is computed on a background worker so the GUI stays
+        responsive; the dashed overlay appears when the result arrives. Clicking
+        the same node again clears it immediately (a stale result is discarded).
+        """
         if self._contour_path == path:
             self._clear_contour()
-        else:
-            self._clear_contour()
-            loops = self._physical.contour_for(path)
-            for loop in loops:
-                poly = QPolygonF([self._flip_y(x, y) for (x, y) in loop])
-                item = QGraphicsPolygonItem(poly)
-                pen = QPen(QColor(0xFF, 0xD4, 0x00), 2)
-                pen.setStyle(Qt.DashLine)
-                item.setPen(pen)
-                item.setBrush(QBrush(Qt.NoBrush))
-                item.setZValue(20)  # above boundary outlines (z=10)
-                self._view.scene().addItem(item)
-                self._contour_items.append(item)
-            self._contour_path = path
+            self.status_message.emit("")
+            return
+        self._clear_contour()
+        self._contour_path = path
+        self._contour_token += 1
+        self.status_message.emit(f"Computing exact contour for {path}…")
+        self._contour_worker.request(self._physical, path, self._contour_token)
+
+    def _on_contour_ready(self, path, token, loops):
+        """Draw the computed contour unless a newer selection superseded it."""
+        if token != self._contour_token or path != self._contour_path:
+            return  # stale result from an older click
+        for loop in loops:
+            poly = QPolygonF([self._flip_y(x, y) for (x, y) in loop])
+            item = QGraphicsPolygonItem(poly)
+            pen = QPen(QColor(0xFF, 0xD4, 0x00), 2)
+            pen.setStyle(Qt.DashLine)
+            item.setPen(pen)
+            item.setBrush(QBrush(Qt.NoBrush))
+            item.setZValue(20)  # above boundary outlines (z=10)
+            self._view.scene().addItem(item)
+            self._contour_items.append(item)
+        self.status_message.emit(f"Contour: {path}")
 
     def _clear_contour(self):
         for it in self._contour_items:

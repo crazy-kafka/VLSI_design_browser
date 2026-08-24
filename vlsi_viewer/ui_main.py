@@ -46,9 +46,11 @@ class MainWindow(QMainWindow):
             self._hover_label = QLabel("")
             self.statusBar().addPermanentWidget(self._hover_label)
             self._layout.hover_changed.connect(self._hover_label.setText)
+            self._layout.status_message.connect(self._on_physical_status)
             from .model import density_column
             self._density = density_column(physical)
             self._density.series.ready.connect(self._on_density_ready)
+            self._density.series.status.connect(self._on_density_status)
         else:
             self.setCentralWidget(self._stack)
 
@@ -132,6 +134,16 @@ class MainWindow(QMainWindow):
     def _on_density_ready(self, path: str, value: float):
         """A background density computation finished -> refresh that tree row."""
         self._tree.update_density(path, value)
+
+    def _on_density_status(self, pending: int):
+        """Report background density progress in the status bar."""
+        if pending > 0:
+            self.statusBar().showMessage(f"Computing density… ({pending} pending)")
+        else:
+            self.statusBar().showMessage("Physical mode · density up to date")
+
+    def _on_physical_status(self, msg: str):
+        self.statusBar().showMessage(msg)
 
     def _do_search(self):
         if self._design1 is None:

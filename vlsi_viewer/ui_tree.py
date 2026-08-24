@@ -266,14 +266,17 @@ class HierarchyTree(QTreeWidget):
             return  # already populated with real children
         while item.childCount() > 0:  # drop the placeholder
             item.takeChild(0)
-        for child_path in self._visible_children(path):
-            item.addChild(self._make_item(child_path))
+        kids = [self._make_item(cp) for cp in self._visible_children(path)]
+        self.setUpdatesEnabled(False)
+        try:
+            item.addChildren(kids)   # batch insert
+        finally:
+            self.setUpdatesEnabled(True)
 
     def _on_expand(self, item: HierarchyItem):
         self._populate(item, item.data(0, Qt.UserRole))
         if self._sort_active and item.childCount() > 1:
             item.sortChildren(self._sort_column, self._sort_order)
-        self.resizeColumnToContents(0)
 
     # -- sorting -----------------------------------------------------------
     def _on_header_clicked(self, col: int):

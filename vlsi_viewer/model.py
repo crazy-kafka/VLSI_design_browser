@@ -82,6 +82,17 @@ class TreeView:
     paths: List[str]        # all hierarchy paths (for search)
 
 
+def _bounded_threads():
+    """Bound background density CPU so it can't starve the GUI thread.
+
+    Density is progressive (nice-to-have), so cap concurrency well below the
+    core count; the exact-contour worker has its own single thread.
+    """
+    import os
+    cpus = max(1, os.cpu_count() or 1)
+    return max(1, min(cpus // 2, 4))
+
+
 class _DensityJob(QRunnable):
     """Compute one hierarchy's density off the GUI thread, then deliver it."""
 
@@ -101,21 +112,25 @@ class _DensityJob(QRunnable):
 
 
 class _LazyDensity(QObject):
-    """Series-like mapping that computes density on a background thread.
+    """Series-like mapping that computes density on a bounded background pool.
 
     ``get(path)`` returns the cached value, or ``default`` while the computation
     is in flight and emits ``ready(path, value)`` on the main thread when done.
-    The tree renders "—" until then, so a large design stays responsive.
+    The pool is capped at ~half the cores so background density can't saturate
+    the machine and starve the GUI thread. ``status`` reports the number of
+    pending jobs.
     """
 
     ready = pyqtSignal(str, float)
+    status = pyqtSignal(int)  # number of density jobs pending (0 = idle)
 
     def __init__(self, physical):
         super().__init__()
         self._physical = physical
         self._cache = {}
         self._pending = set()
-        self._pool = QThreadPool.globalInstance()
+        self._pool = QThreadPool()
+        self._pool.setMaxThreadCount(_bounded_threads())
         self.ready.connect(self._record)
 
     def get(self, path, default=None):
@@ -123,12 +138,51 @@ class _LazyDensity(QObject):
             return self._cache[path]
         if path not in self._pending:
             self._pending.add(path)
+            self.status.emit(len(self._pending))
             self._pool.start(_DensityJob(self._physical, path, self))
         return default
 
     def _record(self, path, value):
         self._cache[path] = value
         self._pending.discard(path)
+        self.status.emit(len(self._pending))
+
+
+class _ContourJob(QRunnable):
+    """Compute one hierarchy's contour loops off the GUI thread."""
+
+    def __init__(self, physical, path, token, owner):
+        super().__init__()
+        self._physical = physical
+        self._path = path
+        self._token = token
+        self._owner = owner
+
+    def run(self):
+        try:
+            loops = self._physical.contour_for(self._path)
+        except Exception:  # a bad path must not break the pool
+            loops = []
+        self._owner.contour_ready.emit(self._path, self._token, loops)
+
+
+class ContourWorker(QObject):
+    """Owns a single-threaded pool so the selected contour beats density work.
+
+    ``request(path, token)`` queues an exact-contour computation; results arrive
+    on ``contour_ready(path, token, loops)``. A caller-supplied token lets the
+    receiver ignore stale results after a newer selection.
+    """
+
+    contour_ready = pyqtSignal(str, int, object)
+
+    def __init__(self):
+        super().__init__()
+        self._pool = QThreadPool()
+        self._pool.setMaxThreadCount(1)  # one exact contour at a time (priority)
+
+    def request(self, physical, path, token):
+        self._pool.start(_ContourJob(physical, path, token, self))
 
 
 def density_column(physical) -> Column:

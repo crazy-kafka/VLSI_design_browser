@@ -143,7 +143,14 @@ def test_tree_click_without_physical_does_not_raise(app, design):
     w._on_node_clicked("TOP/MACROA/UNIT1")   # must not raise AttributeError
 
 
-def test_layout_contour_toggle(app, tmp_path):
+def _pump_events(app, ms=400):
+    from PyQt5.QtCore import QEventLoop, QTimer
+    loop = QEventLoop()
+    QTimer.singleShot(ms, loop.quit)
+    loop.exec_()
+
+
+def _tiny_layout(tmp_path):
     import json as _json
     from vlsi_viewer.physical import build_physical
     from vlsi_viewer.ui_layout import LayoutView
@@ -158,17 +165,34 @@ def test_layout_contour_toggle(app, tmp_path):
             "b": {"cell_name": "C1", "location_x": 2, "location_y": 0},
         },
     }))
-    pd_ = build_physical([str(top)], str(cell), grid_size=4.0)
-    view = LayoutView(pd_)
+    return LayoutView(build_physical([str(top)], str(cell), grid_size=4.0))
+
+
+def test_layout_contour_toggle(app, tmp_path):
+    view = _tiny_layout(tmp_path)
     assert view._contour_path is None
-    view.toggle_contour("TOP")           # show
+    view.toggle_contour("TOP")           # show (async: selected immediately)
     assert view._contour_path == "TOP"
+    assert view._contour_items == []     # not computed synchronously
+    _pump_events(app)                     # let the background worker deliver
     assert len(view._contour_items) >= 1
-    # contour items are above the boundary outlines (z=20)
-    assert view._contour_items[0].zValue() == 20
-    view.toggle_contour("TOP")           # click again -> hide
+    assert view._contour_items[0].zValue() == 20   # above boundary outlines
+    view.toggle_contour("TOP")           # click again -> clears immediately
     assert view._contour_path is None
     assert view._contour_items == []
+
+
+def test_contour_stale_token_ignored(app, tmp_path):
+    """A stale background result must not overwrite a newer selection."""
+    view = _tiny_layout(tmp_path)
+    loop = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)]
+    view.toggle_contour("TOP")            # token 1
+    view.toggle_contour("TOP/a")          # token 2, supersedes
+    assert view._contour_path == "TOP/a"
+    view._on_contour_ready("TOP", 1, [loop])     # stale -> ignored
+    assert view._contour_items == []
+    view._on_contour_ready("TOP/a", 2, [loop])   # current -> drawn
+    assert len(view._contour_items) == 1
 
 
 def test_layout_legend_overlay(app, tmp_path):
