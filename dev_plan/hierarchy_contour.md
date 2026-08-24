@@ -69,9 +69,24 @@ Contour + density are lazy and cached. Two changes scale them to large designs
    (pure translation), a leaf's global box is its local box + the accumulated
    origin, skipping `dbTransform` and the 4-corner min/max.
 
+7. **Asynchronous contour**: `LayoutView.toggle_contour` computes the exact
+   contour on a dedicated single-threaded `ContourWorker` (so the clicked contour
+   beats density work) with a request token; a stale result is discarded and the
+   same-click clears immediately. Status ("Computing exact contour…") is shown in
+   the status bar.
+8. **Bounded density pool**: `_LazyDensity` uses its own pool capped at
+   `max(1, min(cpus//2, 4))` threads (not `QThreadPool.globalInstance()`), so
+   background density can't saturate every core; it emits a pending-count status
+   signal surfaced in the status bar.
+9. **Tree GUI micro-fixes**: child insertion is batched (`addChildren` + disabled
+   updates) and the unconditional per-expand `resizeColumnToContents(0)` was
+   removed.
+
 Bundled-sample timings: build_physical ~1.7 s, contour of a sub-block ~0.1 s, a
 core ~0.5 s, the whole die ~1.5 s (all cached). A synthetic 1M-cell build takes
-~6.8 s (walk ~2.3 s/M). `--verbose` logs each contour/density computation.
+~6.8 s (walk ~2.3 s/M). `--verbose` logs each contour/density computation. A
+16ms heartbeat during background density + contour on the bundled sample never
+exceeded a ~29ms tick gap (no sustained GUI stall).
 
 ## Verification
 - `python -m pytest -q` (79 passed) incl. cross-backend contour tests
