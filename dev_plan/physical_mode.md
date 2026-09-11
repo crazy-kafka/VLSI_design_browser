@@ -31,6 +31,11 @@ There is a file named coorinateProcess.py under vlsi_viewer directory, which has
 # CLI change
 Add new arguments --physical_mode to trigger this new feature.
 
+*(Later: `--physical_mode` is now a flag of the `json` and `def` subcommands rather
+than a top-level one, which also makes the exclusivity with compare mode structural
+for `verilog`, which has no physical mode. See
+`dev_plan/eda_file_support_asbuilt.md`.)*
+
 # do not need to support compare mode support
 Currently, physical mode do not support compare mode, --compare_block_info and --physical_mode are mutaully exclusive
 

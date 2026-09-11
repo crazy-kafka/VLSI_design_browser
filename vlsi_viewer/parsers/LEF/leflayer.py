@@ -1,0 +1,40 @@
+from __future__ import annotations
+from typing import List, Tuple, Dict, Union, Iterable, TYPE_CHECKING, AnyStr
+
+if TYPE_CHECKING:
+    pass
+
+
+class LefLayer:
+
+    def __init__(self, layer_name: AnyStr):
+        self.name = layer_name
+        self.type = ''
+        self.direction = ''
+        self.pitch_x = 0.0
+        self.pitch_y = 0.0
+        self.width = 0
+        self.min_width = 0.0
+        self.max_width = 0.0
+        self.spacing = 0.0
+        self.area = 0.0
+
+        self.region = None
+        self.based_layer = None
+
+    def __repr__(self):
+        return f'''
+Lef Layer {self.name}
+    type        {self.type}
+    direction   {self.direction}
+    pitch       {self.pitch_x} {self.pitch_y}
+    width       {self.width}
+    min_width   {self.min_width}
+    max_width   {self.max_width}
+    spacing     {self.spacing}
+    area        {self.area}
+    region      {self.region}
+    based_layer {self.based_layer}
+'''
+
+

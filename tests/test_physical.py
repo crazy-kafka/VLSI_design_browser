@@ -223,3 +223,54 @@ def test_boundary_polys_collected(tmp_path):
     # sub-block boundary translated to global: starts at (10, 0)
     sub_poly = dict(pd_.boundary_polys)["B"]
     assert min(x for x, _ in sub_poly) == 10.0
+
+
+@pytest.mark.parametrize("where", ["cell", "instance"])
+def test_physical_only_is_density_only(tmp_path, where):
+    """Physical-only area is real area: it raises density and nothing else.
+
+    Three builds of the same design - the filler present and ordinary, present and
+    physical-only, and absent altogether - pin down each surface independently: the
+    density grid must match the "ordinary" build, while leakage, dynamic, ULVT,
+    boxes_for, the contour and Density% must all match the "absent" build.
+    """
+    FILL_SIZE = 4  # 2x2 -> exactly one quarter of a 4.0 grid bin
+
+    def build(mode):
+        fill = {"area": FILL_SIZE, "size_x": 2, "size_y": 2, "is_ULVT": True}
+        if mode == "physical" and where == "cell":
+            fill["is_physical_only"] = True
+        cell = tmp_path / f"cell_{mode}.json"
+        cell.write_text(json.dumps({"C1": {"area": 4, "size_x": 2, "size_y": 2},
+                                    "FILL": fill}))
+        inst = {"c1": {"cell_name": "C1", "location_x": 0, "location_y": 0,
+                       "leakage_power": 1.0, "dynamic_power": 2.0}}
+        if mode != "absent":
+            f1 = {"cell_name": "FILL", "location_x": 4, "location_y": 0,
+                  "leakage_power": 5.0, "dynamic_power": 7.0}
+            if mode == "physical" and where == "instance":
+                f1["is_physical_only"] = True
+            inst["f1"] = f1
+        b = _block(tmp_path, "TOP", inst, boundary=[(0, 0), (20, 20)],
+                   fname=f"top_{mode}.json")
+        return build_physical([b], str(cell), grid_size=4.0)
+
+    ordinary, physical, absent = build("ordinary"), build("physical"), build("absent")
+
+    # density keeps the filler's area (bin (0, 1) spans x 4..8)
+    assert physical.density[0, 1] == pytest.approx(FILL_SIZE / 16)
+    assert physical.density[0, 1] == pytest.approx(ordinary.density[0, 1])
+    assert absent.density[0, 1] == pytest.approx(0.0)
+
+    # the other three grids drop it entirely
+    for kind in ("leakage", "dynamic", "ulvt"):
+        assert getattr(ordinary, kind)[0, 1] > 0.0, f"{kind} should see the filler"
+        assert getattr(physical, kind)[0, 1] == pytest.approx(0.0), kind
+        assert getattr(physical, kind)[0, 1] == pytest.approx(getattr(absent, kind)[0, 1]), kind
+
+    # hierarchy surfaces exclude it: only the contour tree and Density% are affected
+    assert len(ordinary.boxes_for("TOP")) == 2
+    assert len(physical.boxes_for("TOP")) == 1
+    assert len(physical.boxes_for("TOP")) == len(absent.boxes_for("TOP"))
+    assert physical.contour_for("TOP") == absent.contour_for("TOP")
+    assert physical.density_for("TOP") == pytest.approx(absent.density_for("TOP"))

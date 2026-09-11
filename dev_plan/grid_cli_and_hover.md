@@ -26,5 +26,8 @@
 
 ## Tests
 - `tests/test_cli.py`: `--grid_size` default and explicit-value parsing.
+  *(Later: the flags moved under subcommands - `vlsi-viewer {json,verilog,def}`;
+  `--grid_size` now lives on the `json` and `def` subparsers. See
+  `dev_plan/eda_file_support_asbuilt.md`.)*
 - `tests/test_gui_smoke.py`: dropped the `_src_paths`/`_src_cell_path` lines
   (obsolete); added `test_layout_hover_reports_coords_and_grid`.

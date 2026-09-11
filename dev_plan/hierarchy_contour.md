@@ -39,6 +39,9 @@ changes.
 `--contour_gap N` overrides the merge gap (default `2 * grid_size`; factor in
 `config.DEFAULT_CONTOUR_GAP_FACTOR`).
 
+*(Later: the flag lives on the `json` and `def` subcommands, which are the two that
+can render a heat map - see `dev_plan/eda_file_support_asbuilt.md`.)*
+
 ## Performance notes
 Contour + density are lazy and cached. Two changes scale them to large designs
 (a 10M-instance subsystem):

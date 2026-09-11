@@ -113,6 +113,10 @@ def load_blocks(block_paths) -> pd.DataFrame:
 
 def _build_leaves(inst: pd.DataFrame, cells: pd.DataFrame) -> pd.DataFrame:
     """Join cell attributes onto instances and derive per-leaf fields."""
+    # ``is_physical_only`` exists on both sides. Rename the cell-side copy before the
+    # merge: pandas would otherwise suffix both to ``..._x`` / ``..._y`` and the
+    # ``leaves["is_physical_only"]`` read in _flatten would raise KeyError.
+    cells = cells.rename(columns={"is_physical_only": "cell_is_physical_only"})
     leaves = inst.merge(cells, on="cell_name", how="left")
 
     # A cell is missing when its cell_name is absent OR not found in cell_info.
@@ -123,6 +127,13 @@ def _build_leaves(inst: pd.DataFrame, cells: pd.DataFrame) -> pd.DataFrame:
     # clean; missing cells are excluded later via the is_missing flag.
     for spec in schema.CELL_ATTRS:
         leaves[spec.name] = leaves[spec.name].fillna(spec.default)
+
+    # An instance is physical-only if either the instance or its library cell says so.
+    leaves["is_physical_only"] = (
+        leaves["is_physical_only"]
+        | leaves["cell_is_physical_only"].fillna(False).astype(bool)
+    )
+    leaves = leaves.drop(columns=["cell_is_physical_only"])
 
     leaves["parent_path"] = leaves["leaf_instance_name"].str.rsplit("/", n=1).str[0]
     no_slash = ~leaves["leaf_instance_name"].str.contains("/", regex=False)

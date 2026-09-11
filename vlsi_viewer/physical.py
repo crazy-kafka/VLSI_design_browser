@@ -29,7 +29,8 @@ class PhysicalData:
 
     def __init__(self, top_name, boundary_polys, grid_size,
                  extent, rows, cols, density, leakage, dynamic, ulvt,
-                 geom, is_ulvt, is_macro, leak, dyn, leaf_paths, contour_gap):
+                 geom, is_ulvt, is_macro, is_phys_only, leak, dyn, leaf_paths,
+                 contour_gap):
         self.top_name = top_name
         self.boundary_polys = boundary_polys   # list of (name, [(x, y), ...]) in global coords
         self.grid_size = grid_size
@@ -43,6 +44,9 @@ class PhysicalData:
         self._geom = geom                      # (N, 4) float32 [x0,y0,x1,y1], sorted by path
         self._is_ulvt = is_ulvt                # (N,) bool
         self._is_macro = is_macro              # (N,) bool
+        # (N,) bool. These boxes exist only for the density grid, so every other
+        # surface (contour, Density%, power maps) masks them out.
+        self._is_phys_only = is_phys_only
         self._leak = leak                      # (N,) float32
         self._dyn = dyn                        # (N,) float32
         self._leaf_paths = leaf_paths          # (N,) object array, sorted lexicographically
@@ -73,8 +77,13 @@ class PhysicalData:
         return slice(left, right)
 
     def boxes_for(self, path: str):
-        """(k, 4) float32 box array for ``path`` and its descendants."""
-        return self._geom[self._slice_for(path)]
+        """(k, 4) float32 box array for ``path`` and its descendants.
+
+        Physical-only boxes are dropped here: they exist for the density grid alone, so
+        they must not reach the contour or the Density% metric.
+        """
+        sl = self._slice_for(path)
+        return self._geom[sl][~self._is_phys_only[sl]]
 
     def _contour(self, path: str, gap: float):
         """Cached contour loops for a path at a gap (thread-safe)."""
@@ -84,7 +93,7 @@ class PhysicalData:
             cached = self._contour_cache.get(key)
             if cached is not None:
                 return cached
-        boxes = self._geom[self._slice_for(path)]
+        boxes = self.boxes_for(path)
         t0 = time.perf_counter()
         loops = contour.contour_loops(boxes, gap)
         with self._contour_lock:
@@ -101,7 +110,7 @@ class PhysicalData:
             cached = self._contour_cache.get(key)
             if cached is not None:
                 return cached
-        boxes = self._geom[self._slice_for(path)]
+        boxes = self.boxes_for(path)
         t0 = time.perf_counter()
         area = contour.contour_area(boxes, gap)
         with self._contour_lock:
@@ -120,12 +129,16 @@ class PhysicalData:
         ``contour_area`` is the gap-padded spacing scope (``self.contour_gap``),
         so a hierarchy's internal spacing lowers its density. Returns NaN when
         undefined (no non-macro area or denominator <= 0).
+
+        Physical-only boxes are ignored entirely, so filler area neither raises the
+        numerator nor distorts the macro term.
         """
         area = self._contour_area(path, self.contour_gap)
         sl = self._slice_for(path)
+        phys = self._is_phys_only[sl]
         box_area = (self._geom[sl, 2] - self._geom[sl, 0]) * (self._geom[sl, 3] - self._geom[sl, 1])
-        mac = float(box_area[self._is_macro[sl]].sum())
-        non = float(box_area[~self._is_macro[sl]].sum())
+        mac = float(box_area[self._is_macro[sl] & ~phys].sum())
+        non = float(box_area[~self._is_macro[sl] & ~phys].sum())
         den = area - mac
         if not (den > 0 and non > 0):
             return float("nan")
@@ -190,11 +203,13 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
              for name, row in cells.iterrows()}
     is_ulvt = {name: bool(row["is_ULVT"]) for name, row in cells.iterrows()}
     is_macro = {name: bool(row["is_macro"]) for name, row in cells.iterrows()}
+    phys_only_cells = {name for name, row in cells.iterrows()
+                       if bool(row["is_physical_only"])}
 
     chain = []        # outermost-first list of (orient, origin) container frames
     boundary_polys = []
     _xs0, _ys0, _xs1, _ys1 = [], [], [], []
-    _leaks, _dyns, _ulvts, _macros, _paths = [], [], [], [], []
+    _leaks, _dyns, _ulvts, _macros, _phys_onlies, _paths = [], [], [], [], [], []
 
     def _join(prefix, rel):
         return f"{prefix}/{rel}" if prefix else rel
@@ -241,8 +256,6 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
                 trans_only = was_trans
                 chain.pop()
                 continue
-            if getattr(row, "is_physical_only"):
-                continue
             if cell not in sizes:
                 continue  # missing cell -> no geometry
             orient = getattr(row, "orient") or "N"
@@ -264,6 +277,10 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
             _dyns.append(float(getattr(row, "dynamic_power")))
             _ulvts.append(is_ulvt.get(cell, False))
             _macros.append(is_macro.get(cell, False))
+            # Physical-only boxes are kept: they are real area, so they belong in the
+            # density map. Everything else derived from them is suppressed below.
+            _phys_onlies.append(bool(getattr(row, "is_physical_only"))
+                                or cell in phys_only_cells)
             _paths.append(_join(prefix, getattr(row, "leaf_instance_name")))
         visiting.discard(name)
 
@@ -279,11 +296,13 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
     dyn = np.asarray(_dyns, dtype=np.float32)
     is_ulvt = np.asarray(_ulvts, dtype=bool)
     is_macro = np.asarray(_macros, dtype=bool)
+    is_phys_only = np.asarray(_phys_onlies, dtype=bool)
     leaf_paths = np.asarray(_paths, dtype=object)
     order = np.argsort(leaf_paths, kind="stable")
     geom, leak, dyn = geom[order], leak[order], dyn[order]
-    is_ulvt, is_macro, leaf_paths = is_ulvt[order], is_macro[order], leaf_paths[order]
-    del _xs0, _ys0, _xs1, _ys1, _leaks, _dyns, _ulvts, _macros, _paths
+    is_ulvt, is_macro = is_ulvt[order], is_macro[order]
+    is_phys_only, leaf_paths = is_phys_only[order], leaf_paths[order]
+    del _xs0, _ys0, _xs1, _ys1, _leaks, _dyns, _ulvts, _macros, _phys_onlies, _paths
 
     bx = [p[0] for p in top_boundary]
     by = [p[1] for p in top_boundary]
@@ -309,9 +328,12 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
     by1 = np.minimum(geom[:, 3], y1)
     keep = (bx1 > bx0) & (by1 > by0)
     bx0, by0, bx1, by1 = bx0[keep], by0[keep], bx1[keep], by1[keep]
-    ul = is_ulvt[keep]
-    lk = leak[keep]
-    dynv = dyn[keep]
+    # Physical-only cells are area only: they must raise ``density`` (every kept box
+    # contributes to it) but not the ULVT/leakage/dynamic grids.
+    phys = is_phys_only[keep]
+    ul = is_ulvt[keep] & ~phys
+    lk = np.where(phys, 0.0, leak[keep])
+    dynv = np.where(phys, 0.0, dyn[keep])
     box_area = (bx1 - bx0) * (by1 - by0)
     ix0 = np.maximum(0, np.minimum(cols - 1, ((bx0 - x0) // gs).astype(np.intp)))
     ix1 = np.maximum(0, np.minimum(cols - 1, ((bx1 - x0) // gs).astype(np.intp)))
@@ -396,7 +418,7 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
         dynamic[r0:r1 + 1, c0:c1 + 1] += frac * dynv[i]
 
     # Density ratios are in [0, 1]. Clamp float round-off so fully-packed bins
-    # land on exactly 1.0 (the heat map renders 100% density as white) instead
+    # land on exactly 1.0 (the heat map's top gradient stop, near-white) instead
     # of 1.0 +/- 1e-13.
     density = np.clip(density, 0.0, 1.0)
     density[density > 1.0 - 1e-9] = 1.0
@@ -407,4 +429,5 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
                 n, rows, cols, extent)
     return PhysicalData(top, boundary_polys, grid_size,
                         extent, rows, cols, density, leakage, dynamic, ulvt,
-                        geom, is_ulvt, is_macro, leak, dyn, leaf_paths, contour_gap)
+                        geom, is_ulvt, is_macro, is_phys_only, leak, dyn,
+                        leaf_paths, contour_gap)

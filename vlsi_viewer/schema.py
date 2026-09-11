@@ -50,6 +50,11 @@ CELL_ATTRS = [
     AttrSpec("is_inverter", "bool", False),
     AttrSpec("is_clock_cell", "bool", False),
     AttrSpec("is_integrated_clock_gating_cell", "bool", False),
+    # Physical-only cells (FILL/TAP/DCAP/...) are real area but carry no logic: they
+    # count in the density heat map only, and are excluded from the other maps, the
+    # hierarchy tree, the contour and the Density% metric. Set here so a cell library
+    # marks a cell once instead of every instance of it.
+    AttrSpec("is_physical_only", "bool", False),
 ]
 
 

@@ -170,6 +170,10 @@ Python 3.9, PyQt5, pandas/numpy (scipy if needed). Dev: Windows 11, 8GB, ≤100k
 - `ui_compare.py` — two-version load + diff view.
 - `config.py` — threshold default, cache location.
 
+*(Added later, not in the original breakdown: `physical.py` / `heatmap.py` / `contour.py` /
+`ui_layout.py` for the 2-D heat-map mode, `parsers/` for reading LEF/DEF/Verilog directly,
+and `quickstart.py`. See `dev_plan/eda_file_support_asbuilt.md`.)*
+
 ## 12. Testing & Verification
 
 - Unit tests for metric formulas (hand-computed small netlist).

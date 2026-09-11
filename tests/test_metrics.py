@@ -1,3 +1,4 @@
+import json
 import os
 
 import numpy as np
@@ -192,3 +193,35 @@ def test_bar_series():
     zero = pd.Series([0.0, 0.0], index=pd.Index(["TOP", "TOP/A"]))
     bar_zero = bar_series(zero, ["TOP"], "area")
     assert pd.isna(bar_zero.loc["TOP"])
+
+
+@pytest.mark.parametrize("where", ["cell", "instance"])
+def test_physical_only_excluded_from_tree(tmp_path, where):
+    """A subtree made only of physical-only cells does not appear in the tree.
+
+    The hierarchy node set is built from counted leaves only (metrics._flatten), so
+    filler contributes no node and no metric - while an ordinary copy of the same
+    cell does.
+    """
+    def build(flag):
+        fill = {"area": 1.0}
+        if flag and where == "cell":
+            fill["is_physical_only"] = True
+        (tmp_path / f"cell_{flag}.json").write_text(json.dumps({
+            "C1": {"area": 1.0, "is_inverter": True},
+            "FILL": fill,
+        }))
+        inst = {"u1": {"cell_name": "C1"},
+                "padzone/f1": {"cell_name": "FILL"}}
+        if flag and where == "instance":
+            inst["padzone/f1"]["is_physical_only"] = True
+        (tmp_path / f"top_{flag}.json").write_text(json.dumps(
+            {"top_name": "TOP", "instances": inst}))
+        return build_design([str(tmp_path / f"top_{flag}.json")],
+                            str(tmp_path / f"cell_{flag}.json"))
+
+    plain, physical = build(False), build(True)
+    assert "TOP/padzone" in plain.hier.index          # filler is a normal cell here
+    assert plain.hier.loc["TOP/padzone", "count"] == 1
+    assert "TOP/padzone" not in physical.hier.index   # flagged -> no node at all
+    assert physical.hier.loc["TOP", "count"] == 1     # only C1 is counted
