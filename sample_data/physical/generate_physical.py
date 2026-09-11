@@ -7,9 +7,17 @@ and each sub-block has thousands of standard cells plus a small SRAM bank. An
 the horizontal band) sits between the cores.
 
 Placement is non-overlapping by construction: standard cells are laid into
-rows with a monotonically advancing cursor, and macros sit in dedicated
+site-aligned rows by a cursor that only advances, and macros sit in dedicated
 strips/bands. Overlap is the only way the density heat map can exceed 1.0, so
-max density stays <= 1.0. The die side is solved so the average density (total
+max density stays <= 1.0.
+
+Whitespace is *distributed inside* each row rather than left as one stripe at the
+region edge: a smooth 2-D activity field sets the local target fill (~0.38 where
+the field is sparsest through ~0.90 where it is densest) and each cell pays off
+that share as site-sized holes, so the holes stay evenly spread. Bin-scale texture
+can only come from leaving varying whitespace, because ``build_physical`` clips
+density at 1.0 and skips physical-only cells - without this the map degenerates
+into solid 100% rectangles. The die side is solved so the average density (total
 cell area / die area) lands at ~60%, and the generator self-verifies the result
 through ``vlsi_viewer.physical.build_physical``.
 
@@ -90,11 +98,32 @@ UNCORE_STRIP = 15000   # std cells in the vertical cross strip (bottom + top hal
 UNCORE_ARMS = 1500     # std cells in each horizontal-band arm
 N_L2 = 8               # L2 SRAM macros in the horizontal band (4 per arm)
 
-ROW_UTIL = 0.85        # fraction of each region's width filled per row
+SITE = 0.2             # std-cell site grid (every library width is a multiple of 0.2)
+ROW_H = 1.0            # single-height row pitch == standard-cell height
 
 # ---------------------------------------------------------------------------
 # Placement helpers (non-overlapping by construction)
 # ---------------------------------------------------------------------------
+
+def _activity(x, y, phase):
+    """Smooth 2-D activity field in [0, 1]: dense datapath vs sparse control.
+
+    A per-row constant would only ever produce vertical stripes, so the field varies
+    in both x and y; ``place_std_rows`` turns it into *distributed* whitespace.
+    """
+    v = (0.70
+         + 0.16 * math.sin(x / 53.0 + phase)
+         + 0.13 * math.sin(y / 27.0 + 2.1)
+         + 0.09 * math.sin((x + y) / 29.0 + 1.3)
+         + 0.06 * math.sin(x / 11.0 + 0.4))
+    return min(1.0, max(0.0, v))
+
+
+def _row_util(x, y, phase):
+    """Target fill fraction at (x, y): ~0.38 where the field is sparsest, ~0.90 where
+    it is densest (``_activity`` only ever reaches about 0.26 at its lowest)."""
+    return min(0.95, max(0.15, 0.20 + 0.70 * _activity(x, y, phase)))
+
 
 def _attrs(name, rng):
     return {
@@ -105,62 +134,66 @@ def _attrs(name, rng):
     }
 
 
-def place_std_rows(cells, x0, y0, w, h, util=ROW_UTIL):
-    """Place std cells into rows over (x0,y0,w,h); returns (name,x,y,orient)
-    tuples. Cells advance a cursor left-to-right, rows stack bottom-up, so no
-    two cells overlap. Cells that do not fit are dropped."""
-    placed = []
-    row_right = x0 + w * util
-    x, y = x0, y0
-    top = y0 + h
-    idx = 0
-    for name in cells:
-        sx = CELLS[name]["size_x"]
-        if x + sx > row_right:
-            x = x0
-            y += 1.0
-            if y + 1.0 > top:
-                break
-        placed.append((name, x, y, ("N", "FN")[idx % 2]))
-        x += sx
-        idx += 1
-    return placed
-
-
-def place_std_rows_blocked(cells, x0, y0, w, h, blocked, util=ROW_UTIL):
-    """Like place_std_rows but skips x-ranges covered by ``blocked`` rects
-    (list of (bx0, by0, bx1, by1)) on the rows they intersect."""
-    placed = []
-    y = y0
-    ci = 0
-    while y + 1.0 <= y0 + h and ci < len(cells):
-        segs = [(x0, x0 + w * util)]
-        for bx0, by0, bx1, by1 in blocked:
-            if by1 <= y or by0 >= y + 1.0:
-                continue
-            nb = (bx0, bx1)
-            new = []
-            for s0, s1 in segs:
-                if nb[0] >= s1 or nb[1] <= s0:
-                    new.append((s0, s1))
-                else:
-                    if nb[0] > s0:
-                        new.append((s0, nb[0]))
-                    if nb[1] < s1:
-                        new.append((nb[1], s1))
-            segs = new
+def _row_segments(x0, w, y, blocked):
+    """Allowed x-spans in the row at ``y`` after subtracting ``blocked`` rects."""
+    segs = [(x0, x0 + w)]
+    for bx0, by0, bx1, by1 in blocked:
+        if by1 <= y or by0 >= y + ROW_H:
+            continue
+        trimmed = []
         for s0, s1 in segs:
+            if bx1 <= s0 or bx0 >= s1:
+                trimmed.append((s0, s1))
+            else:
+                if bx0 > s0:
+                    trimmed.append((s0, bx0))
+                if bx1 < s1:
+                    trimmed.append((bx1, s1))
+        segs = trimmed
+    return segs
+
+
+def place_std_rows(cells, x0, y0, w, h, blocked=(), phase=0.0, rng=random):
+    """Place std cells into site-aligned rows over (x0,y0,w,h).
+
+    The cursor only ever moves forward, so no two cells overlap. Whitespace is left
+    *inside* rows - as routing/filler sized holes at a finer scale than a heat-map bin
+    - instead of one stripe at the region edge. That distribution is what gives the
+    density map a realistic mid-range texture rather than solid 100% blocks. Rows skip
+    the x-ranges covered by ``blocked`` rects on the rows they intersect, so logic rows
+    run past and beneath macros as they do in a real row-based placement.
+
+    Returns ``(placed, dropped)``; ``placed`` holds (name, x, y, orient) tuples.
+    """
+    placed = []
+    top = y0 + h
+    y = y0
+    i = 0
+    while i < len(cells) and y + ROW_H <= top:
+        for s0, s1 in _row_segments(x0, w, y, blocked):
             x = s0
-            while ci < len(cells):
-                name = cells[ci]
-                sx = CELLS[name]["size_x"]
+            owed = 0.0
+            while i < len(cells):
+                name = cells[i]
+                sx = max(SITE, round(CELLS[name]["size_x"] / SITE) * SITE)
                 if x + sx > s1:
                     break
-                placed.append((name, x, y, "N"))
+                placed.append((name, x, y, ("N", "FN")[i % 2]))
                 x += sx
-                ci += 1
-        y += 1.0
-    return placed
+                i += 1
+                # Leave behind this cell's share of whitespace. Accruing a debt and
+                # paying it in site-sized gaps keeps the holes evenly spread, so bin
+                # density tracks the smooth activity field. Rolling a die per cell
+                # instead puts a random number of holes in every bin, which renders
+                # as per-bin speckle rather than a utilisation field.
+                owed += (1.0 - _row_util(x, y, phase)) * sx
+                sites = int(owed / SITE)
+                if sites > 0:
+                    sites = max(1, sites + rng.choice((-1, 0, 0, 1)))
+                    x += sites * SITE
+                    owed -= sites * SITE
+        y += ROW_H
+    return placed, len(cells) - i
 
 
 def place_sram_stack(n, x0, y0, orient="N"):
@@ -201,7 +234,9 @@ def build_subblock(name, rng):
     """One IFU / IEX / LSU block: std cells in rows + a vertical SRAM strip.
 
     Cell coordinates are in the sub-block's OWN local frame (origin 0,0); the
-    core block places each sub-block at its core-local offset.
+    core block places each sub-block at its core-local offset. Rows span the whole
+    region and treat the SRAM stack as a blockage, so logic reclaims the area beside
+    and beneath the macros instead of reserving a dead strip for them.
     """
     n_std = SUB_STD[name]
     n_sram = SUB_SRAM[name]
@@ -209,17 +244,18 @@ def build_subblock(name, rng):
     if name == "IFU":
         # top strip of the core (placed by CORE at core-local (0, 0))
         region = (0.0, 0.0, C, 0.32 * C)
-        std_rect = (0.0, 0.0, C - SRAM_W, 0.32 * C)
         sram_x, sram_y = C - SRAM_W, 0.0
     else:
         # IEX / LSU bottom half, 0.5*C wide each (placed by CORE at x-offset)
         region = (0.0, 0.0, 0.5 * C, 0.68 * C)
-        std_rect = (0.0, 0.0, 0.5 * C - SRAM_W, 0.68 * C)
         sram_x, sram_y = 0.5 * C - SRAM_W, 0.0
+    phase = {"IFU": 0.4, "IEX": 1.7, "LSU": 3.1}[name]
 
-    cells = [rng.choice(STD_POOL) for _ in range(n_std)]
-    std = place_std_rows(cells, *std_rect)
     sram = place_sram_stack(n_sram, sram_x, sram_y)
+    blocked = [(x, y, x + SRAM_W, y + SRAM_H) for _, x, y, _ in sram]
+    cells = [rng.choice(STD_POOL) for _ in range(n_std)]
+    std, dropped = place_std_rows(cells, *region, blocked=blocked, phase=phase, rng=rng)
+    assert not dropped, f"{name}: {dropped} std cells did not fit"
 
     insts = _insts("std", std, rng)
     insts.update(_insts("sram", sram, rng))
@@ -276,9 +312,12 @@ def build_top(die, rng):
     strip_rects = [strip_b, strip_t]
     cells = [rng.choice(STD_POOL) for _ in range(UNCORE_STRIP)]
     half = (len(cells) + 1) // 2
-    for i, (prefix, rect) in enumerate(zip(("uncore/b", "uncore/t"), strip_rects)):
+    for i, (prefix, rect, phase) in enumerate(zip(("uncore/b", "uncore/t"),
+                                                   strip_rects, (0.7, 2.1))):
         part = cells[i * half:(i + 1) * half]
-        insts.update(_insts(prefix, place_std_rows(part, *rect), rng))
+        placed, dropped = place_std_rows(part, *rect, phase=phase, rng=rng)
+        assert not dropped, f"{prefix}: {dropped} std cells did not fit"
+        insts.update(_insts(prefix, placed, rng))
 
     # --- 8 L2 SRAM macros in the horizontal band arms ---
     band_y0 = m + C + (gap - SRAM_H) / 2.0
@@ -294,7 +333,9 @@ def build_top(die, rng):
     blocked = [(x, y, x + SRAM_W, y + SRAM_H) for _, x, y, _ in l2]
     blocked.append((m + C, m, m + C + gap, m + 2 * C + gap))  # vertical strip
     arm_cells = [rng.choice(STD_POOL) for _ in range(UNCORE_ARMS * 2)]
-    insts.update(_insts("uncore/arm", place_std_rows_blocked(arm_cells, *band, blocked), rng))
+    arms, dropped = place_std_rows(arm_cells, *band, blocked=blocked, phase=4.3, rng=rng)
+    assert not dropped, f"uncore/arm: {dropped} std cells did not fit"
+    insts.update(_insts("uncore/arm", arms, rng))
 
     return {"top_name": "CPU_CLUSTER",
             "boundary": _rect_poly(0.0, 0.0, die, die),
@@ -360,6 +401,8 @@ def verify():
     except ImportError:
         print("  verify: vlsi_viewer not importable; skipped")
         return
+    import numpy as np
+
     files = ["instance_info.json", "CORE.json", "IFU.json", "IEX.json", "LSU.json"]
     paths = [os.path.join(HERE, f) for f in files]
     pd_ = build_physical(paths, os.path.join(HERE, "cell_info.json"))
@@ -369,17 +412,47 @@ def verify():
     x0, y0, x1, y1 = pd_.extent
     die_area = (x1 - x0) * (y1 - y0)
     avg = total_area / die_area
-    dmax = float(pd_.density.max())
+    dens = pd_.density
+    dmax = float(dens.max())
 
-    print(f"  verify: {n} leaf boxes, avg density {avg:.3f}, "
-          f"max density bin {dmax:.3f}")
+    # Shape of the occupied-bin histogram. A flat, saturated map passes every
+    # extreme-value check (it did, at 88% of bins pinned to 1.0), so guard the
+    # distribution itself - that is what makes the map read as a utilisation field.
+    vals = dens[dens > 0.0]
+    saturated = float((vals >= 0.99).mean())
+    midrange = float(((vals >= 0.2) & (vals <= 0.95)).mean())
+    distinct = len(np.unique(np.round(vals, 4)))
+    # Smoothness: neighbouring bins in a utilisation field hold similar density.
+    # Placing whitespace by an independent draw per cell instead puts a random
+    # number of holes in every bin, which renders as speckle - the map then measures
+    # ~0.15 here, against ~0.065 for a field.
+    roughness = float(np.abs(np.diff(dens, axis=1))[dens[:, 1:] > 0].mean())
+
+    print(f"  verify: {n} leaf boxes, avg density {avg:.3f}, max bin {dmax:.3f}")
+    print(f"  verify: {vals.size} occupied bins -> {100 * saturated:.1f}% saturated, "
+          f"{100 * midrange:.1f}% mid-range, {distinct} distinct values, "
+          f"roughness {roughness:.3f}")
 
     assert 90_000 <= n <= 110_000, f"instance count {n} out of range"
     assert 0.55 <= avg <= 0.65, f"avg density {avg:.3f} not ~60%"
     assert dmax <= 1.0 + 1e-9, f"max density {dmax} exceeds 1.0"
     assert dmax > 0.85, f"no dense bins (max {dmax})"
-    assert float(pd_.density.min()) < 0.05, "no empty bins (no density variety)"
-    print("  verify: OK (count ~100k, density ~60%, max <= 1.0, varied)")
+    assert float(dens.min()) < 0.05, "no empty bins (no density variety)"
+    # The SRAM macros alone are 17.7% of the die = ~23% of occupied bins and are
+    # legitimately fully packed, so the floor here is the macro share; the old
+    # striped placement measured 88.5%. Anything above the macro floor plus a
+    # little headroom for the densest logic rows means the map has gone flat again.
+    assert saturated < 0.35, (
+        f"{100 * saturated:.1f}% of occupied bins are fully packed - the map has "
+        f"degenerated into solid rectangles instead of a utilisation field")
+    assert midrange > 0.50, (
+        f"only {100 * midrange:.1f}% of occupied bins land mid-range - most of the "
+        f"colour ramp is unused")
+    assert distinct > 30, f"only {distinct} distinct density values"
+    assert roughness < 0.12, (
+        f"bin-to-bin roughness {roughness:.3f} - the map is per-bin noise rather than "
+        f"a utilisation field")
+    print("  verify: OK (count ~100k, density ~60%, max <= 1.0, realistic spread)")
 
 
 if __name__ == "__main__":

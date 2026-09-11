@@ -22,24 +22,24 @@
     "ifu": {
       "cell_name": "IFU",
       "orient": "N",
-      "leakage_power": 0.0117,
-      "dynamic_power": 0.0949,
+      "leakage_power": 0.0343,
+      "dynamic_power": 0.0964,
       "location_x": 0.0,
       "location_y": 0.0
     },
     "iex": {
       "cell_name": "IEX",
       "orient": "N",
-      "leakage_power": 0.0544,
-      "dynamic_power": 0.0329,
+      "leakage_power": 0.0281,
+      "dynamic_power": 0.0745,
       "location_x": 0.0,
       "location_y": 67.2
     },
     "lsu": {
       "cell_name": "LSU",
       "orient": "N",
-      "leakage_power": 0.0252,
-      "dynamic_power": 0.0839,
+      "leakage_power": 0.0276,
+      "dynamic_power": 0.0784,
       "location_x": 105.0,
       "location_y": 67.2
     }
