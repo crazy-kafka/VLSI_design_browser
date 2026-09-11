@@ -208,6 +208,36 @@ def test_layout_legend_overlay(app, tmp_path):
     assert view._legend._hi == 0.8
 
 
+def test_layout_range_kept_across_map_switch(app, tmp_path):
+    """A user-edited Min/Max survives switching map type away and back."""
+    from vlsi_viewer.ui_layout import LayoutView
+    view = LayoutView(_tiny_physical(tmp_path))
+    view.min_spin.setValue(0.25)
+    view.max_spin.setValue(0.75)
+    assert (view._lo, view._hi) == (0.25, 0.75)
+
+    view.type_combo.setCurrentIndex(1)           # density -> leakage (auto-ranges)
+    assert view._kind == "leakage"
+    view.type_combo.setCurrentIndex(0)           # back to density
+
+    assert view._kind == "density"
+    assert (view.min_spin.value(), view.max_spin.value()) == (0.25, 0.75)
+    assert (view._lo, view._hi) == (0.25, 0.75)
+    assert (view._legend._lo, view._legend._hi) == (0.25, 0.75)
+
+
+def test_layout_first_visit_to_map_autotanges(app, tmp_path):
+    """A map type never visited before still derives its range from the data."""
+    from vlsi_viewer.ui_layout import LayoutView
+    pd_ = _tiny_physical(tmp_path)
+    view = LayoutView(pd_)
+    view.type_combo.setCurrentIndex(1)           # leakage: not visited yet
+
+    assert view._kind == "leakage"
+    assert view._lo == 0.0
+    assert view._hi == pytest.approx(float(pd_.heat("leakage").max()))
+
+
 def test_mainwindow_physical(app, design, tmp_path):
     pd_ = _tiny_physical(tmp_path)
     w = MainWindow(design, physical=pd_)

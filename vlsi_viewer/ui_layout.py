@@ -30,6 +30,7 @@ class LayoutView(QWidget):
         self._kind = "density"
         self._lo = 0.0
         self._hi = 1.0
+        self._ranges = {}  # kind -> (lo, hi) the user last saw for that heat map
         self._last_scene_pt = None
 
         self._build_controls()
@@ -102,8 +103,13 @@ class LayoutView(QWidget):
 
     # -- rendering ---------------------------------------------------------
     def _on_type(self, idx):
+        self._ranges[self._kind] = (self._lo, self._hi)  # remember where we came from
         self._kind = HEAT_TYPES[idx][0]
-        self._autoset_range()
+        saved = self._ranges.get(self._kind)
+        if saved is None:
+            self._autoset_range()   # first visit to this map: derive from the data
+        else:
+            self._set_range(*saved)  # revisit: restore what the user left behind
         self.refresh()
         if self._last_scene_pt is not None:
             self._on_hover(self._last_scene_pt)
@@ -114,20 +120,24 @@ class LayoutView(QWidget):
         self._legend.set_range(self._lo, self._hi)
         self.refresh()
 
+    def _set_range(self, lo, hi):
+        """Push a range into the spin boxes and legend without re-entering _apply_range."""
+        self.min_spin.blockSignals(True)
+        self.max_spin.blockSignals(True)
+        self.min_spin.setValue(lo)
+        self.max_spin.setValue(hi)
+        self.min_spin.blockSignals(False)
+        self.max_spin.blockSignals(False)
+        self._lo, self._hi = lo, hi
+        self._legend.set_range(lo, hi)
+
     def _autoset_range(self):
         arr = self._physical.heat(self._kind)
         hi = float(arr.max()) if arr.size else 1.0
         lo = 0.0
         if self._kind not in ("density", "ulvt"):
             hi = max(hi, 1e-6)
-        self.min_spin.blockSignals(True)
-        self.max_spin.blockSignals(True)
-        self.min_spin.setValue(lo)
-        self.max_spin.setValue(hi if hi > 0 else 1.0)
-        self.min_spin.blockSignals(False)
-        self.max_spin.blockSignals(False)
-        self._lo, self._hi = lo, hi if hi > 0 else 1.0
-        self._legend.set_range(self._lo, self._hi)
+        self._set_range(lo, hi if hi > 0 else 1.0)
 
     def _on_hover(self, scene_pt):
         """Emit the physical coordinates + heat value for the hovered scene pt."""
@@ -220,9 +230,9 @@ class LayoutView(QWidget):
 class LegendWidget(QWidget):
     """A vertical thermal legend overlaid on the layout view.
 
-    Paints a black(0) -> white(1) gradient bar with value ticks at 0/25/50/75/100%
-    of the current (lo, hi) range. It is a child widget of the graphics view (not
-    a scene item), so pan / zoom / fit never move it.
+    Paints a navy(0) -> near-white(1) gradient bar (the INNOVUS ramp) with value ticks
+    at 0/25/50/75/100% of the current (lo, hi) range. It is a child widget of the
+    graphics view (not a scene item), so pan / zoom / fit never move it.
     """
 
     _W = 92
