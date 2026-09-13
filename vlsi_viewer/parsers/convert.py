@@ -61,6 +61,24 @@ def _drive_size(name: str) -> int:
     return int(match.group(1)) if match else 0
 
 
+def is_macro_class(macro_class: str) -> bool:
+    """Whether a LEF ``CLASS`` value names a hard macro rather than a standard cell.
+
+    Only the *first* word names the class. The reference grammar is
+    ``CLASS {COVER [BUMP] | RING | BLOCK [BLACKBOX|SOFT] | PAD [INPUT|...|SPACER|AREAIO]
+    | CORE [FEEDTHRU|TIEHIGH|TIELOW|SPACER|ANTENNACELL|WELLTAP] | ENDCAP {...}}``, so
+    ``CLASS CORE SPACER ;`` is a CORE cell. Comparing the whole string against "CORE" made
+    every filler, antenna and welltap cell a hard macro, and a macro removes capacity from
+    the layers it blocks: on the real Nangate45 library that is 8 cells, worth 1 % of a
+    32.7 um block's bottom-layer capacity.
+
+    Public because the metal-density blockage model asks the same question of the same LEF
+    values, and two copies of this rule would drift.
+    """
+    classes = (macro_class or "").upper().split()
+    return (classes[0] if classes else "") != "CORE"
+
+
 def _cell_attrs(name: str, macro) -> dict:
     """One ``cell_info.json`` entry, shaped exactly like ``schema.CELL_ATTRS``."""
     attrs = {spec.name: spec.default for spec in schema.CELL_ATTRS}
@@ -70,8 +88,9 @@ def _cell_attrs(name: str, macro) -> dict:
     attrs["size_y"] = size_y
     # Divergence from extractCellInfo.py, which used ``drive_size != 0``: the viewer's
     # is_macro drives the macro columns and the Density% metric, so it has to mean
-    # "LEF hard macro", which is what a non-CORE CLASS encodes.
-    attrs["is_macro"] = macro.macroClass().upper() != "CORE"
+    # "LEF hard macro", which is what a non-CORE CLASS encodes. The rule itself lives in
+    # `is_macro_class`, shared with the metal-density blockage model.
+    attrs["is_macro"] = is_macro_class(macro.macroClass())
     attrs["is_physical_only"] = _is_physical_only_name(name)
     if attrs["is_macro"]:
         attrs["is_sram"] = "SRAM" in name.upper()
@@ -113,18 +132,20 @@ def cell_info_from_lef(lef_paths) -> dict:
     return {name: _cell_attrs(name, macro) for name, macro in macros.items()}
 
 
-def instance_info_from_verilog(verilog_path, top) -> dict:
-    """``instance_info.json`` data from one gate-level Verilog file.
+def instance_info_from_verilog(verilog_paths, top) -> dict:
+    """``instance_info.json`` data from one gate-level netlist.
 
-    ``InstExtractor`` already flattens the hierarchy to ``{rel/path: cell_name}``,
-    which is exactly the ``instances`` mapping. There is no placement in a netlist, so
-    the result carries no ``boundary`` - which is why this path cannot drive physical
-    mode.
+    ``verilog_paths`` is one file or several; a netlist split across files is one
+    design, so they are merged before the walk and produce a single result.
+    ``InstExtractor`` already flattens the hierarchy to ``{rel/path: cell_name}``, which
+    is exactly the ``instances`` mapping. There is no placement in a netlist, so the
+    result carries no ``boundary`` - which is why this path cannot drive physical mode.
     """
     from .verilog import InstExtractor
 
-    found = InstExtractor(verilog_path, top).insts
-    logger.info("verilog: %s -> %d instance(s) under %s", verilog_path, len(found), top)
+    found = InstExtractor(verilog_paths, top).insts
+    logger.info("verilog: %s -> %d instance(s) under %s",
+                verilog_paths, len(found), top)
     return {"top_name": top,
             "instances": {rel: {"cell_name": cell} for rel, cell in found.items()}}
 

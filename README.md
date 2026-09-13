@@ -8,10 +8,13 @@ two-version diff view and an optional physical layout view (2-D heat map).
 
 ## Features
 
-- **Three input flows** — `json` (pre-processed), `def` (DEF + LEF, with placement) and
-  `verilog` (gate-level netlist + LEF). The EDA flows convert to the JSON form first, so
-  one pipeline serves all three. `python quickstart.py` opens any of them on the bundled
-  samples.
+- **Four input flows** — `json` (pre-processed), `def` (DEF + LEF, with placement),
+  `verilog` (gate-level netlist + LEF) and `metal` (DEF + tech LEF, routing density). The
+  EDA flows convert to the JSON form first, so one pipeline serves the first three.
+  `python quickstart.py` opens any of them on the bundled samples.
+- **Metal density mode** — per-routing-layer utilisation from a routed DEF, with layer
+  checkboxes, a signal/power split, and a hover readout showing the arithmetic behind the
+  cell under the cursor. See [Metal density mode](#metal-density-mode).
 - **Hierarchy tree-table** — expand/collapse any level; only hierarchies are shown
   (≈1/100 of the instance count), not individual leaf cells.
 - **10 standard-cell metrics + macro columns** — computed per hierarchy via
@@ -54,15 +57,29 @@ Preset shortcuts for the bundled samples, so nothing long has to be typed:
 
 ```bash
 python quickstart.py            # list the shortcuts
-python quickstart.py json       # sample_data/*.json           (two-version compare)
-python quickstart.py physical   # sample_data/physical/*.json  (2-D density heat map)
-python quickstart.py def        # sample_data/eda/core.def   + cells.lef
-python quickstart.py verilog    # sample_data/eda/core.v     + cells.lef
+python quickstart.py json       # sample_data/*.json             (two-version compare)
+python quickstart.py physical   # sample_data/physical/*.json    (2-D density heat map)
+python quickstart.py def        # sample_data/eda/core.def     + cells.lef
+python quickstart.py verilog    # sample_data/eda/core.v       + cells.lef
+python quickstart.py metal      # sample_data/metal/*.def + cells.lef + tech.lef
 ```
 
-Extra flags pass through to the real CLI (`python quickstart.py def --grid_size 2.0`),
-and the `def`/`verilog` shortcuts write their generated JSON to a temporary directory so
-a demo never litters the checkout.
+Extra flags pass through to the real CLI (`python quickstart.py def --grid_size 2.0`).
+Nothing is written to disk along the way.
+
+Metal mode takes the longest command line of the four - two DEFs, a macro LEF and a tech LEF -
+so its sample has a quick start of its own:
+
+```bash
+python sample_data/metal/quickstart.py           # open the GUI on the sample
+python sample_data/metal/quickstart.py --check   # print the map's numbers, no GUI
+```
+
+`--check` is the one to reach for when a DEF of your own is in question: run it on the sample
+first to see what a healthy map looks like, then point it at yours. It prints the per-layer
+pitch, width, spacing and `(W+S)/P`, the signal/power/all maxima, the horizontal and vertical
+maxima, and the busiest cell's full arithmetic. The sample must be generated once before
+either path works - `python sample_data/metal/generate_metal.py`.
 
 ## Usage
 
@@ -116,15 +133,19 @@ python main.py verilog --verilog v1.v --compare_verilog v2.v --lef cells.lef --t
 | `json` | `--cell_info`, `--block_info`, `--compare_block_info` | compare, `--physical_mode` |
 | `verilog` | `--verilog`, `--lef`, `--top`, `--compare_verilog`, `--out` | compare only |
 | `def` | `--def`, `--lef`, `--top`, `--compare_def`, `--out` | compare, `--physical_mode` |
+| `metal` | `--def`, `--lef`, `--tech-lef`, `--top` | `--grid-size`, `--macro-block-layers`, `--min-segment-length` |
 
-Options shared by all three: `--min-instances`, `--include-macros`, `--cache-dir`,
+Options shared by the first three: `--min-instances`, `--include-macros`, `--cache-dir`,
 `--force`, `--verbose`. `--grid_size` and `--contour_gap` apply to the two flows that can
-render a heat map. Within a subcommand, physical mode and the compare flag are mutually
-exclusive. In physical mode, hover the layout view to read the cursor coordinates and the
-heat-map grid value in the bottom-right status bar.
+render a heat map; `metal` has its own `--grid-size` (default 10 µm) because the useful
+resolution is different. Within a subcommand, physical mode and the compare flag are
+mutually exclusive, and `metal` has neither — nor the JSON pipeline's options, which it
+cannot act on: it converts nothing, builds no tree and caches nothing. In physical mode, hover the layout view to read
+the cursor coordinates and the heat-map grid value in the bottom-right status bar; in metal
+mode the same hover fills the panel's cell readout.
 
-The `verilog` and `def` flows convert their inputs into exactly the JSON the `json`
-subcommand takes, writing it beside the input (or into `--out`) - see
+The `verilog` and `def` flows convert their inputs into exactly the structures the `json`
+subcommand reads, and load them in memory without writing anything - see
 [EDA input formats](#eda-input-formats).
 
 ## Input format
@@ -220,16 +241,43 @@ the `Density%` metric.
 ## EDA input formats
 
 `--verilog` and `--def` read EDA files directly instead of hand-written JSON. Both
-convert their inputs to exactly the JSON documented under [Input
-format](#input-format) — LEF becomes `cell_info.json`, the netlist or DEF becomes
-`instance_info.json` — and write it beside the input (or into `--out`) before loading
-it, so the generated files can be inspected and fed back to the `json` subcommand.
+convert their inputs to exactly the structures documented under [Input
+format](#input-format) — LEF becomes the cell library, the netlist or DEF becomes block
+data — and load them **in memory**: a run writes no file at all.
+
+### Names of the JSON written by `--out`
+
+`--out DIR` dumps the converted JSON into `DIR`, as a copy to inspect or to feed back to
+the `json` subcommand. The names follow the design, not the input file:
+
+| written | name | example |
+|---|---|---|
+| the cell library | `cell_info.json` | — |
+| a block | `<top>.instance_info.json` | `core.instance_info.json` |
+| the second design | `<top>.instance_info.compare.json` | `core.instance_info.compare.json` |
+
+The top cell is the DEF's `DESIGN` statement, or `--top` when given — `--top` also renames
+the design itself. A netlist names no design, so there `--top` is required and is the only
+source of the name. The cell library carries no such name because several LEF files are
+**one** library: it is always plain `cell_info.json`.
+
+Naming a block after its top is what lets a version diff keep both sides. `v1/core.def`
+against `v2/core.def` are the same file name describing the same design, so both infer the
+top `core`; only the `.compare` suffix keeps them apart. That case is the reason the two
+sides cannot simply be named after their files. Each `--def` is a separate block, so passing
+two same-named DEFs as ordinary `--def` blocks (rather than as a compare pair) gives both the
+same name, and the CLI warns instead of letting one silently replace the other.
 
 | input | gives | notes |
 |---|---|---|
-| LEF (`--lef`) | `cell_info.json` | macro `SIZE` (microns) → `size_x`/`size_y`/`area`; `CLASS` other than `CORE` → `is_macro` |
-| DEF (`--def`) | `instance_info.json` | `DESIGN` → `top_name`, `DIEAREA` → `boundary`, `COMPONENTS` → instances. Coordinates are DEF database units divided by `UNITS DISTANCE MICRONS` |
-| Verilog (`--verilog`) | `instance_info.json` | flattened to instance-name paths; **no placement**, hence no physical mode |
+| LEF (`--lef`) | the cell library | macro `SIZE` (microns) → `size_x`/`size_y`/`area`; `CLASS` other than `CORE` → `is_macro`. Several files are one library |
+| DEF (`--def`) | one block each | `DESIGN` → `top_name`, `DIEAREA` → `boundary`, `COMPONENTS` → instances. Coordinates are DEF database units divided by `UNITS DISTANCE MICRONS` |
+| Verilog (`--verilog`) | **one** block | flattened to instance-name paths; **no placement**, hence no physical mode. Several files are one netlist |
+
+**How the multi-file flags differ, deliberately:** a netlist is normally split across
+files (one per module), so several `--verilog` files are merged into a single design. Each
+DEF, by contrast, is a complete design, so several `--def` files stay separate blocks —
+the "incremental JSON" behaviour. `.gz` inputs are read transparently for all three.
 
 Things worth knowing:
 
@@ -242,10 +290,13 @@ Things worth knowing:
 - **Cell-name heuristics are library conventions.** Which cells are buffers, or how many
   bits a flop holds, is not in the LEF. The rules live in one table at the top of
   `vlsi_viewer/parsers/convert.py`; edit them for a different library.
-- **Known parser limits** (vendored as-is): DEF `ROWS`/`SITE` are not parsed, a
-  component statement wrapped over several lines is silently skipped (the CLI warns when
-  the parsed count disagrees with the `COMPONENTS` count), and a DEF that omits `UNITS`
-  falls back to 2000 database units per micron (also warned about).
+- **`--cache-dir` / `--force` do nothing here.** The pickle cache keys on file mtimes, and
+  these flows read no files; they apply to the `json` subcommand, including a JSON dump
+  you made with `--out`.
+- **Known parser limits** (vendored as-is): DEF `ROWS`/`SITE` are not parsed, a component
+  statement wrapped over several lines is skipped, and a DEF that omits `UNITS` falls back
+  to 2000 database units per micron. An unrecognised `TRACKS` clause is reported and
+  skipped rather than aborting the parse.
 
 `sample_data/eda/` is a browsable example — a macro LEF, a DEF and a gate-level
 netlist describing the same small CPU cluster, generated by
@@ -319,6 +370,87 @@ it. Instances scattered beyond `--contour_gap` (default `2 × grid_size`) become
 `non-macro area / (contour area − macro area)` (higher-better gradient, range
 20%–65%). Contours/densities are computed lazily and cached, and boxes are
 pre-merged (exact) so the geometry scales to large (10M-instance) subsystems.
+
+## Metal density mode
+
+    python main.py metal --def top.def sub.def --lef cells.lef --tech-lef tech.lef
+    python main.py metal --def core.def --lef cells.lef --tech-lef tech.lef --grid-size 5
+
+Placement tells you where the cells are; this tells you where the **metal** is. It reads a
+routed DEF and the tech LEF that defines its routing layers, and renders a per-layer heat map
+of routing utilisation.
+
+### What the number means
+
+Each wire segment is expanded by half its own spacing rule on every side, and the expanded
+areas are summed per grid cell. The expansion is what calibrates the scale: a minimum-width
+wire expanded by half the spacing covers exactly `W + S` across, which is the layer's track
+pitch, so the sum is measured in *track-pitch area consumed* and **1.0 means every track is
+used**. A wire routed at `2W2S` expands to two track pitches, automatically.
+
+Capacity carries the same normalisation, `(W + S) / P`, because the two are not always equal
+— Nangate45's metal2 is 0.14 against a 0.19 pitch, and sky130's met1 is 0.28 against 0.34.
+Without it those layers would read 0.74 and 0.82 at *full* utilisation.
+
+Ticking several layers groups them, and the group is read as `sum(consumed) / sum(capacity)`:
+a capacity-weighted mean, not a sum, which would drive every cell white. So ticking the
+horizontal layers gives the horizontal-routing map and the vertical layers the vertical one,
+and a cell is a genuine bottleneck when **both** read high — a cell with horizontal layers
+full and vertical layers empty is still routable.
+
+The window is three panes — the cell readout, the map, and the layer selection — with the
+map's value range in the toolbar. The readout sits opposite the selection because in one
+column the two tables fought over the same height, and the loser went behind a scrollbar.
+
+### What it counts, and what it does not
+
+| | |
+|---|---|
+| **vias** | omitted. A via is a routing point with no extent, so it has no wire area; on a real routed DEF they are more than half of all parsed segments |
+| **non-preferred jogs** | dropped below one track pitch (a horizontal blip on a vertical layer used to shift track). `--min-segment-length 0` keeps every one; short segments running *along* their layer are never dropped |
+| **power** | counted separately from signal. A power stripe is fixed and deliberate, so merging the two makes a region under a stripe read as a hotspot; the panel's net-class selector switches between them |
+| **macros** | a hard macro removes capacity where its LEF `OBS` says it obstructs, on the layers it names — a macro that blocks `metal2` and `metal4` but not `metal3` is read that way. Obstructions covering under 10 % of the macro are pin-access bites, not keep-outs, and are ignored. Only cells whose `CLASS` is not `CORE` count. A macro whose LEF declares no `OBS` cannot be judged from data, so it falls back to the bottom `--macro-block-layers` layers (default 4) over its whole footprint; `0` cancels that guess, not the geometry |
+| **45° segments** | exact, as their Minkowski sum with a square; a bounding box would over-count a 10 µm diagonal about 25× |
+
+The **cell detail** pane shows the hovered cell's consumed area, capacity and utilisation for
+every selected layer, plus the group's `sum(D)/sum(C)`, so the colour on screen can be checked
+against the arithmetic that produced it. The busiest layer is bolded - the bottleneck is the
+answer to "why is this cell hot" - and the horizontal and vertical maxima are reported apart,
+since a cell whose horizontal layers are full is still routable upward.
+
+The **layer list** carries each layer's `width/spacing/pitch` beside its mean utilisation,
+because capacity is `routable area × (W + S) / P` and those are the numbers it was computed
+from. Hovering a row gives the rules in full, the factor `f`, and — for a layer with no width
+rule — why it is disabled rather than merely absent.
+
+The ramp is fixed at `[0, 1]`, where 1.0 means every track on the layer is consumed. A healthy
+design peaks well below that and so renders as a nearly uniform dark rectangle, so **Auto**
+fits the range to the map's own top half-percent. The peak stays on show beside it, which
+keeps the absolute scale unambiguous while the colours are stretched.
+
+### Scale
+
+Comfortable to about **10⁶ wire segments** (seconds); usable to about 10⁷ (minutes). Beyond
+that the DEF *parser*, not the rasteriser, is the wall — parsing is 97 % of the runtime — and
+a full-chip flat DEF is out of reach for this viewer rather than merely slow. `--stress N` on
+the sample generator times a synthetic design of N nets; see
+[`dev_plan/metal_density_asbuilt.md`](dev_plan/metal_density_asbuilt.md) for the measured
+numbers. Unlike the physical mode, the grids are built before the window appears, so a large
+run shows progress in the terminal and no window until it is ready.
+
+`sample_data/metal/` is a browsable example: a 1P12M stack, a 13k-cell hierarchical design and
+its power grid, generated by `python sample_data/metal/generate_metal.py`.
+
+`sample_data/real/` is the opposite: five unmodified files from upstream projects, kept so the
+parser behaviour this mode was measured against stays checkable. Everything else under
+`sample_data/` is synthesized, which is fine for the shape of a map and useless for parser
+correctness — the worst bug in this codebase (nine of ten routing layers silently arriving with
+`spacing == 0.0`) was invisible against the generated sample and appeared the moment a real tech
+LEF was read. Nangate45's tech and cell LEFs, a real routed `gcd` DEF, and the ASAP7 and sky130
+tech LEFs; provenance, revisions and licences in
+[`sample_data/real/PROVENANCE.md`](sample_data/real/PROVENANCE.md), and the reasoning in
+[`dev_plan/real_sample_sources.md`](dev_plan/real_sample_sources.md). The two Nangate45 files
+are research-licensed, so remove them before publishing this repository.
 
 ## Architecture
 

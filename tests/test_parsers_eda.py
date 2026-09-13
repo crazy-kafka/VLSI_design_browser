@@ -57,6 +57,47 @@ def test_lef_cell_info_shape_and_sizes():
     assert cells["SRAM_512"]["area"] == pytest.approx(128.0)
 
 
+def test_class_modifiers_are_not_class_names(tmp_path):
+    """`CLASS CORE SPACER ;` is a CORE cell - the modifier is not the class.
+
+    Invisible against the sample, which writes plain `CLASS CORE ;`. A real library writes the
+    modifiers: Nangate45 has 6 `CORE SPACER`, 1 `CORE ANTENNACELL` and 1 `CORE WELLTAP`, and
+    reading those as class names made all 8 into hard macros. A macro takes capacity away from
+    the layers it blocks, so the bottom-layer capacity of a 32.7 um block came out 1 % low.
+
+    The grammar is `CORE [FEEDTHRU|TIEHIGH|TIELOW|SPACER|ANTENNACELL|WELLTAP]`, and the same
+    applies to `PAD [INPUT|OUTPUT|INOUT|POWER|SPACER|AREAIO]`.
+    """
+    lef = tmp_path / "mod.lef"
+    lef.write_text("""\
+MACRO FILL_1
+  CLASS CORE SPACER ;
+  SIZE 1 BY 2 ;
+END FILL_1
+MACRO ANT_1
+  CLASS CORE ANTENNACELL ;
+  SIZE 1 BY 2 ;
+END ANT_1
+MACRO TAP_1
+  CLASS CORE WELLTAP ;
+  SIZE 1 BY 2 ;
+END TAP_1
+MACRO RAM
+  CLASS BLOCK ;
+  SIZE 8 BY 16 ;
+END RAM
+MACRO IOPAD_1
+  CLASS PAD POWER ;
+  SIZE 10 BY 20 ;
+END IOPAD_1
+""")
+    cells = cell_info_from_lef([str(lef)])
+    for name in ("FILL_1", "ANT_1", "TAP_1"):
+        assert cells[name]["is_macro"] is False, name
+    assert cells["RAM"]["is_macro"] is True
+    assert cells["IOPAD_1"]["is_macro"] is True     # a pad spacer is still a pad
+
+
 def test_lef_cell_info_flags():
     """is_macro comes from LEF CLASS, and filler/tap/DCAP are flagged area-only."""
     cells = cell_info_from_lef([f"{SAMPLE}/cells.lef"])
@@ -86,15 +127,116 @@ def test_lef_cell_info_flags():
     assert cells["SDF_X2_LVT"]["drive_size"] == 2
 
 
-def test_lef_unterminated_macro_raises(tmp_path):
-    """A MACRO without END runs the parser's cursor off the end (IndexError).
+def test_lef_obstructions_are_read_by_layer(tmp_path):
+    """``OBS`` geometry, in the macro's own coordinates.
 
-    Documented rather than fixed: the parser is vendored as-is, and this at least fails
-    loudly instead of silently dropping the library.
+    A hard macro's obstructions are what the metal-density mode uses to decide which layers
+    the macro blocks and where, so this is the parse that decides capacity.
+    """
+    from vlsi_viewer.parsers.LEF import LefParser
+
+    lef = _write(tmp_path, "obs.lef", """\
+MACRO RAM
+  CLASS BLOCK ;
+  SIZE 10 BY 20 ;
+  OBS
+    LAYER metal1 ;
+      RECT 0 0 10 20 ;
+      RECT 1.5 -0.5 2.5 3.25 ;
+    LAYER metal3 ;
+      RECT 0 0 5 5 ;
+  END
+END RAM
+MACRO PLAIN
+  CLASS CORE ;
+  SIZE 1 BY 1 ;
+END PLAIN
+""")
+    macros = LefParser([lef]).getMacros()
+    assert macros["RAM"].obstructions() == {
+        "metal1": [(0.0, 0.0, 10.0, 20.0), (1.5, -0.5, 2.5, 3.25)],
+        "metal3": [(0.0, 0.0, 5.0, 5.0)],
+    }
+    # A macro with no OBS reports an empty mapping, not None and not a missing key: the
+    # caller has to tell "declares nothing" from "declares geometry".
+    assert macros["PLAIN"].obstructions() == {}
+    assert macros["RAM"].size() == (10.0, 20.0)
+
+
+def test_a_rect_before_any_layer_belongs_to_no_layer(tmp_path):
+    """Nothing in the grammar allows it, and guessing a layer would be worse than dropping it."""
+    from vlsi_viewer.parsers.LEF import LefParser
+
+    lef = _write(tmp_path, "early.lef", """\
+MACRO RAM
+  CLASS BLOCK ;
+  SIZE 4 BY 4 ;
+  OBS
+    RECT 0 0 1 1 ;
+    LAYER metal2 ;
+      RECT 0 0 4 4 ;
+  END
+END RAM
+""")
+    assert LefParser([lef]).getMacros()["RAM"].obstructions() == {"metal2": [(0.0, 0.0, 4.0, 4.0)]}
+
+
+def test_obstruction_geometry_that_cannot_be_read_is_counted(tmp_path):
+    """POLYGON and PATH inside OBS are not modelled. Counted, so a caller can say so rather
+    than silently reporting a layer as less obstructed than its LEF declares."""
+    from vlsi_viewer.parsers.LEF import LefParser
+
+    lef = _write(tmp_path, "poly.lef", """\
+MACRO RAM
+  CLASS BLOCK ;
+  SIZE 4 BY 4 ;
+  OBS
+    LAYER metal2 ;
+      POLYGON 0 0 4 0 4 4 ;
+      RECT 0 0 4 4 ;
+  END
+END RAM
+""")
+    parser = LefParser([lef])
+    assert parser.getMacros()["RAM"].obstructions() == {"metal2": [(0.0, 0.0, 4.0, 4.0)]}
+    assert parser.n_obs_unmodelled == 1
+
+
+def test_obstructions_are_copied_on_the_way_out(tmp_path):
+    """The caller filters this geometry; handing out the parser's own lists would let one
+    consumer's edit change what every other consumer sees."""
+    from vlsi_viewer.parsers.LEF import LefParser
+
+    lef = _write(tmp_path, "copy.lef", """\
+MACRO RAM
+  CLASS BLOCK ;
+  SIZE 4 BY 4 ;
+  OBS
+    LAYER metal2 ;
+      RECT 0 0 4 4 ;
+  END
+END RAM
+""")
+    macro = LefParser([lef]).getMacros()["RAM"]
+    handed_out = macro.obstructions()
+    handed_out["metal2"].clear()
+    handed_out["metal9"] = []
+    assert macro.obstructions() == {"metal2": [(0.0, 0.0, 4.0, 4.0)]}
+
+
+def test_lef_unterminated_macro_is_read_as_far_as_it_goes(tmp_path):
+    """A MACRO without END used to run the parser's cursor off the end and raise IndexError.
+
+    The macro walk had no length guard - `while macro_end not in lef_lines[cursor]` - so a
+    truncated library crashed rather than being read as far as it went. That guard arrived with
+    the `OBS` reader, which has to terminate on a *bare* `END` and therefore has one more way
+    to be wrong; the behaviour is now "read what is there", and the macro that was cut short
+    keeps the fields it managed to declare.
     """
     lef = _write(tmp_path, "bad.lef", "MACRO C1\n  SIZE 1.0 BY 1.0 ;\n")
-    with pytest.raises(IndexError):
-        cell_info_from_lef([lef])
+    cells = cell_info_from_lef([lef])
+    assert cells["C1"]["size_x"] == pytest.approx(1.0)
+    assert cells["C1"]["size_y"] == pytest.approx(1.0)
 
 
 # -- Verilog -> instance_info.json ------------------------------------------------
@@ -222,3 +364,62 @@ def test_generated_json_round_trips_through_the_loaders(tmp_path):
     assert dens.max() <= 1.0 + 1e-9
     assert len(pd_.boxes) == len(block["instances"])
     assert len(pd_.boxes_for("core/u0/b0")) < len(pd_.boxes)
+
+
+# -- compressed inputs, and a netlist split across files ---------------------------
+
+def _gzipped(src, dst):
+    """Gzip ``src`` into ``dst`` - compressed EDA inputs are the norm in real flows."""
+    import gzip
+    with open(src, "rb") as fh_in, gzip.open(dst, "wb") as fh_out:
+        fh_out.write(fh_in.read())
+    return str(dst)
+
+
+def test_verilog_gz_matches_plain_text(tmp_path):
+    gz = _gzipped(f"{SAMPLE}/core.v", tmp_path / "core.v.gz")
+    assert instance_info_from_verilog(gz, "core") == \
+        instance_info_from_verilog(f"{SAMPLE}/core.v", "core")
+
+
+def test_lef_gz_matches_plain_text(tmp_path):
+    """getAllLefLines used to open each LEF directly, bypassing the gz-aware readFile."""
+    gz = _gzipped(f"{SAMPLE}/cells.lef", tmp_path / "cells.lef.gz")
+    assert cell_info_from_lef([gz]) == cell_info_from_lef([f"{SAMPLE}/cells.lef"])
+
+
+def test_a_plain_file_named_gz_still_reads(tmp_path):
+    """BadGzipFile falls back to a plain read, so a mislabelled file stays usable."""
+    import shutil
+    mislabelled = tmp_path / "core.v.gz"
+    shutil.copyfile(f"{SAMPLE}/core.v", mislabelled)
+    assert instance_info_from_verilog(str(mislabelled), "core") == \
+        instance_info_from_verilog(f"{SAMPLE}/core.v", "core")
+
+
+def test_netlist_split_across_files_is_one_design(tmp_path):
+    """A netlist is usually one file per module; together they are a single design."""
+    import re
+    with open(f"{SAMPLE}/core.v", encoding="utf-8") as fh:
+        text = fh.read()
+    modules = re.findall(r"(module\s+(\w+)\b.*?endmodule)", text, re.S)
+    assert len(modules) > 1, "the sample should define more than one module"
+
+    paths = []
+    for body, name in modules:
+        path = tmp_path / f"{name}.v"
+        path.write_text(body)
+        paths.append(str(path))
+
+    assert instance_info_from_verilog(paths, "core") == \
+        instance_info_from_verilog(f"{SAMPLE}/core.v", "core")
+
+
+def test_a_duplicate_module_warns(tmp_path, capsys):
+    """Defining a module twice is a broken netlist, not a silent order dependence."""
+    with open(f"{SAMPLE}/core.v", encoding="utf-8") as fh:
+        text = fh.read()
+    (tmp_path / "a.v").write_text(text)
+    (tmp_path / "b.v").write_text(text)
+    instance_info_from_verilog([str(tmp_path / "a.v"), str(tmp_path / "b.v")], "core")
+    assert "more than one file" in capsys.readouterr().out

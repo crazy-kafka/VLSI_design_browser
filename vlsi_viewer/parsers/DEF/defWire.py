@@ -6,13 +6,25 @@ if TYPE_CHECKING:
 
 
 class DefWire:
+    """One segment of a net's regular wiring (DEF ``NETS``).
 
-    def __init__(self, layer_name: AnyStr, rule: AnyStr, from_pt: Tuple[int, int], to_pt: Tuple[int, int]):
+    ``rule`` is the wire's non-default rule: a per-wire ``TAPERRULE`` when the wiring
+    statement carries one, otherwise the net-level ``+ NONDEFAULTRULE``, otherwise
+    ``'default'``. ``via``/``via_orient`` are the via at the segment's start point.
+    """
+
+    def __init__(self, layer_name: AnyStr, rule: AnyStr, from_pt: Tuple[int, int],
+                 to_pt: Tuple[int, int], via: AnyStr = None,
+                 via_orient: AnyStr = None):
         self.layer_name = layer_name
         self.rule = rule
         self.from_pt = from_pt
         self.to_pt = to_pt
+        self.via = via
+        self.via_orient = via_orient
 
     def __repr__(self):
-        return f'layer {self.layer_name} rule {self.rule} from_pt {self.from_pt} to_pt {self.to_pt}'
+        via = f' via {self.via}' + (f' {self.via_orient}' if self.via_orient else '')
+        return (f'layer {self.layer_name} rule {self.rule} '
+                f'from_pt {self.from_pt} to_pt {self.to_pt}{via}')
 

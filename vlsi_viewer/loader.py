@@ -89,15 +89,25 @@ def _parse_boundary(raw):
     return pts
 
 
-def load_block(path: str):
-    """Load one instance_info.json block -> ``(top_name, instances, boundary)``."""
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+def load_block(source):
+    """Load one instance_info.json block -> ``(top_name, instances, boundary)``.
 
+    ``source`` is a path or an already-parsed dict. The EDA flows convert LEF/DEF/
+    Verilog in memory and pass the dict straight in, so no JSON has to be written to
+    disk to get a design loaded.
+    """
+    if isinstance(source, dict):
+        return _block_from_data(source, "<in-memory>")
+    with open(source, "r", encoding="utf-8") as f:
+        return _block_from_data(json.load(f), source)
+
+
+def _block_from_data(data, label):
+    """The body of :func:`load_block`, over already-decoded data."""
     top_name = str(data.get("top_name", ""))
     instances = data.get("instances", {})
     if not isinstance(instances, dict):
-        raise ValueError(f"'instances' must be a dict in {path}")
+        raise ValueError(f"'instances' must be a dict in {label}")
 
     records = []
     for leaf_name, attrs in instances.items():
@@ -109,13 +119,19 @@ def load_block(path: str):
     df = pd.DataFrame(records, columns=["leaf_instance_name"] + [s.name for s in schema.INSTANCE_ATTRS])
     _cast(df, schema.INSTANCE_ATTRS)
     boundary = _parse_boundary(data.get("boundary"))
-    logger.info("Loaded block '%s' with %d instance(s) from %s", top_name, len(df), path)
+    logger.info("Loaded block '%s' with %d instance(s) from %s", top_name, len(df), label)
     return top_name, df, boundary
 
 
-def load_cell_info(path: str) -> pd.DataFrame:
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+def load_cell_info(source) -> pd.DataFrame:
+    """Load the cell library; ``source`` is a path or an already-parsed dict."""
+    if isinstance(source, dict):
+        data = source
+        label = "<in-memory>"
+    else:
+        with open(source, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        label = source
     records = []
     for cell_name, attrs in data.items():
         row = {"cell_name": cell_name}
@@ -124,5 +140,5 @@ def load_cell_info(path: str) -> pd.DataFrame:
         records.append(row)
     df = pd.DataFrame(records, columns=["cell_name"] + [s.name for s in schema.CELL_ATTRS])
     _cast(df, schema.CELL_ATTRS)
-    logger.info("Loaded %d cell(s) from %s", len(df), path)
+    logger.info("Loaded %d cell(s) from %s", len(df), label)
     return df

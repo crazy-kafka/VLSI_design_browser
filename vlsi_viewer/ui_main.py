@@ -10,6 +10,7 @@ from . import config
 from .model import view_for_single
 from .ui_compare import CompareWidget
 from .ui_layout import LayoutView
+from .ui_metal import CellDetailPanel, MetalPanel
 from .ui_search import SearchDialog
 from .ui_tree import HierarchyTree
 
@@ -17,8 +18,20 @@ logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, design1=None, design2=None, physical=None,
+    def __init__(self, design1=None, design2=None, physical=None, metal=None,
                  threshold=config.DEFAULT_MIN_INST_COUNT, include_macros=False):
+        """``metal`` is a :class:`~vlsi_viewer.metal.MetalData`, and its own mode.
+
+        Metal mode shows no hierarchy: the tree, the compare view and the hierarchy toolbar
+        are not built at all. That is not just tidiness - the tree drives the contour and
+        the ``Density%`` column, neither of which means anything for a routing map, and a
+        search box that filters a tree nobody can see is worse than no search box. It has a
+        toolbar of its own, holding the map's value range and nothing else.
+
+        Its central widget is three panes: the cell readout, the map, and the layer selection.
+        The readout is on the opposite side from the selection because in one column the two
+        tables fought over the same height, and the loser went behind a scrollbar.
+        """
         super().__init__()
         self.setWindowTitle("VLSI Hierarchy Analyzer")
         self.resize(1400, 800)
@@ -26,7 +39,10 @@ class MainWindow(QMainWindow):
         self._design1 = design1
         self._design2 = design2
         self._physical = physical
+        self._metal = metal
         self._layout = None
+        self._panel = None
+        self._detail = None
         self._density = None
 
         self._stack = QStackedWidget()
@@ -35,7 +51,37 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._tree)
         self._stack.addWidget(self._compare)
 
-        if physical is not None:
+        if metal is not None:
+            self._layout = LayoutView(metal, external_controls=True)
+            self._panel = MetalPanel(metal, self._layout)
+            # The readout is its own pane on the other side of the map: in one column the
+            # layer list and the cell detail competed for the same height, and whichever lost
+            # went behind a scrollbar.
+            self._detail = CellDetailPanel(metal, self._panel.current_kind)
+            splitter = QSplitter()
+            splitter.addWidget(self._detail)
+            splitter.addWidget(self._layout)
+            splitter.addWidget(self._panel)
+            # 1:4:1, not 0:1:0. With the side panes at zero stretch they never give up a pixel:
+            # the map absorbed the whole loss as the window narrowed, down to a 292 px sliver
+            # against a 400 px layer list. A small share for each side pane makes them yield
+            # proportionally, while the map keeps the largest share of everything left over.
+            splitter.setStretchFactor(0, 1)
+            splitter.setStretchFactor(1, 4)
+            splitter.setStretchFactor(2, 1)
+            # A pane is sized from its *hint* by default, and the layer table's hint grows with
+            # the font - under a wide one it asked for 519 px and the map opened 200 px narrower
+            # than it needed to be. These are the starting widths; the stretch above sets how
+            # they move, and the divider overrides both.
+            splitter.setSizes([300, 680, 400])
+            splitter.setChildrenCollapsible(False)
+            self.setCentralWidget(splitter)
+            self._hover_label = QLabel("")
+            self.statusBar().addPermanentWidget(self._hover_label)
+            self._layout.hover_changed.connect(self._hover_label.setText)
+            self._layout.cell_hovered.connect(self._detail.on_cell)
+            self._panel.selection_changed.connect(self._detail.refresh)
+        elif physical is not None:
             self._layout = LayoutView(physical)
             splitter = QSplitter()
             splitter.addWidget(self._stack)
@@ -59,8 +105,11 @@ class MainWindow(QMainWindow):
         for t in (self._compare.v1, self._compare.v2, self._compare.diff):
             t.sort_changed.connect(self._on_sort_changed)
 
-        self._build_toolbar()
-        self._set_initial_options(threshold, include_macros)
+        if metal is None:
+            self._build_toolbar()
+            self._set_initial_options(threshold, include_macros)
+        else:
+            self._build_metal_toolbar()
 
         if design2 is not None:
             self._compare.set_designs(design1, design2)
@@ -101,6 +150,31 @@ class MainWindow(QMainWindow):
         self.macro_check.stateChanged.connect(self._apply_settings)
         tb.addWidget(self.macro_check)
 
+    def _build_metal_toolbar(self):
+        """Metal mode's toolbar: the map's value range, and nothing about hierarchy.
+
+        The widgets belong to `LayoutView` and `MetalPanel` - the view owns the ramp, the panel
+        owns what the ramp is over - and neither places them; this is the only mode with a
+        toolbar to put them in. They keep their names on those objects, so nothing that pokes
+        at ``layer.min_spin`` has to care, and `window.min_spin` stays free for the hierarchy
+        toolbar's instance-count threshold.
+        """
+        tb = QToolBar("Range")
+        tb.setObjectName("metal_range_toolbar")
+        tb.setMovable(False)
+        # It is the only route to the ramp, so a right-click must not be able to hide it.
+        tb.toggleViewAction().setVisible(False)
+        self.addToolBar(tb)
+        tb.addWidget(QLabel("Min:"))
+        tb.addWidget(self._layout.min_spin)
+        tb.addWidget(QLabel("Max:"))
+        tb.addWidget(self._layout.max_spin)
+        tb.addWidget(self._panel.auto_btn)
+        tb.addWidget(self._layout.fit_btn)
+        tb.addSeparator()
+        # The peak, so the absolute scale is never in doubt while Auto has the ramp stretched.
+        tb.addWidget(self._panel.peak_label)
+
     def _set_initial_options(self, threshold, include_macros):
         self.min_spin.blockSignals(True)
         self.macro_check.blockSignals(True)
@@ -111,6 +185,10 @@ class MainWindow(QMainWindow):
 
     # -- actions -----------------------------------------------------------
     def _apply_settings(self):
+        # Metal mode has no toolbar to read a threshold or a macro toggle from, and no tree
+        # to apply them to.
+        if self._metal is not None:
+            return
         threshold = self.min_spin.value()
         include_macros = self.macro_check.isChecked()
         if self._design2 is None:
@@ -165,6 +243,15 @@ class MainWindow(QMainWindow):
             tree.expand_to(path)
 
     def _show_status(self):
+        if self._metal is not None:
+            # The die size, because nothing else on screen says the grid is 620 um across and
+            # a density map is read at a physical scale.
+            x0, y0, x1, y1 = self._metal.extent
+            self.statusBar().showMessage(
+                f"Metal mode · {self._metal.rows}×{self._metal.cols} grid @ "
+                f"{self._metal.grid_size:g} um · die {x1 - x0:g}×{y1 - y0:g} um · "
+                f"{len(self._metal.layers)} layers · top {self._metal.top_name}")
+            return
         if self._physical is not None:
             self.statusBar().showMessage(
                 f"Physical mode · {self._physical.rows}×{self._physical.cols} grid · "

@@ -65,7 +65,8 @@ def load_blocks(block_paths) -> pd.DataFrame:
     for p in block_paths:
         name, df, _boundary = load_block(p)
         if name in blocks:
-            logger.warning("duplicate top_name '%s'; merging %s (earlier file wins)", name, p)
+            logger.warning("duplicate top_name '%s'; merging %s (earlier file wins)",
+                           name, p if isinstance(p, str) else "<in-memory>")
             df = _merge_blocks(blocks[name], df)
         blocks[name] = df
 
@@ -304,9 +305,18 @@ def _cache_file(block_paths, cell_path: str, cache_dir: str) -> str:
     return os.path.join(cache_dir, f"{key}.pkl")
 
 
-def load_or_build(block_paths, cell_path: str,
+def load_or_build(block_paths, cell_path,
                   cache_dir: str = None, force: bool = False) -> DesignData:
-    """Load from pickle cache when fresh, else build and persist."""
+    """Load from pickle cache when fresh, else build and persist.
+
+    Blocks and the cell library are paths or already-parsed dicts. In-memory input skips
+    the cache: its key is derived from ``os.stat`` and there is no file behind data the
+    EDA flows converted by hand. Nothing is lost, because converting the DEF or netlist
+    is not cached either - a run already re-parses it every time.
+    """
+    if isinstance(cell_path, dict) or any(isinstance(s, dict) for s in block_paths):
+        logger.debug("in-memory input; pickle cache skipped")
+        return build_design(block_paths, cell_path)
     if cache_dir is None:
         cache_dir = os.path.join(
             os.path.dirname(os.path.abspath(block_paths[0])), config.CACHE_DIR_NAME)

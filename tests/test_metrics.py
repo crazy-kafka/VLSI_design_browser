@@ -225,3 +225,31 @@ def test_physical_only_excluded_from_tree(tmp_path, where):
     assert plain.hier.loc["TOP/padzone", "count"] == 1
     assert "TOP/padzone" not in physical.hier.index   # flagged -> no node at all
     assert physical.hier.loc["TOP", "count"] == 1     # only C1 is counted
+
+
+def _sample_data(sample_dir):
+    """The fixture's JSON, already parsed - what the EDA flows hand the pipeline."""
+    with open(os.path.join(sample_dir, "instance_info.json"), encoding="utf-8") as fh:
+        inst = json.load(fh)
+    with open(os.path.join(sample_dir, "cell_info.json"), encoding="utf-8") as fh:
+        cells = json.load(fh)
+    return inst, cells
+
+
+def test_build_design_from_in_memory_data(sample_dir):
+    """In-memory input (a converted DEF or netlist) must match the file-based build."""
+    inst, cells = _sample_data(sample_dir)
+    from_path = build_design([os.path.join(sample_dir, "instance_info.json")],
+                             os.path.join(sample_dir, "cell_info.json"))
+    from_data = build_design([inst], cells)
+    pd.testing.assert_frame_equal(from_path.hier, from_data.hier)
+    assert from_path.roots == from_data.roots
+
+
+def test_load_or_build_skips_the_cache_for_in_memory_data(sample_dir, tmp_path):
+    """There is no file to key a pickle on, so no cache is read or written."""
+    inst, cells = _sample_data(sample_dir)
+    cache = tmp_path / "cache"
+    data = load_or_build([inst], cells, cache_dir=str(cache))
+    assert list(data.hier.index)
+    assert not cache.exists(), "in-memory input must not write a cache"

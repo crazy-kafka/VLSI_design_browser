@@ -10,9 +10,11 @@ Three input flows, one per subcommand:
 ``def``
     DEF plus a macro LEF. DEF carries placement, so physical mode works here.
 
-The ``verilog`` and ``def`` flows convert their inputs into exactly the JSON the
-``json`` flow consumes, writing it beside the input (or into ``--out``) so it can be
-inspected and fed back in. Nothing downstream can tell the difference.
+The ``verilog`` and ``def`` flows convert their inputs into exactly the structures the
+``json`` flow reads, and hand them straight to the pipeline in memory - a run writes
+nothing to disk. ``--out DIR`` additionally dumps the converted JSON there -
+``cell_info.json`` and ``<top>.instance_info.json`` (``.compare.json`` for the second
+design) - as a copy to inspect or to feed back to the ``json`` subcommand.
 """
 import argparse
 import json
@@ -27,6 +29,19 @@ logger = logging.getLogger(__name__)
 
 
 def _add_shared(parser):
+    """Options every subcommand reads, including ``metal``."""
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="verbose (debug) logging")
+
+
+def _add_pipeline(parser):
+    """Options for the JSON pipeline and the metric tree - everything but ``metal``.
+
+    Metal mode converts no JSON, builds no tree, and caches nothing: it reads DEF and LEF
+    straight into grids, so a threshold, a macro-column toggle and a cache directory are not
+    things it can act on. They used to be accepted and ignored, which is worse than absent -
+    the help text described a hierarchy filter in a mode that has no hierarchy.
+    """
     parser.add_argument(
         "--min-instances", type=int, default=config.DEFAULT_MIN_INST_COUNT, metavar="N",
         help="hide hierarchies with fewer than N instances (default: %(default)s)")
@@ -36,8 +51,6 @@ def _add_shared(parser):
                         help="pickle cache directory override")
     parser.add_argument("--force", action="store_true",
                         help="ignore cache and re-preprocess")
-    parser.add_argument("--verbose", "-v", action="store_true",
-                        help="verbose (debug) logging")
 
 
 def _add_physical(parser):
@@ -72,6 +85,7 @@ def parse_args(argv=None):
     mode.add_argument("--physical_mode", action="store_true",
                       help="render a 2-D heat map (layout view) instead of compare")
     _add_physical(p)
+    _add_pipeline(p)
     _add_shared(p)
 
     p = sub.add_parser("verilog", help="gate-level Verilog + macro LEF (no physical mode)")
@@ -87,7 +101,10 @@ def parse_args(argv=None):
     p.add_argument("--compare_top", metavar="NAME",
                    help="top module of the second design (defaults to --top)")
     p.add_argument("--out", metavar="DIR",
-                   help="where to write the generated JSON (default: beside the input)")
+                   help="dump the converted JSON here as cell_info.json and "
+                        "<top>.instance_info.json (.compare.json for the second design); "
+                        "by default nothing is written")
+    _add_pipeline(p)
     _add_shared(p)
 
     p = sub.add_parser("def", help="DEF + macro LEF (physical mode supported)")
@@ -106,26 +123,65 @@ def parse_args(argv=None):
     p.add_argument("--compare_top", metavar="NAME",
                    help="override the second design's DESIGN name")
     p.add_argument("--out", metavar="DIR",
-                   help="where to write the generated JSON (default: beside the input)")
+                   help="dump the converted JSON here as cell_info.json and "
+                        "<top>.instance_info.json (.compare.json for the second design); "
+                        "by default nothing is written")
     _add_physical(p)
+    _add_pipeline(p)
+    _add_shared(p)
+
+    p = sub.add_parser("metal", help="DEF + macro LEF + tech LEF: metal-density maps")
+    # dest is explicit because the default would be `args.def`, and `def` is a keyword.
+    p.add_argument("--def", dest="def_files", required=True, nargs="+", metavar="DEF",
+                   help="DEF file(s) with routing; several are assembled into one "
+                        "hierarchy with a single top")
+    p.add_argument("--lef", required=True, nargs="+", metavar="LEF",
+                   help="macro LEF file(s) describing the cell library")
+    p.add_argument("--tech-lef", dest="tech_lef", required=True, nargs="+", metavar="TLEF",
+                   help="tech LEF file(s) declaring the routing layers")
+    p.add_argument("--top", metavar="NAME", help="override the top block name")
+    p.add_argument("--grid-size", type=float, default=config.DEFAULT_METAL_GRID_SIZE,
+                   metavar="N",
+                   help="heat-map grid cell size in um (default: %(default)s)")
+    p.add_argument("--macro-block-layers", type=int,
+                   default=config.DEFAULT_MACRO_BLOCK_LAYERS, metavar="N",
+                   help="fallback only: how many bottom layers a macro that declares no OBS "
+                        "takes capacity from (default: %(default)s)")
+    p.add_argument("--min-segment-length", type=float, default=None, metavar="N",
+                   help="drop non-preferred-direction jogs shorter than N um; default is "
+                        "each layer's track pitch, 0 keeps every jog")
     _add_shared(p)
 
     return parser.parse_args(argv)
 
 
-def _out_path(args, source, suffix):
-    """Generated-JSON path for ``source``: beside it, or under ``--out``.
+def _block_out_path(args, block, compare=False):
+    """``<top>.instance_info.json``, or ``<top>.instance_info.compare.json``.
 
-    The suffix is appended to the whole file name (``core.def`` ->
-    ``core.def.instance_info.json``) so a ``core.def`` and a ``core.v`` in one
-    directory cannot collide.
+    The name comes from the design's own top cell rather than the input file: the two
+    sides of a version diff are normally the *same* file name in different directories
+    (``v1/core.def`` against ``v2/core.def``), so a file-derived name would collide and
+    silently lose a design. The cell library needs no such name - several LEF files are
+    one library - so it is always plain ``cell_info.json``.
     """
-    name = os.path.basename(source) + suffix
-    directory = args.out or os.path.dirname(source)
-    return os.path.join(directory, name) if directory else name
+    name = f"{block['top_name']}.instance_info"
+    if compare:
+        name += ".compare"
+    return os.path.join(args.out, name + ".json")
 
 
-def _write_json(path, data):
+def _dump_json(path, data, written=None):
+    """Write a copy of the converted data where the user asked for it.
+
+    ``written`` is the set of paths already dumped this run. A repeat means two inputs
+    mapped to one output name, so say so rather than let one file quietly replace the
+    other.
+    """
+    if written is not None:
+        if path in written:
+            logger.warning("two inputs convert to the same output name; %s is overwritten",
+                           path)
+        written.add(path)
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
@@ -136,11 +192,13 @@ def _write_json(path, data):
 
 
 def resolve_inputs(args):
-    """``(cell_info, blocks, compare_blocks)`` paths for whichever subcommand ran.
+    """``(cell_info, blocks, compare_blocks)`` for whichever subcommand ran.
 
-    For ``json`` these are the arguments as given. For ``verilog``/``def`` the inputs
-    are converted first: the LEF becomes a ``cell_info.json`` and each netlist/DEF
-    becomes an ``instance_info.json``, which is what the rest of the pipeline reads.
+    ``json`` returns the paths it was given. ``verilog`` and ``def`` return the converted
+    data itself - dicts, not files - so a run writes nothing to disk unless ``--out DIR``
+    was given, in which case the JSON is dumped there purely as a copy to inspect or feed
+    back to the ``json`` subcommand.
+
     Split out from :func:`main` so the conversion is testable without Qt.
     """
     if args.cmd == "json":
@@ -150,32 +208,82 @@ def resolve_inputs(args):
     from .parsers.convert import (cell_info_from_lef, instance_info_from_def,
                                   instance_info_from_verilog)
 
-    cell_path = _write_json(_out_path(args, args.lef[0], ".cell_info.json"),
-                            cell_info_from_lef(args.lef))
-    if args.cmd == "verilog":
-        convert, top = instance_info_from_verilog, args.top
-        compare_top = args.compare_top or args.top
-        sources, compare = args.verilog, args.compare_verilog
-    else:
-        convert, top = instance_info_from_def, args.top
-        compare_top = args.compare_top
-        sources, compare = args.def_files, args.compare_def
+    cells = cell_info_from_lef(args.lef)
 
-    blocks = [_write_json(_out_path(args, path, ".instance_info.json"),
-                          convert(path, top)) for path in sources]
-    compare_paths = None
-    if compare:
-        compare_paths = [_write_json(_out_path(args, path, ".instance_info.json"),
-                                     convert(path, compare_top)) for path in compare]
+    if args.cmd == "verilog":
+        # One netlist, however many files it is split across.
+        blocks = [instance_info_from_verilog(args.verilog, args.top)]
+        compare = ([instance_info_from_verilog(args.compare_verilog,
+                                               args.compare_top or args.top)]
+                   if args.compare_verilog else None)
+    else:
+        # Each DEF is a complete design, so they stay separate blocks.
+        blocks = [instance_info_from_def(path, args.top) for path in args.def_files]
+        compare = ([instance_info_from_def(path, args.compare_top)
+                    for path in args.compare_def] if args.compare_def else None)
+
+    if args.out:
+        # A block is named after its top cell, so the dump has to follow the conversion.
+        written = set()
+        _dump_json(os.path.join(args.out, "cell_info.json"), cells, written)
+        for block in blocks:
+            _dump_json(_block_out_path(args, block), block, written)
+        for block in compare or []:
+            _dump_json(_block_out_path(args, block, compare=True), block, written)
+
     logger.warning("%s input carries no power data: the leakage and dynamic heat maps "
                    "will be empty", args.cmd)
-    return cell_path, blocks, compare_paths
+    return cells, blocks, compare
+
+
+def _run_metal(args):
+    """Build the metal-density grids and open the view.
+
+    The grids are built before the window exists, with progress logged to the terminal. For
+    the sizes this is comfortable with - about 10^6 wire segments, a handful of seconds -
+    that is invisible; a full-chip flat DEF would spend minutes here with no window on
+    screen, and moving the build behind a visible window with a progress bar is the first
+    thing to do if that becomes the normal case. Recorded rather than hidden: the same
+    synchronous-startup shape is what the physical mode's performance review identified as
+    its "stuck GUI at launch".
+    """
+    from .metal import build_metal
+
+    logger.info("metal: reading %d DEF file(s)", len(args.def_files))
+    try:
+        data = build_metal(args.def_files, args.lef, args.tech_lef,
+                           grid_size=args.grid_size,
+                           macro_block_layers=args.macro_block_layers,
+                           min_segment=args.min_segment_length, top=args.top,
+                           on_progress=lambda message: logger.info("metal: %s", message))
+    except Exception as exc:  # surface load errors on the CLI, no window needed
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    for warning in data.warnings:
+        logger.warning("metal: %s", warning)
+
+    from PyQt5.QtWidgets import QApplication
+
+    from . import theme
+    from .ui_main import MainWindow
+
+    app = QApplication(sys.argv)
+    theme.apply_theme(app)
+    win = MainWindow(metal=data)
+    win.show()
+    return app.exec_()
 
 
 def main(argv=None):
     args = parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(levelname)s %(name)s: %(message)s")
+
+    # Metal mode takes neither the JSON structures nor the metric tree, so it has its own
+    # path rather than a branch inside `resolve_inputs`.
+    if args.cmd == "metal":
+        return _run_metal(args)
 
     physical = None
     try:

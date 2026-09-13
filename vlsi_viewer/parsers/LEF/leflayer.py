@@ -10,10 +10,13 @@ class LefLayer:
     def __init__(self, layer_name: AnyStr):
         self.name = layer_name
         self.type = ''
+        # 'PROPERTY LEF58_TYPE "TYPE X ;"' - a variant of the base TYPE, kept separate
+        # because it must not overwrite `type` (see CompiledRe.re_LEF58_type).
+        self.lef58_type = None
         self.direction = ''
         self.pitch_x = 0.0
         self.pitch_y = 0.0
-        self.width = 0
+        self.width = 0.0
         self.min_width = 0.0
         self.max_width = 0.0
         self.spacing = 0.0
@@ -26,6 +29,7 @@ class LefLayer:
         return f'''
 Lef Layer {self.name}
     type        {self.type}
+    lef58_type  {self.lef58_type}
     direction   {self.direction}
     pitch       {self.pitch_x} {self.pitch_y}
     width       {self.width}

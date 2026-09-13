@@ -16,19 +16,16 @@ source of truth for flags and validation - nothing here can drift from the real 
 """
 import os
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SAMPLE = os.path.join(HERE, "sample_data")
-# The def/verilog flows generate JSON beside their input by default. A demo should not
-# litter the checkout, so the shortcuts redirect it; the real CLI keeps the default.
-OUT = os.path.join(tempfile.gettempdir(), "vlsi-quickstart")
 
 SHORTCUTS = {
     "json": ("sample_data/*.json", "two-version compare"),
     "physical": ("sample_data/physical/*.json", "2-D density heat map"),
     "def": ("sample_data/eda/core.def", "DEF + LEF, heat map"),
     "verilog": ("sample_data/eda/core.v", "Verilog + LEF, tree only"),
+    "metal": ("sample_data/metal/*.def", "DEF + tech LEF, metal density"),
 }
 
 
@@ -53,12 +50,18 @@ def argv_for(name):
         # DEF carries placement, so this flow gets the heat map; drop the flag for the
         # tree on its own.
         return ["def", "--def", os.path.join(eda, "core.def"),
-                "--lef", os.path.join(eda, "cells.lef"), "--physical_mode",
-                "--out", OUT]
+                "--lef", os.path.join(eda, "cells.lef"), "--physical_mode"]
     if name == "verilog":
         return ["verilog", "--verilog", os.path.join(eda, "core.v"),
-                "--lef", os.path.join(eda, "cells.lef"), "--top", "core",
-                "--out", OUT]
+                "--lef", os.path.join(eda, "cells.lef"), "--top", "core"]
+    if name == "metal":
+        metal = os.path.join(SAMPLE, "metal")
+        # A hierarchy is normally several DEFs: the top one places the sub-block, and only
+        # together do they describe a design.
+        return ["metal", "--def", os.path.join(metal, "top.def"),
+                os.path.join(metal, "sub.def"),
+                "--lef", os.path.join(metal, "cells.lef"),
+                "--tech-lef", os.path.join(metal, "tech.lef")]
     raise KeyError(name)
 
 
@@ -88,9 +91,6 @@ def main(argv=None):
     if source and not os.path.exists(source):
         print(f"error: sample input not found: {source}", file=sys.stderr)
         return 1
-
-    if name in ("def", "verilog"):
-        print(f"generated JSON goes to {OUT}")
 
     from vlsi_viewer.cli import main as cli_main
 

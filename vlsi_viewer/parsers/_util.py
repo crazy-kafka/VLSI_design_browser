@@ -7,6 +7,7 @@ were importable. They now import from here instead, and the one ``CoordinateProc
 use was inlined, so nothing under ``vlsi_viewer/`` depends on the repo root being on
 ``sys.path``.
 """
+import gzip
 
 
 def Print(*args, **kwargs):
@@ -15,9 +16,18 @@ def Print(*args, **kwargs):
 
 
 def readFile(path):
-    """Return the full text of ``path``.
+    """Return the full text of ``path``, transparently handling a ``.gz`` suffix.
 
-    The DEF parser handles ``.gz`` itself, so this stays a plain text read.
+    Compressed inputs are the norm for large netlists, so a ``.gz`` name is read
+    through gzip. ``BadGzipFile`` falls back to a plain read, which keeps a file that
+    is merely *named* ``.gz`` usable - the same behaviour as the companion project's
+    ``utils/readFile.py``.
     """
+    if str(path).endswith(".gz"):
+        try:
+            with gzip.open(path, "rb") as fh:
+                return fh.read().decode("utf-8")
+        except gzip.BadGzipFile:
+            pass
     with open(path, "r", encoding="utf-8") as fh:
         return fh.read()

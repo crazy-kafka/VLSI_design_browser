@@ -17,7 +17,8 @@ class LefMacro:
                         'pin': {},
                         'input_pin_num': 0,
                         'output_pin_num': 0,
-                        'inout_pin_num': 0}
+                        'inout_pin_num': 0,
+                        'obs': {}}
 
     def macroName(self) -> str:
         return self.__macro['name']
@@ -27,6 +28,18 @@ class LefMacro:
 
     def size(self) -> Tuple[float, float]:
         return self.__macro['size']
+
+    def obstructions(self) -> Dict[str, List[Tuple[float, float, float, float]]]:
+        """``OBS`` geometry by layer, in the macro's own coordinates: layer -> rects.
+
+        An empty dict means the macro declares no obstructions at all, which is a different
+        thing from declaring some that turn out to be negligible - the caller decides what to
+        do with either, but it can only tell them apart if the parser does not conflate them.
+
+        Copied on the way out: the caller filters this geometry, and a consumer that mutated
+        the lists in place would poison the macro for every other consumer.
+        """
+        return {layer: list(rects) for layer, rects in self.__macro['obs'].items()}
 
     def pins(self) -> List[LefPin]:
         return list(self.__macro['pin'].values())
@@ -60,6 +73,9 @@ class LefMacro:
 
     def setInoutPinNum(self, N):
         self.__macro['inout_pin_num'] = N
+
+    def setObstruction(self, layer: str, rect: Tuple[float, float, float, float]):
+        self.__macro['obs'].setdefault(layer, []).append(rect)
 
 
 

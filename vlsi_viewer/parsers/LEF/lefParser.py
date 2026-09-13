@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os.path
 import re
 import time
 from typing import List, Tuple, Dict, Union, Iterable, TYPE_CHECKING, AnyStr
@@ -32,58 +31,135 @@ class TlefParser:
         while cursor < lines_len - 1:
             cursor += 1
             if layer_match := CompiledRe.re_layer_name.search(lines[cursor]):
-                lef_layer = LefLayer(layer_match['LAYER'])
-                while cursor < lines_len - 1:
-                    cursor += 1
-                    if type_match := CompiledRe.re_layer_type.search(lines[cursor]):
-                        lef_layer.type = type_match['TYPE']
-                    elif direction_match := CompiledRe.re_layer_direction.search(lines[cursor]):
-                        lef_layer.direction = direction_match['DIRECTION']
-                    elif pitch_match := CompiledRe.re_layer_pitch_single.search(lines[cursor]):
-                        lef_layer.pitch_x = float(pitch_match['PITCH'])
-                        lef_layer.pitch_y = float(pitch_match['PITCH'])
-                    elif pitch_match := CompiledRe.re_layer_pitch.search(lines[cursor]):
-                        lef_layer.pitch_x = float(pitch_match['PITCH_X'])
-                        lef_layer.pitch_y = float(pitch_match['PITCH_Y'])
-                    elif width_match := CompiledRe.re_layer_width.search(lines[cursor]):
-                        lef_layer.width = float(width_match['WIDTH'])
-                    elif min_width_match := CompiledRe.re_layer_min_width.search(lines[cursor]):
-                        lef_layer.min_width = float(min_width_match['MINWIDTH'])
-                    elif max_width_match := CompiledRe.re_layer_max_width.search(lines[cursor]):
-                        lef_layer.max_width = float(max_width_match['MAXWIDTH'])
-                    elif spacing_match := CompiledRe.re_layer_spacing.search(lines[cursor]):
-                        lef_layer.spacing = float(spacing_match['SPACING'])
-                    elif area_match := CompiledRe.re_area.search(lines[cursor]):
-                        lef_layer.area = float(area_match['AREA'])
-                    elif LEF58_type_match := CompiledRe.re_LEF58_type.search(lines[cursor]):
-                        lef_layer.type = LEF58_type_match['TYPE']
-                    elif LEF58_region_match := CompiledRe.re_LEF58_region.search(lines[cursor]):
-                        lef_layer.region = LEF58_region_match['REGION']
-                        lef_layer.based_layer = LEF58_region_match['BASEDLAYER']
-                    elif re.search(rf'END\s+{lef_layer.name}', lines[cursor]):
-                        break
-                self.__layers[lef_layer.name] = lef_layer
+                cursor = self.__parseLayer(lines, cursor, layer_match['LAYER'])
             elif macro_match := CompiledRe.re_macro_start.search(lines[cursor]):
-                macro_end = f'END {macro_match.group(1)}'
-                while cursor < lines_len - 1:
-                    cursor += 1
-                    if macro_end in lines[cursor]:
-                        break
+                cursor = self.__skipTo(lines, cursor, f'END {macro_match.group(1)}', raw=True)
             elif property_definitions_match := CompiledRe.re_property_definitions.search(lines[cursor]):
-                while cursor < lines_len - 1:
-                    cursor += 1
-                    if CompiledRe.re_end_property_definitions.search(lines[cursor]):
-                        break
+                cursor = self.__skipTo(lines, cursor,
+                                       pattern=CompiledRe.re_end_property_definitions)
             elif via_match := CompiledRe.re_via.search(lines[cursor]):
-                while cursor < lines_len - 1:
-                    cursor += 1
-                    if re.search(rf'^\s*END\s+{via_match["VIA"]}', lines[cursor]):
-                        break
+                cursor = self.__skipTo(lines, cursor, f'END {via_match["VIA"]}')
             elif via_rule_match := CompiledRe.re_via_rule.search(lines[cursor]):
-                while cursor < lines_len - 1:
-                    cursor += 1
-                    if re.search(rf'^\s*END\s+{via_rule_match["VIARULE"]}', lines[cursor]):
-                        break
+                cursor = self.__skipTo(lines, cursor, f'END {via_rule_match["VIARULE"]}')
+
+    @staticmethod
+    def __skipTo(lines, cursor, end_text=None, pattern=None, raw=False) -> int:
+        """Advance past a block body, returning the index of its closing line.
+
+        ``raw`` matches ``end_text`` anywhere in the line, which is what ``MACRO`` needs:
+        its body may contain text that merely looks like a terminator.
+        """
+        lines_len = len(lines)
+        while cursor < lines_len - 1:
+            cursor += 1
+            line = lines[cursor]
+            if pattern is not None:
+                if pattern.search(line):
+                    break
+            elif raw:
+                if end_text in line:
+                    break
+            elif re.search(rf'^\s*END\s+{re.escape(end_text)}', line):
+                break
+        return cursor
+
+    def __parseLayer(self, lines, cursor, name) -> int:
+        """Read one ``LAYER`` stanza; return the index of its ``END`` line.
+
+        The stanza is scanned as a nested block rather than line by line, because a
+        ``SPACINGTABLE`` body is a matrix of ``WIDTH <breakpoint> <spacing>...`` rows that
+        is shape-identical to the layer's own ``WIDTH`` statement - by shape alone the two
+        cannot be told apart, so the table is consumed as a unit.
+
+        Spacing is resolved after the stanza is read, not on the fly. A layer may declare
+        several conditional ``SPACING`` clauses, and only the unqualified one is the
+        default; taking whichever came last picks the widest-wire rule. Real tech LEFs
+        break both ways silently - a layer declaring only a table ends up with no spacing
+        at all, and a layer whose final clause is a conditional one ends up with a spacing
+        several times too large. Either way the heat map is wrong with no error.
+        """
+        layer = LefLayer(name)
+        lines_len = len(lines)
+        widths: List[float] = []
+        spacings: List[float] = []
+        table_spacings: List[float] = []
+        default_spacing = None
+        in_table = False
+
+        while cursor < lines_len - 1:
+            cursor += 1
+            line = lines[cursor]
+            if re.search(rf'^\s*END\s+{re.escape(name)}\b', line):
+                break
+
+            if in_table:
+                self.__readTableLine(line, table_spacings)
+                if CompiledRe.re_layer_table_end.search(line):
+                    in_table = False
+                continue
+            if CompiledRe.re_layer_spacing_table.search(line):
+                # A one-line table carries only breakpoints on the opening line; a
+                # multi-line one opens here and its rows follow. Either way
+                # __readTableLine ignores anything that is not a WIDTH row.
+                in_table = not CompiledRe.re_layer_table_end.search(line)
+                continue
+
+            if type_match := CompiledRe.re_layer_type.search(line):
+                layer.type = type_match['TYPE']
+            elif direction_match := CompiledRe.re_layer_direction.search(line):
+                layer.direction = direction_match['DIRECTION']
+            elif pitch_match := CompiledRe.re_layer_pitch_single.search(line):
+                layer.pitch_x = float(pitch_match['PITCH'])
+                layer.pitch_y = float(pitch_match['PITCH'])
+            elif pitch_match := CompiledRe.re_layer_pitch.search(line):
+                layer.pitch_x = float(pitch_match['PITCH_X'])
+                layer.pitch_y = float(pitch_match['PITCH_Y'])
+            elif width_match := CompiledRe.re_layer_width.search(line):
+                widths.append(float(width_match['WIDTH']))
+            elif min_width_match := CompiledRe.re_layer_min_width.search(line):
+                layer.min_width = float(min_width_match['MINWIDTH'])
+            elif max_width_match := CompiledRe.re_layer_max_width.search(line):
+                layer.max_width = float(max_width_match['MAXWIDTH'])
+            elif spacing_match := CompiledRe.re_layer_spacing_default.search(line):
+                default_spacing = float(spacing_match['SPACING'])
+            elif spacing_match := CompiledRe.re_layer_spacing.search(line):
+                spacings.append(float(spacing_match['SPACING']))
+            elif area_match := CompiledRe.re_area.search(line):
+                layer.area = float(area_match['AREA'])
+            elif LEF58_region_match := CompiledRe.re_LEF58_region.search(line):
+                layer.region = LEF58_region_match['REGION']
+                layer.based_layer = LEF58_region_match['BASEDLAYER']
+            elif LEF58_type_match := CompiledRe.re_LEF58_type.search(line):
+                layer.lef58_type = LEF58_type_match['LEF58_TYPE']
+
+        # The first WIDTH is the layer default; MINWIDTH is the fallback for a layer that
+        # declares no WIDTH at all. Cut and masterslice layers may legitimately have
+        # neither, which is why this is not an error.
+        layer.width = widths[0] if widths else layer.min_width
+        if default_spacing is not None:
+            layer.spacing = default_spacing
+        elif spacings:
+            layer.spacing = min(spacings)
+        elif table_spacings:
+            layer.spacing = min(table_spacings)
+        self.__layers[layer.name] = layer
+        return cursor
+
+    @staticmethod
+    def __readTableLine(line, table_spacings: List[float]) -> None:
+        """Collect spacing values from one line of a ``SPACINGTABLE`` body.
+
+        Only ``WIDTH`` rows carry spacings, and their first number is the row's width
+        breakpoint rather than a spacing, so it is dropped. Every other line -
+        ``PARALLELRUNLENGTH``, ``TWOWIDTHS``, ``INFLUENCE`` - holds breakpoints, which
+        must be ignored: including them would drag the minimum spacing to zero.
+        """
+        numbers = [float(number) for number in re.findall(CompiledRe.FLOAT, line)]
+        if CompiledRe.re_layer_width_row.search(line):
+            table_spacings.extend(numbers[1:])
+        elif numbers and not CompiledRe.re_layer_table_header.search(line):
+            # A continuation of the previous row: every number is a spacing.
+            table_spacings.extend(numbers)
 
     @property
     def layers(self) -> Dict[str, LefLayer]:
@@ -99,6 +175,10 @@ class LefParser:
         self.__macro_list = []
         self.__macro_dict = {}
         self.lef_list = lef_list
+        # OBS geometry this parser does not model (POLYGON, PATH, ...). Counted rather than
+        # guessed at: a shape it cannot read is a hole in a blockage, and a caller that wants
+        # to say so needs a number.
+        self.n_obs_unmodelled = 0
         for lef in lef_list:
             Print(f'Parsing {lef}')
             self.extractMacroInfo(self.getAllLefLines([lef]))
@@ -126,7 +206,7 @@ class LefParser:
                 out_pin_num = 0
                 inout_pin_num = 0
                 cursor += 1
-                while macro_end not in lef_lines[cursor]:
+                while cursor < self.lines_len and macro_end not in lef_lines[cursor]:
                     match_class = CompiledRe.re_class.search(lef_lines[cursor])
                     if match_class:
                         this_macro.setClassType(match_class.group(1))
@@ -185,6 +265,8 @@ class LefParser:
                                     inout_pin_num += 1
 
                             this_macro.setPin(pin_name, direction, use, layer, shape)
+                        elif CompiledRe.re_obs_start.search(lef_lines[cursor]):
+                            cursor = self.__readObstructions(lef_lines, cursor, this_macro)
                     cursor += 1
                 this_macro.setInputPinNum(input_pin_num)
                 this_macro.setOutputPinNum(out_pin_num)
@@ -194,12 +276,52 @@ class LefParser:
             else:
                 cursor += 1
 
+    def __readObstructions(self, lef_lines, cursor, macro):
+        """Read an ``OBS`` body into ``macro``, returning the cursor **on** its closing ``END``.
+
+        Leaving the cursor on the terminator, rather than past it, is what the caller's single
+        ``cursor += 1`` expects - the same contract the pin loop above honours. Stepping past it
+        here would make the caller skip ``END <macro>`` as well, and the enclosing walk would
+        then run to the end of the file looking for a macro terminator that has already gone by
+        and raise IndexError. Hence the bounds guard on the loops as well.
+
+        The body is a sequence of ``LAYER <name> ;`` sections, each with its own geometry, and
+        one bare ``END`` closes the lot - a *multi-layer* OBS is one block with several LAYER
+        statements, not one block per layer, so the current layer has to be tracked rather than
+        assumed.
+        """
+        layer = None
+        cursor += 1
+        while cursor < self.lines_len - 1:
+            line = lef_lines[cursor]
+            if CompiledRe.re_obs_end.search(line):
+                break
+            layer_match = CompiledRe.re_layer.search(line)
+            if layer_match:
+                layer = layer_match.group(1)
+                cursor += 1
+                continue
+            rect_match = CompiledRe.re_rect.search(line)
+            if rect_match:
+                # A rect before any LAYER has no layer to belong to; dropping it is the only
+                # honest option, and it cannot happen in a well-formed OBS.
+                if layer is not None:
+                    macro.setObstruction(layer, tuple(float(rect_match.group(index))
+                                                      for index in (1, 2, 3, 4)))
+                cursor += 1
+                continue
+            if CompiledRe.re_obs_unmodelled.search(line):
+                self.n_obs_unmodelled += 1
+            cursor += 1
+        return cursor
+
     @staticmethod
     def getAllLefLines(lef_list):
+        # Through readFile so a '.gz' macro LEF works like a '.gz' netlist; keepends
+        # preserves the readlines() contract the macro search relies on.
         lef_lines = []
         for lef in lef_list:
-            with open(os.path.realpath(lef) , 'r') as lef_f:
-                lef_lines += lef_f.readlines()
+            lef_lines += readFile(lef).splitlines(keepends=True)
         return lef_lines
 
     def __repr__(self):

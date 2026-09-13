@@ -9,9 +9,15 @@ if TYPE_CHECKING:
 
 class CompiledRe:
 
-    NAME = r'[_\w\d\/]+'
+    # BUSBITCHARS are '[]' by default, so an identifier may carry bus bit selects.
+    # Without them here, buses collapse onto one another ('data[0]' and 'data[1]' both
+    # become 'data') and any pin reference with a bit select fails to match at all.
+    NAME = r'[_\w\d\/\[\]]+'
     PINNAME = r'[_\w\d\[\]]+'
     INTEGER = r'-?\d+'
+    # A non-default rule's distances are database units. The reference implies integers,
+    # but a decimal costs nothing to accept and avoids losing a rule to formatting.
+    NDR_DIST = r'-?\d+(?:\.\d+)?'
     COMPONENTS_PART = r'COMPINENTS \D+ ;(.*)END COMPONENTS'
     PSTATUS = r'\+ (?P<pstatus>FIXED|COVER|PLACED|UNPLACED)'
     DIRECTION = r'\+\s+DIRECTION\s+(?P<direction>INPUT|OUTPUT|INOUT|FEEDTHRU)'
@@ -35,23 +41,97 @@ class CompiledRe:
     END_DESIGN = r'END\s+DESIGN'
     re_end_design = re.compile(END_DESIGN)
 
-    re_net = re.compile(rf'-\s+(?P<net_name>{NAME})')
+    # --- nets and wiring (DEF NETS / SPECIALNETS) -----------------------------
+    # Anchored: a statement begins at column 0 with "- name". Wiring coordinates can
+    # also carry a '-', so an unanchored '-' would misfire on them.
+    re_net = re.compile(rf'^\s*-\s+(?P<net_name>{NAME})')
     re_net_conn = re.compile(rf'\(\s+(?P<inst_name>{NAME})\s+(?P<term_name>{NAME})\s+\)')
-
-    re_special_wiring = re.compile(rf'(?P<layer>{NAME})\s+(?P<width>\d+)\s+\(\s*(?P<x0>[*\d]+)\s+(?P<y0>[*\d]+)(?:\s+(?P<e0>\d+))?\s*\)(?:\s+\(\s*(?P<x1>[*\d]+)\s+(?P<y1>[*\d]+)(?:\s+(?P<e1>\d+))?\s*\))?(?:\s+(?P<via>{NAME}))?')
-
-    re_routing_point = re.compile(rf'\(\s*(?P<x>[\*\d]+)\s+(?P<y>[\*\d]+)(?:\s+(?P<e>\d+))?\s*\)')
-    re_routing_point_0 = re.compile(rf'\(\s*(?P<x0>[\*\d]+)\s+(?P<y0>[\*\d]+)(?:\s+(?P<e0>\d+))?\s*\)')
-    re_routing_point_1 = re.compile(rf'\(\s*(?P<x1>[\*\d]+)\s+(?P<y1>[\*\d]+)(?:\s+(?P<e1>\d+))?\s*\)')
-
-    re_regular_wiring = re.compile(rf'(?:ROUTED|FIXED|NEW)\s+(?P<layer>{NAME})\s+(?:(?P<TAPER>TAPER|TAPERRULE\s+{NAME})\s+)?')
     re_ndr = re.compile(rf'\+\s+NONDEFAULTRULE\s+(?P<ndr>{NAME})')
+
+    # Words that begin a wiring clause or a following clause. None may be read as a
+    # layer or a via name: with the special-wiring keyword optional (below), a loose
+    # 'STYLE 3' would otherwise match the routed "<layer> <width>" form.
+    WIRE_KEYWORD = (r'(?:COVER|FIXED|ROUTED|NOSHIELD|SHIELD|NEW|POLYGON|RECT|VIA|SHAPE'
+                    r'|STYLE|MASK|DO|STEP|BY|SOURCE|USE|VOLTAGE|WEIGHT|PATTERN|PROPERTY'
+                    r'|FIXEDBUMP|ROUTEHALO|HALO|REGION|XTALK|NONDEFAULTRULE|SHIELDNET'
+                    r'|VPIN|SUBNET|ESTCAP|FREQUENCY|ORIGINAL|DIST|NETLIST|USER|TIMING)')
+    NOT_KEYWORD = rf'(?!(?:{WIRE_KEYWORD})\b)'
+
+    # A routing point, or a via, in the order they appear. Each coordinate is an integer
+    # or '*', which per the reference's DEF Coordinate Conventions means "reuse the last
+    # coordinate" - so the caller has to carry state between points.
+    WIRE_NUM = r'\*|-?\d+'
+    WIRE_POINT = rf'\(\s*(?P<x>{WIRE_NUM})\s+(?P<y>{WIRE_NUM})(?:\s+(?P<ext>-?\d+))?\s*\)'
+    ORIENT_CODE = r'N|S|W|E|FN|FS|FW|FE'
+    re_wire_token = re.compile(
+        rf'{WIRE_POINT}|(?P<via>{NOT_KEYWORD}{NAME})'
+        rf'(?:\s+(?P<via_orient>{ORIENT_CODE}))?')
+
+    # A wiring form starts at its keyword and runs to the next form (or the next
+    # non-wiring clause). Layer names may carry '[]' or '.'; widths are positive.
+    WIRE_LAYER = r'[A-Za-z_][\w\[\]\/.]*'
+    SHAPE_OR_MASK = r'(?:\+\s*SHAPE\s+\S+\s*|\+\s*MASK\s+\d+\s*)*'
+    STYLE = r'(?:\+\s*STYLE\s+\d+\s*)?'
+    # Special wiring: one form per match. The reference brackets the
+    # {+ COVER|+ FIXED|+ ROUTED|+ SHIELD net} keyword ahead of the POLYGON/RECT/VIA
+    # forms, so it is optional for those three; the routed "layerName routeWidth" form
+    # requires it, which is what keeps other clauses from looking like a route.
+    re_special_wiring_form = re.compile(
+        rf'(?:(?:\+\s*(?:COVER|FIXED|ROUTED|SHIELD\s+{NAME})|\bNEW)\s+)?{SHAPE_OR_MASK}'
+        rf'(?:\+\s*POLYGON\s+(?P<poly_layer>{WIRE_LAYER})'
+        rf'|\+\s*RECT\s+(?P<rect_layer>{WIRE_LAYER})'
+        rf'|\+\s*VIA\s+(?P<via_name>{NAME})(?:\s+(?P<via_orient>{ORIENT_CODE}))?'
+        rf'|(?P<layer>{NOT_KEYWORD}{WIRE_LAYER})\s+(?P<width>\d+)'
+        rf'\s*{SHAPE_OR_MASK}{STYLE})')
+    # {+ COVER|+ FIXED|+ ROUTED|+ NOSHIELD} layer [TAPER|TAPERRULE rule] [STYLE n];
+    # regular wiring has no routeWidth.
+    re_regular_wiring_form = re.compile(
+        rf'(?:\+\s*(?:COVER|FIXED|ROUTED|NOSHIELD)|\bNEW)\s+(?P<layer>{WIRE_LAYER})'
+        rf'(?:\s+(?:TAPERRULE\s+(?P<taper_rule>{NAME})|\bTAPER\b))?{STYLE}')
+    # Clauses that may follow (or be interleaved with) wiring. These terminate the
+    # wiring text, so a stray '+ SOURCE DIST' is not mistaken for a via.
+    re_non_wiring_clause = re.compile(
+        rf'\+\s*(?:SOURCE|USE|VOLTAGE|FIXEDBUMP|PATTERN|WEIGHT|PROPERTY|XTALK'
+        rf'|NONDEFAULTRULE|SHIELDNET|VPIN|SUBNET|ESTCAP|FREQUENCY|ORIGINAL)\b')
+
+    # --- non-default rules (reference 683-701) ---------------------------------------
+    # A rule ends with a single ';' and the '+ LAYER' clauses inside it carry no
+    # terminator of their own, so a whole rule arrives as one statement and is split
+    # here. Without this the '+ NONDEFAULTRULE name' on a net is a string with nothing
+    # behind it, and a 2W2S clock rule silently reads as the 1W1S default.
+    re_ndr_rule = re.compile(rf'^\s*-\s+(?P<rule_name>{NAME})')
+    re_ndr_layer = re.compile(
+        rf'\+\s*LAYER\s+(?P<layer>{WIRE_LAYER})(?P<body>.*?)'
+        rf'(?=\+\s*(?:LAYER|VIA|VIARULE|MINCUTS|HARDSPACING|PROPERTY)\b|$)',
+        re.DOTALL)
+    # DIAGWIDTH must precede WIDTH or the alternation matches the tail of it.
+    re_ndr_field = re.compile(
+        rf'(?P<field>DIAGWIDTH|SPACING|WIREEXT|WIDTH)\s+(?P<value>{NDR_DIST})')
+    re_ndr_hardspacing = re.compile(r'\+\s*HARDSPACING\b')
+    re_ndr_other = re.compile(r'\+\s*(?P<clause>VIA|VIARULE|MINCUTS|PROPERTY)\b')
+
+    # A net's own '+ USE'. It outranks the section the net came from when the two
+    # disagree, which is why both are recorded rather than one being inferred.
+    re_net_use = re.compile(USE)
+
+    # '(*703600)' and '(1760*)' glue '*' to the number it replaces. Splitting them before
+    # tokenising keeps WIRE_POINT's separator strict, and that matters: relaxing it to
+    # '\s*' would let a malformed '(1234)' backtrack into x=123, y=4 rather than fail.
+    re_glued_star = re.compile(r'(?<=\d)(?=\*)|(?<=\*)(?=\d)')
 
     re_blockage = re.compile(rf'LAYER\s+(?P<layer_name>{NAME})\s+(?P<shape_type>POLYGON|RECT)')
 
     re_db_unit = re.compile(rf'UNITS\s+DISTANCE\s+MICRONS\s+(?P<unit>\d+)\s+')
 
-    re_track = re.compile(rf'TRACKS\s+(?P<direction>X|Y)\s+(?P<offset>\d+)\s+DO\s+\d+\s+STEP\s+(?P<step>\d+)\s+(?:MASK\s+(?P<mask_num>\d+)\s+(?:SAMEMASK)?\s+)?LAYER\s+(?P<layer>{NAME})')
+    # {X|Y} start DO numtracks STEP space [MASK maskNum [SAMEMASK]] [LAYER l ...]
+    # (reference 510-517). SAMEMASK is separately optional, so it must not swallow the
+    # separator before LAYER: an earlier pattern required two whitespace runs after the
+    # mask number, so the ordinary 'MASK 1 LAYER M4' never matched. LAYER may name
+    # several layers, hence 'layers'.
+    re_track = re.compile(
+        rf'TRACKS\s+(?P<direction>X|Y)\s+(?P<offset>\d+)\s+DO\s+(?P<num_tracks>\d+)\s+'
+        rf'STEP\s+(?P<step>\d+)(?:\s+MASK\s+(?P<mask_num>\d+)(?:\s+SAMEMASK)?)?'
+        rf'\s+LAYER\s+(?P<layers>{NAME}(?:\s+{NAME})*)')
 
     re_property_definition = re.compile('PROPERTYDEFINITIONS')
     re_end_property_definition = re.compile(r'END\s+PROPERTYDEFINITIONS')

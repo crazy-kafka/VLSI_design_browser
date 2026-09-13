@@ -226,6 +226,24 @@ def test_layout_range_kept_across_map_switch(app, tmp_path):
     assert (view._legend._lo, view._legend._hi) == (0.25, 0.75)
 
 
+def test_the_range_spin_boxes_are_visible(app, tmp_path):
+    """The controls row ends in a stretch, so an `Ignored` width policy leaves 0 px for these.
+
+    Measured: `Preferred` with `setMaximumWidth(96)` lays them out 96 px wide, `Ignored` lays
+    them out at nothing - and the suite could not see it, because setting a value works fine at
+    zero width. Only a shown window tells the two apart.
+    """
+    from vlsi_viewer.ui_layout import LayoutView
+
+    view = LayoutView(_tiny_physical(tmp_path))
+    view.resize(900, 500)
+    view.show()
+    app.processEvents()
+    assert view.min_spin.width() > 0
+    assert view.max_spin.width() > 0
+    view.close()
+
+
 def test_layout_first_visit_to_map_autotanges(app, tmp_path):
     """A map type never visited before still derives its range from the data."""
     from vlsi_viewer.ui_layout import LayoutView

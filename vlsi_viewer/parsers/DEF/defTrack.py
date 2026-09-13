@@ -7,12 +7,14 @@ if TYPE_CHECKING:
 
 class DefTrack:
 
-    def __init__(self, layer_name: AnyStr, direction: AnyStr, offset: int, step: int, mask: int):
+    def __init__(self, layer_name: AnyStr, direction: AnyStr, offset: int, step: int,
+                 mask: int, num_tracks: int = 0):
         self.layer_name = layer_name
         self.direction = direction
         self.offset = offset
         self.step = step
         self.mask = mask
+        self.num_tracks = num_tracks    # the DO clause: how many tracks the pattern has
 
     def __repr__(self):
         return f'''
@@ -22,6 +24,7 @@ DefTrack
     offset     {self.offset}
     step       {self.step}
     mask       {self.mask}
+    num_tracks {self.num_tracks}
 '''
 
 

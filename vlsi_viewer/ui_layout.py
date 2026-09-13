@@ -23,11 +23,31 @@ class LayoutView(QWidget):
 
     hover_changed = pyqtSignal(str)
     status_message = pyqtSignal(str)  # transient status (e.g. "computing contour")
+    cell_hovered = pyqtSignal(int, int)   # grid cell under the cursor, or (-1, -1)
 
-    def __init__(self, physical: PhysicalData, parent=None):
+    def __init__(self, physical: PhysicalData, parent=None, external_controls=False):
+        """``physical`` is any render source, not just :class:`PhysicalData`.
+
+        It must expose ``extent``, ``grid_size``, ``rows``, ``cols``, ``boundary_polys`` and
+        ``heat(kind)``. A source may also expose ``kinds()`` to supply its own map list -
+        which is how metal mode replaces the combo entirely - and ``contour_for`` if it has
+        contours at all. Duck-typing rather than a base class because the two grids have
+        almost nothing else in common.
+
+        ``external_controls`` leaves the controls row unparented so a side panel can adopt
+        the min/max and Fit widgets; the attributes stay here either way, so nothing that
+        pokes at ``layer.min_spin`` has to care.
+        """
         super().__init__(parent)
         self._physical = physical
-        self._kind = "density"
+        self._external_controls = external_controls
+        self._kinds = physical.kinds() if hasattr(physical, "kinds") else HEAT_TYPES
+        self._contour_enabled = hasattr(physical, "contour_for")
+        # A source whose values are ratios gets a fixed [0, 1] ramp: the whole point of the
+        # metal metric is that 1.0 means every track consumed, so autoscaling to the data
+        # would throw away the calibration.
+        self._fixed_ratio = hasattr(physical, "kinds")
+        self._kind = self._kinds[0][0]
         self._lo = 0.0
         self._hi = 1.0
         self._ranges = {}  # kind -> (lo, hi) the user last saw for that heat map
@@ -49,7 +69,8 @@ class LayoutView(QWidget):
         self._contour_worker.contour_ready.connect(self._on_contour_ready)
 
         root = QVBoxLayout(self)
-        root.addLayout(self._controls_row)
+        if not external_controls:
+            root.addLayout(self._controls_row)
         root.addWidget(self._view, 1)
 
         self._build_legend()
@@ -59,31 +80,59 @@ class LayoutView(QWidget):
 
     # -- controls ----------------------------------------------------------
     def _build_controls(self):
+        # With ``external_controls`` the widgets below are placed by someone else - the metal
+        # toolbar adopts the ramp's - so they are gathered into a throwaway layout instead of
+        # the row this view would otherwise show. A widget left listed in a layout that is
+        # never installed is a trap: adding that row to a layout later would pull the widgets
+        # straight back out of the toolbar, which then silently has no Min/Max at all.
         self._controls_row = QHBoxLayout()
-        self._controls_row.addWidget(QLabel("Map:"))
+        row = self._controls_row if not self._external_controls else QHBoxLayout()
+        row.addWidget(QLabel("Map:"))
         self.type_combo = QComboBox()
-        for _key, label in HEAT_TYPES:
+        for _key, label in self._kinds:
             self.type_combo.addItem(label)
         self.type_combo.currentIndexChanged.connect(self._on_type)
-        self._controls_row.addWidget(self.type_combo)
+        row.addWidget(self.type_combo)
 
-        self._controls_row.addWidget(QLabel("Min:"))
+        row.addWidget(QLabel("Min:"))
         self.min_spin = QDoubleSpinBox()
         self.min_spin.setDecimals(3)
         self.min_spin.setRange(0.0, 1e12)
         self.min_spin.valueChanged.connect(self._apply_range)
-        self._controls_row.addWidget(self.min_spin)
-        self._controls_row.addWidget(QLabel("Max:"))
+        row.addWidget(self.min_spin)
+        row.addWidget(QLabel("Max:"))
         self.max_spin = QDoubleSpinBox()
         self.max_spin.setDecimals(3)
         self.max_spin.setRange(1e-6, 1e12)
         self.max_spin.valueChanged.connect(self._apply_range)
-        self._controls_row.addWidget(self.max_spin)
+        row.addWidget(self.max_spin)
+        for box in (self.min_spin, self.max_spin):
+            self._constrain(box)
 
-        fit_btn = QPushButton("Fit")
-        fit_btn.clicked.connect(self._fit)
-        self._controls_row.addWidget(fit_btn)
-        self._controls_row.addStretch(1)
+        self.fit_btn = QPushButton("Fit")
+        self.fit_btn.clicked.connect(self._fit)
+        row.addWidget(self.fit_btn)
+        row.addStretch(1)
+
+    @staticmethod
+    def _constrain(box):
+        """Stop a spin box claiming the width of its widest possible value.
+
+        A QDoubleSpinBox sizes itself for the longest string its range can produce, and the
+        range here reaches 1e12 so the physical mode's power values fit. That is a 331 px hint
+        for a box that shows three digits, and a hint is not free: it becomes the panel's
+        minimum width, so the window could not shrink below ~1342 px, and a layout that hands
+        a widget its size hint (a QSplitter does) reserved 942 px for a 230 px panel and left
+        the difference as dead space.
+
+        `setMaximumWidth` alone is the whole fix: both a QBoxLayout and a QToolBar bound the
+        slot they give a widget by its maximum, so 96 px is what the layout reserves and the
+        331 px hint never reaches the window's minimum. Do **not** add
+        ``QSizePolicy.Ignored`` as well - it makes ``QWidgetItem::sizeHint()`` return zero
+        width, and every row these boxes sit in ends with ``addStretch(1)``, which then takes
+        the entire row and leaves the boxes 0 px wide and invisible.
+        """
+        box.setMaximumWidth(96)
 
     # -- fixed overlay legend ---------------------------------------------
     def _build_legend(self):
@@ -103,9 +152,18 @@ class LayoutView(QWidget):
 
     # -- rendering ---------------------------------------------------------
     def _on_type(self, idx):
+        self.set_kind(self._kinds[idx][0])
+
+    def set_kind(self, kind):
+        """Select a map by key, keeping the per-map range the user left behind.
+
+        Public because the metal panel drives the map from its layer checkboxes rather than
+        from the combo, and both routes have to go through the same range bookkeeping or the
+        min/max would reset depending on how the map was chosen.
+        """
         self._ranges[self._kind] = (self._lo, self._hi)  # remember where we came from
-        self._kind = HEAT_TYPES[idx][0]
-        saved = self._ranges.get(self._kind)
+        self._kind = kind
+        saved = self._ranges.get(kind)
         if saved is None:
             self._autoset_range()   # first visit to this map: derive from the data
         else:
@@ -120,6 +178,15 @@ class LayoutView(QWidget):
         self._legend.set_range(self._lo, self._hi)
         self.refresh()
 
+    def set_range(self, lo, hi):
+        """Set the ramp explicitly, the way the metal panel's Auto button does.
+
+        Public counterpart of ``_set_range``: same push into the spin boxes and legend, plus
+        the repaint, so a caller outside this class cannot land in a half-updated state.
+        """
+        self._set_range(lo, hi)
+        self.refresh()
+
     def _set_range(self, lo, hi):
         """Push a range into the spin boxes and legend without re-entering _apply_range."""
         self.min_spin.blockSignals(True)
@@ -132,6 +199,10 @@ class LayoutView(QWidget):
         self._legend.set_range(lo, hi)
 
     def _autoset_range(self):
+        if self._fixed_ratio:
+            # A ratio map is read against the top of its ramp, not against its own maximum.
+            self._set_range(0.0, 1.0)
+            return
         arr = self._physical.heat(self._kind)
         hi = float(arr.max()) if arr.size else 1.0
         lo = 0.0
@@ -152,8 +223,10 @@ class LayoutView(QWidget):
             val = self._physical.heat(self._kind)[iy, ix]
             self.hover_changed.emit(
                 f"x={px:.2f}  y={py:.2f}   {self._kind}[{iy},{ix}] = {val:.3f}")
+            self.cell_hovered.emit(ix, iy)
         else:
             self.hover_changed.emit(f"x={px:.2f}  y={py:.2f}")
+            self.cell_hovered.emit(-1, -1)
 
     def _flip_y(self, x, y):
         x0, y0, _x1, y1 = self._physical.extent
@@ -163,10 +236,15 @@ class LayoutView(QWidget):
         for it in self._boundary_items:
             self._view.scene().removeItem(it)
         self._boundary_items = []
-        for _name, pts in self._physical.boundary_polys:
+        top = getattr(self._physical, "top_name", None)
+        for name, pts in self._physical.boundary_polys:
             poly = QPolygonF([self._flip_y(x, y) for (x, y) in pts])
             item = QGraphicsPolygonItem(poly)
-            item.setPen(QPen(QColor(0xE8, 0xEE, 0xF2), 0))
+            # The die outline is brighter than the sub-block ones. On a dark map "outside the
+            # die" and "inside with no metal" are the same colour, so the edge is the only
+            # thing separating them.
+            item.setPen(QPen(QColor(0xE8, 0xEE, 0xF2) if name == top
+                             else QColor(0x5A, 0x6A, 0x7A), 0))
             item.setBrush(QBrush(Qt.NoBrush))
             item.setZValue(10)
             self._view.scene().addItem(item)
@@ -179,7 +257,13 @@ class LayoutView(QWidget):
         The exact contour is computed on a background worker so the GUI stays
         responsive; the dashed overlay appears when the result arrives. Clicking
         the same node again clears it immediately (a stale result is discarded).
+
+        A no-op for a source with no contours - the metal grids have no instance boxes to
+        outline. Nothing reaches here in metal mode anyway, since the tree that would call
+        it is not shown, but a no-op is cheaper to reason about than an unreachable one.
         """
+        if not self._contour_enabled:
+            return
         if self._contour_path == path:
             self._clear_contour()
             self.status_message.emit("")

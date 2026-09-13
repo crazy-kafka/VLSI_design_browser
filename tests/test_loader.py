@@ -1,6 +1,7 @@
 import json
 import os
 
+import pandas as pd
 import pytest
 
 from vlsi_viewer.loader import load_block, load_cell_info
@@ -81,3 +82,25 @@ def test_load_block_boundary_invalid(tmp_path):
     }))
     with pytest.raises(ValueError):
         load_block(str(inst))
+
+
+def test_load_block_accepts_already_parsed_data(sample_dir):
+    """The EDA flows hold the block in memory; no file needs to exist for it."""
+    path = os.path.join(sample_dir, "instance_info.json")
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+
+    by_path = load_block(path)
+    by_dict = load_block(data)
+
+    assert by_path[0] == by_dict[0]            # top_name
+    assert by_path[2] == by_dict[2]            # boundary
+    pd.testing.assert_frame_equal(by_path[1], by_dict[1])
+
+
+def test_load_cell_info_accepts_already_parsed_data(sample_dir):
+    path = os.path.join(sample_dir, "cell_info.json")
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+
+    pd.testing.assert_frame_equal(load_cell_info(path), load_cell_info(data))
