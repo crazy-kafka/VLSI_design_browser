@@ -106,6 +106,18 @@ class Frame:
         y = float(y)
         return (a * x + b * y + self.origin[0], c * x + d * y + self.origin[1])
 
+    def apply_points(self, xs, ys):
+        """Point-map arrays of coordinates, vectorised, without re-normalising.
+
+        For a ring, whose vertices are a sequence rather than two opposite corners:
+        `apply_rect`'s min/max would turn any ring that is not an axis-aligned rectangle into
+        its bounding box, which is the over-count the polygon path exists to avoid.
+        """
+        (a, b), (c, d) = self.matrix
+        xs = np.asarray(xs, dtype=np.float64)
+        ys = np.asarray(ys, dtype=np.float64)
+        return (a * xs + b * ys + self.origin[0], c * xs + d * ys + self.origin[1])
+
     def apply_rect(self, x0, y0, x1, y1):
         """Transform a batch of rectangles, vectorised.
 

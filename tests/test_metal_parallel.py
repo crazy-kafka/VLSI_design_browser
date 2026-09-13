@@ -23,6 +23,18 @@ from vlsi_viewer.metal import SCOPE_ALL, build_metal
 SAMPLE = "sample_data/metal"
 
 
+def _force_pool(monkeypatch, chunk=None):
+    """Let the pool run on a fixture this small.
+
+    `build_metal` sizes the pool to the input, and `sub.def` is 2 MB - far less than a worker is
+    worth - so without this the equivalence tests below would compare a sequential build with a
+    sequential build: green, and testing nothing about the pool.
+    """
+    monkeypatch.setattr(parallel, "BYTES_PER_WORKER", 0)
+    if chunk is not None:
+        monkeypatch.setattr(parallel, "DEFAULT_CHUNK_STATEMENTS", chunk)
+
+
 def _build(jobs, monkeypatch=None, chunk=None):
     """The committed sub-block, built with the pool or without it."""
     if chunk is not None:
@@ -41,8 +53,9 @@ def _heat(data, layers):
 
 def test_the_pool_produces_the_same_map_as_one_process(tmp_path, monkeypatch):
     """The claim the whole feature rests on, at a chunk size that exercises several chunks."""
+    _force_pool(monkeypatch, chunk=250)
     sequential = _build(1)
-    pooled = _build(3, monkeypatch, chunk=250)
+    pooled = _build(3, monkeypatch)
     layers = [layer.name for layer in sequential.layers]
     kind = sequential.group_kind(layers)
     assert pooled.totals == sequential.totals
@@ -59,10 +72,44 @@ def test_the_pool_produces_the_same_map_as_one_process(tmp_path, monkeypatch):
 
 def test_the_reported_input_size_does_not_depend_on_the_worker_count(monkeypatch):
     """Every worker reads the whole file, so a summary line must not multiply or divide it."""
+    _force_pool(monkeypatch, chunk=250)
     sequential = _build(1)
-    pooled = _build(3, monkeypatch, chunk=250)
+    pooled = _build(3, monkeypatch)
     assert pooled.stats["lines"] == sequential.stats["lines"]
     assert pooled.stats["forms"] == sequential.stats["forms"]
+
+
+def test_a_small_def_is_parsed_in_one_process():
+    """`--jobs` is a cap: a pool's startup is not worth it for a couple of megabytes."""
+    from vlsi_viewer.parallel import effective_workers
+
+    path = os.path.join(SAMPLE, "sub.def")
+    assert effective_workers([path], 8) == 1
+    assert effective_workers([path], 1) == 1
+    assert effective_workers([path, path], 8) == 1
+    # ... and a DEF big enough to pay for them gets them, up to the caller's cap.
+    assert effective_workers([path], 8, bytes_per_worker=0) == 8
+    assert effective_workers([path], 3, bytes_per_worker=1 << 20) == 3
+    assert effective_workers([path], 0) == 1                 # clamped, not zero workers
+
+
+def test_a_gzipped_def_is_sized_by_what_it_decompresses_to(tmp_path):
+    """A `.gz`'s size on disk is not the work - every worker decompresses the whole thing."""
+    import gzip
+
+    from vlsi_viewer.parallel import input_size
+
+    text = "VERSION 5.8 ;\n" * 20000
+    plain = tmp_path / "plain.def"
+    plain.write_text(text)
+    packed = tmp_path / "packed.def.gz"
+    with gzip.open(packed, "wt") as handle:
+        handle.write(text)
+    with gzip.open(packed, "rb") as handle:
+        decompressed = len(handle.read())
+    assert input_size(str(plain)) == plain.stat().st_size
+    assert input_size(str(packed)) == decompressed
+    assert input_size(str(packed)) > os.path.getsize(packed) * 10
 
 
 def _statements(path):

@@ -117,19 +117,35 @@ def _cell_attrs(name: str, macro) -> dict:
     return attrs
 
 
-def cell_info_from_lef(lef_paths) -> dict:
+def cell_info_from_lef(lef_paths, with_obstructions: bool = False):
     """``cell_info.json`` data from one or more macro LEF files.
 
     Every macro is emitted, including filler and tap cells: the viewer needs their
     ``size_x``/``size_y`` to draw their area, and their absence would silently drop
     them from the density map (``physical.py`` skips cells missing from cell_info) and
     show them as zero-area leaves in the tree.
+
+    ``with_obstructions`` returns the macros' own ``OBS`` geometry alongside, keyed by cell and
+    then by layer, for the metal-density blockage model. It costs nothing to ask for: the
+    ``LefParser`` walk already reads obstructions while building each macro, so the choice is
+    between carrying them out of that parse and parsing the whole library a second time - which
+    is what the blockage stage used to do, and what a caller with both needs avoids.
     """
     from .LEF import LefParser
 
     macros = LefParser(list(lef_paths)).getMacros()
     logger.info("lef: %d macro(s) from %d file(s)", len(macros), len(lef_paths))
-    return {name: _cell_attrs(name, macro) for name, macro in macros.items()}
+    info = {name: _cell_attrs(name, macro) for name, macro in macros.items()}
+    if not with_obstructions:
+        return info
+    obstructions = {}
+    for name, macro in macros.items():
+        if not is_macro_class(macro.macroClass()):
+            continue                     # a standard cell's OBS is pin access, not a keep-out
+        declared = macro.obstructions()
+        if declared:
+            obstructions[name] = declared
+    return info, obstructions
 
 
 def instance_info_from_verilog(verilog_paths, top) -> dict:

@@ -201,6 +201,13 @@ SHAPE_COUNTERS = (("emitted", "n_emitted"), ("vias", "n_via"), ("jogs", "n_jog")
                   ("unknown", "n_unknown_layer"), ("unusable", "n_usable_layer_missing"),
                   ("degenerate", "n_degenerate"), ("polygon_edges", "n_polygon_edge"))
 
+# Of those, the ones that describe the *text* rather than the placements. A block placed K times
+# is parsed once, so a caller folding its counters has to count these K times: the design really
+# does contain K copies of that wiring, and a summary that disagreed with the grids would be
+# worse than no summary. `emitted` is the exception - the stream counts it per placement already,
+# so that its own count matches what its sink was handed.
+PER_PLACEMENT_COUNTERS = ("vias", "jogs", "unknown", "unusable", "degenerate", "polygon_edges")
+
 
 class ShapeStream:
     """Turns parsed nets into micron-normalised shapes, in batches, retaining nothing.
@@ -225,7 +232,7 @@ class ShapeStream:
     rectangle transform would collapse it to its bounding box.
     """
 
-    def __init__(self, tech: TechRouting, sink, db_unit=None, ndrs=None, frame=None,
+    def __init__(self, tech: TechRouting, sink, db_unit=None, ndrs=None, frames=None,
                  batch: int = DEFAULT_BATCH, min_segment=None):
         self.tech = tech
         # Set by configure() when the DEF is the source of these, because they are only
@@ -233,7 +240,12 @@ class ShapeStream:
         self.db_unit = None if db_unit is None else float(db_unit)
         self.ndrs = ndrs or {}
         self.sink = sink
-        self.frame = frame
+        # Where this block's wiring ends up. A *list*, because a block can be placed more than
+        # once: the text is parsed once and placed under each of its instance frames, which is
+        # what keeps a design that instantiates a block four times from parsing it four times.
+        # Two instances at the same orientation and position are two placements, so this cannot
+        # be a set of frames.
+        self.frames = tuple(frames or ())
         self.batch = max(1, int(batch))
         # Length below which a *non-preferred-direction* jog is dropped. None means "use
         # each layer's own pitch" - below one track pitch a jog covers under 0.04 um^2 of a
@@ -312,29 +324,51 @@ class ShapeStream:
         bucket[2].append(x1)
         bucket[3].append(y1)
         self._count += 1
-        self.n_emitted += 1
+        # Counted per placement, because the sink is handed one shape per placement: the
+        # stream's own "what I emitted" has to match what its sink received.
+        self.n_emitted += len(self.frames) or 1
         if self._count >= self.batch:
             self.flush()
 
     def flush(self) -> None:
-        """Hand every pending shape to the sink and release it."""
+        """Hand every pending shape to the sink, once per frame, and release it.
+
+        A block placed K times is parsed once and placed K times, so this is where the K
+        placements happen. Two things have to stay true for that to be worth doing:
+
+        - every frame is applied to the **original** coordinates. Feeding one frame's output into
+          the next composes them (N, then W of N, then FS of W of N), which puts the first
+          placement right and the rest wrong, and no counter would show it;
+        - one sink call per frame, never a concatenation of K transformed copies: at K=1000 that is
+          gigabytes transiently, which is exactly what the batch exists to bound.
+        """
+        frames = self.frames or (None,)
         for (layer_index, scope), coords in self._pending.items():
             x0 = np.asarray(coords[0], dtype=np.float64)
             y0 = np.asarray(coords[1], dtype=np.float64)
             x1 = np.asarray(coords[2], dtype=np.float64)
             y1 = np.asarray(coords[3], dtype=np.float64)
-            if self.frame is not None:
-                x0, y0, x1, y1 = self.frame.apply_rect(x0, y0, x1, y1)
-            self.sink.add_rects(layer_index, scope, x0, y0, x1, y1)
+            for frame in frames:
+                if frame is None:
+                    self.sink.add_rects(layer_index, scope, x0, y0, x1, y1)
+                else:
+                    ax, ay, bx, by = frame.apply_rect(x0, y0, x1, y1)
+                    self.sink.add_rects(layer_index, scope, ax, ay, bx, by)
         self._pending = {}
         self._count = 0
 
-        for layer_index, scope, x0, y0, x1, y1, half in self._diagonals:
-            if self.frame is not None:
-                x0, y0 = self.frame.apply_point(x0, y0)
-                x1, y1 = self.frame.apply_point(x1, y1)
-            self.sink.add_diagonal(layer_index, scope, x0, y0, x1, y1, half)
-        self.n_emitted += len(self._diagonals)
+        diagonals = self._diagonals
+        for layer_index, scope, x0, y0, x1, y1, half in diagonals:
+            for frame in frames:
+                if frame is None:
+                    self.sink.add_diagonal(layer_index, scope, x0, y0, x1, y1, half)
+                else:
+                    ax, ay = frame.apply_point(x0, y0)
+                    bx, by = frame.apply_point(x1, y1)
+                    self.sink.add_diagonal(layer_index, scope, ax, ay, bx, by, half)
+        # Counted and cleared once, outside the frame loop: inside it, frames 2..K would emit no
+        # diagonals at all.
+        self.n_emitted += len(diagonals) * len(frames)
         self._diagonals = []
 
     # -- nets ------------------------------------------------------------------------
@@ -485,6 +519,11 @@ class ShapeStream:
 
         Rare, so the exact ``shapely`` buffer is affordable; a ring is a filled shape, not
         an outline, so it is handed over whole rather than as its edges.
+
+        The buffer is computed once, in the block's own coordinates, and the frames are applied
+        to the result: a ring placed K times is one shapely operation, not K. This is also the
+        only path that never applied a frame at all - a ring inside a rotated sub-block
+        rasterised where the block's *local* origin is, under every other instance.
         """
         from shapely.geometry import Polygon
 
@@ -502,11 +541,21 @@ class ShapeStream:
         grow = layer.spacing / 2.0
         if grow > 0:
             shape = shape.buffer(grow, join_style=2)
-        self.sink.add_polygon(layer.index, scope,
-                              np.asarray(shape.exterior.coords, dtype=np.float64))
-        # Counted where the screen counts it: the ring arrives as one shape, while its edges
-        # went to `n_polygon_edge` above.
-        self.n_emitted += 1
+        exterior = np.asarray(shape.exterior.coords, dtype=np.float64)
+        frames = self.frames or (None,)
+        for frame in frames:
+            if frame is None:
+                self.sink.add_polygon(layer.index, scope, exterior)
+            else:
+                # The point map on every vertex, not a corner normalisation: a ring is a
+                # sequence of vertices, and min/max would make a bounding box of any ring that
+                # is not an axis-aligned rectangle.
+                self.sink.add_polygon(
+                    layer.index, scope,
+                    np.stack(frame.apply_points(exterior[:, 0], exterior[:, 1]), axis=1))
+        # Counted where the screen counts it: the ring arrives once per placement, while its
+        # edges went to `n_polygon_edge` above.
+        self.n_emitted += len(frames)
 
 
 class DefRouting:

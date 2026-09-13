@@ -140,7 +140,9 @@ Options shared by the first three: `--min-instances`, `--include-macros`, `--cac
 render a heat map; `metal` has its own `--grid-size` (default 10 µm) because the useful
 resolution is different. `metal --jobs N` spreads the wiring pass over N processes — the
 per-net work has no dependency between nets, so it scales nearly linearly with cores; `1` (the
-default) keeps it all in one process, and `--profile` prints where a build's time went.
+default) keeps it all in one process, and `--profile` prints where a build's time went. `N` is a
+cap rather than an instruction — a worker costs a spawned interpreter and a full scan of the DEF,
+so an input only a few megabytes across is parsed in one process whatever you ask for.
 Within a subcommand, physical mode and the compare flag are
 mutually exclusive, and `metal` has neither — nor the JSON pipeline's options, which it
 cannot act on: it converts nothing, builds no tree and caches nothing. In physical mode, hover the layout view to read

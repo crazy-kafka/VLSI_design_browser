@@ -55,8 +55,8 @@ from .assembly import Frame, HierarchyAssembler, find_single_top
 from .loader import load_block, load_cell_info
 from .parsers import Cancelled
 from .parsers.convert import cell_info_from_lef, instance_info_from_def
-from .parsers.routing import (POWER, SHAPE_COUNTERS, SIGNAL, RouteLayer, ShapeStream,
-                              TechRouting, parse_def)
+from .parsers.routing import (PER_PLACEMENT_COUNTERS, POWER, SHAPE_COUNTERS, SIGNAL,
+                              RouteLayer, ShapeStream, TechRouting, parse_def)
 from .raster import Bins
 
 logger = logging.getLogger(__name__)
@@ -522,9 +522,10 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
 
     root = top if (top in blocks) else find_single_top(blocks)
     stages.mark("cell-index", f"{len(blocks)} block(s), root {root!r}")
-    # One cell-table lookup for the whole build. It used to be read twice - once here and
-    # again inside the blockage measurement - which parsed the macro LEF twice over.
-    cells = _indexed_cells(lef_paths)
+    # One parse of the macro LEF for the whole build: the cell table and the macros' OBS geometry
+    # come out of it together. The blockage measurement used to parse the same library again for
+    # the obstructions alone.
+    cells, obstructions = _indexed_cells(lef_paths)
     assembler = HierarchyAssembler(blocks, cells)
 
     boundary_points = blocks[root][1]
@@ -549,12 +550,6 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     warnings: List[AnyStr] = []
     stages.mark("blockage", f"{rows} x {cols} grid @ {grid_size:g} um, die "
                             f"{extent[2] - extent[0]:.1f} x {extent[3] - extent[1]:.1f} um")
-    try:
-        obstructions = _macro_obstructions(lef_paths)
-    except Exception as exc:                            # pragma: no cover - defensive
-        warnings.append(f"could not read the macro LEF's obstructions ({exc}); macros that "
-                        f"cannot be measured block their bottom layers instead")
-        obstructions = {}
     blocked, blockage = _macro_blockage(assembler, blocks, cells, obstructions, tech, extent,
                                         grid_size, root, macro_block_layers, warnings)
 
@@ -569,7 +564,15 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     # Pass 2: stream each block's wiring through its frame. Imported here rather than at module
     # scope because `parallel` takes `_GridSink` from this module, and a worker needs the same
     # sink the caller uses.
-    from .parallel import parse_parallel
+    from .parallel import effective_workers, parse_parallel
+
+    # `--jobs` is a cap: a pool costs a second or two of interpreter startup and a full scan of
+    # the file per worker, so a small DEF is parsed in one process whatever the caller asked for.
+    workers = effective_workers(def_paths, jobs)
+    if workers != jobs:
+        logger.info("metal: %d MB of DEF: %d worker(s) of %d requested",
+                    sum(os.path.getsize(path) for path in def_paths) / 1e6, workers, jobs)
+    jobs = workers
 
     stages.mark("routing", f"{len(blockage)} macro type(s) with obstruction data")
     sink = _GridSink(extent, grid_size)
@@ -581,53 +584,80 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
                                         "points_max": 0, "layers_used": set()}
 
     def on_block(name, frame: Frame) -> None:
-        path = path_of_block.get(name)
-        if path is None:
+        """Collect a block's placements. The wiring is parsed once per block, below."""
+        if name not in path_of_block:
             # A block we can see but have no DEF for: its wires cannot be measured. Said
             # once, because silently omitting a whole sub-block's routing is the kind of
             # thing nobody notices in a picture.
             warnings.append(f"block {name!r} is instantiated but no DEF defines it; its "
                             f"wiring is not counted")
             return
+        placements.setdefault(name, []).append(frame)
+
+    def parse_block(name: AnyStr, frames: List) -> None:
+        """Read one block's DEF once and place its wiring under every instance frame."""
+
+        def fold(counters: Dict) -> None:
+            # The wiring lands once per placement, so the counters that describe the *text* are
+            # counted once per placement too, or the summary would disagree with the grids.
+            # `emitted` is not among them: the stream counts that per placement already.
+            for key, value in counters.items():
+                totals[key] += value * (len(frames) if key in PER_PLACEMENT_COUNTERS else 1)
+
+        path = path_of_block[name]
         progress(f"reading routing in {name}")
         if jobs > 1:
             # Each worker reads the DEF itself and takes every `jobs`-th net statement; the
             # grids come back per layer and are summed here. See `parallel`.
             counters, _stats, note = parse_parallel(
-                path, name, tech, frame, min_segment, extent, grid_size, sink, jobs,
-                text_stats=text_stats, cancel=cancel)
-            for key, value in counters.items():
-                totals[key] += value
+                path, name, tech, frames, min_segment, extent, grid_size, sink, jobs,
+                text_stats=text_stats, cancel=cancel, pool=pool)
+            fold(counters)
             if note.get("ndrs"):
                 logger.info("%s: %d non-default rule(s)", name, note["ndrs"])
             return
-        else:
-            stream = ShapeStream(tech, sink, frame=frame, min_segment=min_segment)
-            # The components were read in pass 1; this pass wants the wiring, and re-building
-            # three million DefComponents that nothing reads costs memory for nothing.
-            routing = parse_def(path, stream=stream, skip_components=True, cancel=cancel)
-            stream.flush()
-            for key, attribute in SHAPE_COUNTERS:
-                totals[key] += getattr(stream, attribute)
-            stats = routing.stats
-            text_stats["forms"] += stats.get("forms", 0)
-            text_stats["points"] += stats.get("points", 0)
-            text_stats["lines"] += stats.get("lines", 0)
-            for key in ("statement_lines_max", "statement_chars_max", "points_max"):
-                text_stats[key] = max(text_stats[key], stats.get(key, 0))
-            text_stats["layers_used"] |= set(stats.get("layers_used", ()))
+        stream = ShapeStream(tech, sink, frames=frames, min_segment=min_segment)
+        # The components were read in pass 1; this pass wants the wiring, and re-building
+        # three million DefComponents that nothing reads costs memory for nothing.
+        routing = parse_def(path, stream=stream, skip_components=True, cancel=cancel)
+        stream.flush()
+        fold({key: getattr(stream, attribute) for key, attribute in SHAPE_COUNTERS})
+        stats = routing.stats
+        text_stats["forms"] += stats.get("forms", 0)
+        text_stats["points"] += stats.get("points", 0)
+        text_stats["lines"] += stats.get("lines", 0)
+        for key in ("statement_lines_max", "statement_chars_max", "points_max"):
+            text_stats[key] = max(text_stats[key], stats.get(key, 0))
+        text_stats["layers_used"] |= set(stats.get("layers_used", ()))
         if routing.ndrs:
             logger.info("%s: %d non-default rule(s)", name, len(routing.ndrs))
 
+    placements: Dict[AnyStr, List] = {}
     progress("reading routing")
+    # One pool for the whole build, not one per block: a hierarchy of several blocks would
+    # otherwise pay for a set of interpreters each time.
+    pool = None
+    if jobs > 1:
+        from concurrent.futures import ProcessPoolExecutor
+
+        pool = ProcessPoolExecutor(max_workers=jobs)
     try:
+        # The walk stays per placement - `_macro_blockage` and `_boundary_polys` need one visit
+        # per instance - and only the wiring pass defers, so that a block placed K times is
+        # parsed once instead of K times.
         assembler.walk(root, on_block)
+        for block_name, block_frames in placements.items():
+            parse_block(block_name, block_frames)
     except Cancelled as stopped:
         # Not a failure: the grids hold everything read up to the interrupt, and saying so is
-        # what keeps a partial map from being mistaken for a complete one.
+        # what keeps a partial map from being mistaken for a complete one. It now lands where a
+        # prefix of every block's wiring has been read, rather than a prefix of the blocks.
         warnings.append(f"stopped early on request ({stopped}); the map covers only the "
                         f"wiring that had been read")
         logger.warning("metal: %s", warnings[-1])
+    finally:
+        if pool is not None:
+            pool.shutdown()
     if assembler.missing:
         missing = sorted(set(assembler.missing))
         warnings.append(f"{len(missing)} cell type(s) are neither in the LEF nor a block, "
@@ -702,45 +732,30 @@ def _file_note(path) -> Dict:
 
 
 def _indexed_cells(lef_paths):
-    """The cell library keyed by cell name, or None.
+    """The cell library keyed by cell name, and the macros' own OBS geometry.
 
     ``load_cell_info`` leaves a RangeIndex and keeps the name in a column, so it has to be
     re-keyed before it can be looked up by name. That re-keying lives in
     ``physical._load_blocks_and_cells`` rather than in the loader, which is easy to miss and
     fails silently: every lookup returns None, so macros simply vanish from the capacity.
+
+    If no LEF is given the answer is ``(None, {})``, not an empty table: every instance would
+    otherwise look like a cell the library does not know, and the build would warn about all of
+    them.
     """
     if not lef_paths:
-        return None
+        return None, {}
     from .parsers.convert import cell_info_from_lef
-    return load_cell_info(cell_info_from_lef(lef_paths)).set_index("cell_name")
+
+    info, obstructions = cell_info_from_lef(lef_paths, with_obstructions=True)
+    return load_cell_info(info).set_index("cell_name"), obstructions
 
 
-def _macro_obstructions(lef_paths) -> Dict[AnyStr, Dict[AnyStr, list]]:
-    """Each hard macro's ``OBS`` geometry, straight from the macro LEF.
-
-    ``{cell_name: {layer_name: [(x0, y0, x1, y1), ...]}}`` in the macro's own coordinates.
-    Only cells whose ``CLASS`` is not ``CORE`` are included: a standard cell's obstructions
-    are where its own pins may not be approached, a few percent of a cell that is not a
-    keep-out region, and treating them as blockage would subtract scattered slivers from
-    every layer they touch.
-
-    A cell with no ``OBS`` is absent from the mapping rather than present with an empty one -
-    the caller has to be able to tell "declares nothing" (fall back to a guess) from "declares
-    geometry" (trust it).
-    """
-    if not lef_paths:
-        return {}
-    from .parsers.LEF import LefParser
-    from .parsers.convert import is_macro_class
-
-    obstructions = {}
-    for name, macro in LefParser(list(lef_paths)).getMacros().items():
-        if not is_macro_class(macro.macroClass()):
-            continue
-        declared = macro.obstructions()
-        if declared:
-            obstructions[name] = declared
-    return obstructions
+# The macros' own OBS geometry comes out of `_indexed_cells`, from the one `LefParser` walk that
+# also builds the cell table: `cell_info_from_lef(with_obstructions=True)` carries it, where the
+# blockage stage used to re-parse the whole library to get at it. The `LefParser` already reads
+# obstructions while it walks, so nothing extra is parsed - and a library that fails to parse now
+# fails at the cell-index stage rather than after it, which is the same failure one step earlier.
 
 
 def _obs_blockage(rects, size, warnings, name) -> list:

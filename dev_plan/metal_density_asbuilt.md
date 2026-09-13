@@ -1076,6 +1076,72 @@ about, caught by comparing grids rather than counters.
 (counters exactly, grids to float32 rounding) and the cutter's own invariant, since a split
 statement would still parse and still draw, just in the wrong place.
 
+## Phase 17 — the flow stops parsing what it has already parsed
+
+A sample run with `--jobs 8` put **6.45 s of 7.39 s in `_thread.lock.acquire`, with 40
+`CreateProcess` calls**, for a build that takes 0.7 s sequentially. Four things were being read
+more than once, and the plan is [`parse_once_flow.md`](parse_once_flow.md).
+
+| redundancy | in the log | on the recorded real design |
+|---|---|---|
+| macro LEF parsed twice - cell table, then obstructions | `cells.lef` at cell-index and again at blockage | ~10 s of 7051 s |
+| a block parsed once per **instance** | `reading routing in SUB` ×4 | zero (flat, one instance); K × for a hierarchy |
+| every **worker** re-reads the file | `Load DEF file SUB` ~32× | deliberate, but it multiplied the row above |
+| the DEF read once per pass | pass 1 components, pass 2 wiring | ~25 s |
+
+**The test gap was closed first**, because both failures here are silent. Nothing pinned a wire
+under a non-identity frame - the frame tests were outline-only and macro-obstruction-only, and
+`verify()`'s grid thresholds survive a *composed* transform - and nothing pinned a block's wiring
+landing once per placement, which a deduplicated walk passes while losing three quarters of the
+metal. Both are now tests, and so is `emitted == 79,277 == 4 × 19,817 + 9` on the committed sample.
+
+**And one of them found a live bug.** `_add_polygon` never applied a frame at all: a `+ POLYGON`
+inside a rotated sub-block rasterised in the block's own coordinates, stacked under every other
+instance, while `n_emitted` counted it once per instance. It had been invisible because the
+sample's only ring sits in the top block, where the frame is the identity. Writing the test took
+two attempts for an instructive reason: the first fixture used a **square** ring, and a quarter
+turn maps a square ring onto itself, so the test asserted a difference that cannot exist. It is an
+L now - which also exercises the other way this path can go wrong, a bounding box instead of a
+point map.
+
+**What changed.** `build_metal`'s wiring pass now collects each block's placements and parses the
+block **once** with a list of frames; the walk stays per path, because `_macro_blockage` and
+`_boundary_polys` need one visit per instance. `ShapeStream.frame` became `frames`, applied in
+`flush()` per frame - to *copies* of the pending arrays, so that one frame's output is never fed
+into the next frame's transform (that composes them: right for the first placement, wrong for the
+rest, and invisible to every counter). `n_emitted` is counted per placement inside the stream, so
+its invariant against the sink still holds; the six counters that describe the *text* are
+multiplied by the placement count where the totals are folded, so the summary agrees with the
+grids; the input characterisation is folded once, because the text is read once.
+
+`--jobs` is now a **cap**: `effective_workers` sizes the pool from the input, and a DEF only a few
+megabytes across is parsed in one process. **The plan's own assumption was wrong here** - it
+proposed sizing on the declared net counts in pass 1's 64 KB head, and for a chip-level DEF that
+head is megabytes of components before the first section header, so the count is not in it. The
+sizing reads the *uncompressed* size instead, via gzip's trailer for a `.gz` (whose `st_size` is
+the compressed size, and every worker decompresses the whole thing). One pool is built per build
+rather than per block, and the `cancel` that `parse_parallel` had always accepted but never passed
+to its workers now reaches them - `--jobs > 1` could not be interrupted at all before.
+
+**Measured on the user's own scenario** (`top.def` + `sub.def`, `--jobs 8`):
+
+| | before | after |
+|---|---|---|
+| `stage routing` | 6.91 s | **0.39 s** |
+| full build | ~7.4 s | **0.64 s** |
+| `reading routing in SUB` | 4 | 1 |
+| LEF parses | 2 | 1 |
+| `_thread.lock.acquire` | 6.45 s | gone from the profile |
+| shapes measured / jogs | 79,277 / 540 | 79,277 / 540 (unchanged) |
+| reported input lines | 172,779 (the text counted once per instance) | 43,242 (once) |
+
+The line count is the one number that *should* move: it describes the input, which is now read
+once rather than once per placement, and it makes this summary incomparable with earlier runs'.
+
+`python -m pytest -q` -> **531 passed**, with the real-file numbers unmoved (gcd 2504 / 5 / 2327)
+and the new tests in `tests/test_metal_hierarchy_frames.py` covering the frames and the
+multiplicity.
+
 ## What each change bought
 
 Every number below is measured on a committed or reproducible fixture; the fixtures are named so
@@ -1096,6 +1162,9 @@ lines.
 | 8 | the same, on a real routed DEF | 59.2 -> 49.1 ms (1.21x) | the vendored gcd DEF | - |
 | 9 | the wiring pass across processes (`--jobs N`) | 65 -> 34.3 s at four workers (1.9x), 28.5 s at eight (2.3x) on a 9.1 M-line synthetic; **+13 % at one worker**, which is why the default does not use it | `--real-shape --via-nets 2000000` | a new module, a CLI flag, its own tests; every worker re-reads the file (one line-level scan each, deliberately) |
 | 10 | diagnostics (no speed claim) | the log now carries the emitted count, the input's shape, per-stage seconds, RSS and GC - the evidence that made the real-design estimate below possible at all | `tests/test_metal_diagnostics.py` | ~150 lines of reporting |
+| 11 | a block's DEF is parsed once per *block*, not once per placement, and placed under each of its frames | the log's `reading routing in SUB` 4× -> 1×; `stage routing` 6.91 -> 0.39 s at `--jobs 8` | `sample_data/metal/{top,sub}.def` | a frames list through the stream and the task tuple; the flush loop must apply frames to copies and never compose them |
+| 12 | `--jobs` sized from the input, one pool per build, and the `cancel` it never passed to its workers | 8 workers -> 1 for a 2 MB DEF, and the 6.45 s of lock contention that was 87 % of that run's profile is gone | the same sample; the parallel tests pass an explicit override so they still exercise the pool | a heuristic constant, and a test override that must not be forgotten or the pool's equivalence coverage quietly stops testing |
+| 13 | the macro LEF parsed once: the obstructions come out of the same pass that builds the cell table | one LEF pass instead of two; ~10 s of the recorded 7051 s run | the sample, and the vendored Nangate45 library | an opt-in on `cell_info_from_lef`; the "could not read the obstructions" warning goes with the second read |
 
 Equivalence throughout: the suite went from 500 to **526 tests**, and the pinned real-file numbers
 never moved (gcd 2504 via / 5 jogs / 2327 rects / `metal2` mean 0.2527). Three proposed fast paths
@@ -1166,6 +1235,7 @@ classes and the stage split, and `--profile` reports which function holds the ti
 | 14 | property payloads, region layers, and the pitch perpendicular to the tracks |
 | 15 | the 7005 s routing read: what it costs, and the changes that cut it |
 | 16 | the wiring pass across processes, and the measurement that redrew it |
+| 17 | the flow stops parsing a block once per instance, a LEF twice, a file per worker |
 
 Nine bugs were found by checks rather than by reading, and four of them would have produced a
 wrong map with no error at all: the scope lookup that left the default view empty, the missing
