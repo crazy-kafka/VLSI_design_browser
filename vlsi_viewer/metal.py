@@ -55,7 +55,8 @@ from .assembly import Frame, HierarchyAssembler, find_single_top
 from .loader import load_block, load_cell_info
 from .parsers import Cancelled
 from .parsers.convert import cell_info_from_lef, instance_info_from_def
-from .parsers.routing import (POWER, SIGNAL, RouteLayer, ShapeStream, TechRouting, parse_def)
+from .parsers.routing import (POWER, SHAPE_COUNTERS, SIGNAL, RouteLayer, ShapeStream,
+                              TechRouting, parse_def)
 from .raster import Bins
 
 logger = logging.getLogger(__name__)
@@ -178,7 +179,7 @@ class MetalData:
                  layers: Sequence[RouteLayer], capacity_base,
                  blocked: Dict[int, np.ndarray], macro_block_layers: int,
                  grids: Dict[Tuple[int, str], np.ndarray], warnings: List[AnyStr],
-                 blockage: Dict = None, totals: Dict = None):
+                 blockage: Dict = None, totals: Dict = None, stats: Dict = None):
         self.top_name = top_name
         self.boundary_polys = boundary_polys
         self.grid_size = float(grid_size)
@@ -195,6 +196,9 @@ class MetalData:
         # polygon edges. The warnings say it in prose; this is the same thing a caller can
         # read, for a summary line or a benchmark.
         self.totals = dict(totals or {})
+        # What the input text was like, as opposed to what came out of it - forms, points,
+        # statement sizes, the layer names it uses. See `DefParser.getStats`.
+        self.stats = dict(stats or {})
         self._capacity_base = np.asarray(capacity_base, dtype=np.float64)
         self._grids = grids                    # (layer index, scope) -> inflated area
         self._scope = SCOPE_ALL
@@ -443,6 +447,12 @@ class _GridSink:
         self.n_polygons += 1
         self._bins_for(layer_index, scope).add_polygon(ring)
 
+    def add_grids(self, grids: Dict[Tuple[int, str], np.ndarray]) -> None:
+        """Fold another sink's grids into this one; see `Bins.add_grid`."""
+        for (layer_index, named_scope), grid in grids.items():
+            scope = SIGNAL if named_scope == SCOPE_SIGNAL else POWER
+            self._bins_for(layer_index, scope).add_grid(grid)
+
     def grids(self) -> Dict[Tuple[int, str], np.ndarray]:
         named = {}
         for (layer_index, scope), bins in self._bins.items():
@@ -454,7 +464,8 @@ class _GridSink:
 def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
                 tech_paths: Sequence[AnyStr], grid_size: float = None,
                 macro_block_layers: int = None, min_segment=None,
-                top: AnyStr = None, on_progress=None, cancel=None) -> MetalData:
+                top: AnyStr = None, on_progress=None, cancel=None,
+                jobs: int = 1) -> MetalData:
     """Build the per-layer utilisation grids for a DEF hierarchy.
 
     The DEFs are read twice, deliberately. The first pass takes only the components and the
@@ -468,6 +479,9 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     the build stops and returns what it has measured, with a warning saying so. A chip-level
     build runs for hours, and the useful answer to "this input was wrong" is a partial map in
     seconds rather than a killed job.
+
+    ``jobs`` above 1 runs the wiring pass across that many processes (see :mod:`parallel`). The
+    default is 1, so the flow the tests pin is the one that runs unless a caller asks otherwise.
     """
     grid_size = config.DEFAULT_METAL_GRID_SIZE if grid_size is None else float(grid_size)
     if macro_block_layers is None:
@@ -552,7 +566,11 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
             f"this design in about {np.sqrt(rows * cols / config.DEFAULT_METAL_MAX_BINS):.1f}x "
             f"less memory")
 
-    # Pass 2: stream each block's wiring through its frame.
+    # Pass 2: stream each block's wiring through its frame. Imported here rather than at module
+    # scope because `parallel` takes `_GridSink` from this module, and a worker needs the same
+    # sink the caller uses.
+    from .parallel import parse_parallel
+
     stages.mark("routing", f"{len(blockage)} macro type(s) with obstruction data")
     sink = _GridSink(extent, grid_size)
     totals = {"emitted": 0, "vias": 0, "jogs": 0, "unknown": 0, "unusable": 0,
@@ -572,24 +590,32 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
                             f"wiring is not counted")
             return
         progress(f"reading routing in {name}")
-        stream = ShapeStream(tech, sink, frame=frame, min_segment=min_segment)
-        # The components were read in pass 1; this pass wants the wiring, and re-building
-        # three million DefComponents that nothing reads costs memory for nothing.
-        routing = parse_def(path, stream=stream, skip_components=True, cancel=cancel)
-        stream.flush()
-        for key, attribute in (("emitted", "n_emitted"), ("vias", "n_via"),
-                               ("jogs", "n_jog"), ("unknown", "n_unknown_layer"),
-                               ("unusable", "n_usable_layer_missing"),
-                               ("degenerate", "n_degenerate"),
-                               ("polygon_edges", "n_polygon_edge")):
-            totals[key] += getattr(stream, attribute)
-        stats = routing.stats
-        text_stats["forms"] += stats.get("forms", 0)
-        text_stats["points"] += stats.get("points", 0)
-        text_stats["lines"] += stats.get("lines", 0)
-        for key in ("statement_lines_max", "statement_chars_max", "points_max"):
-            text_stats[key] = max(text_stats[key], stats.get(key, 0))
-        text_stats["layers_used"] |= set(stats.get("layers_used", ()))
+        if jobs > 1:
+            # Each worker reads the DEF itself and takes every `jobs`-th net statement; the
+            # grids come back per layer and are summed here. See `parallel`.
+            counters, _stats, note = parse_parallel(
+                path, name, tech, frame, min_segment, extent, grid_size, sink, jobs,
+                text_stats=text_stats, cancel=cancel)
+            for key, value in counters.items():
+                totals[key] += value
+            if note.get("ndrs"):
+                logger.info("%s: %d non-default rule(s)", name, note["ndrs"])
+            return
+        else:
+            stream = ShapeStream(tech, sink, frame=frame, min_segment=min_segment)
+            # The components were read in pass 1; this pass wants the wiring, and re-building
+            # three million DefComponents that nothing reads costs memory for nothing.
+            routing = parse_def(path, stream=stream, skip_components=True, cancel=cancel)
+            stream.flush()
+            for key, attribute in SHAPE_COUNTERS:
+                totals[key] += getattr(stream, attribute)
+            stats = routing.stats
+            text_stats["forms"] += stats.get("forms", 0)
+            text_stats["points"] += stats.get("points", 0)
+            text_stats["lines"] += stats.get("lines", 0)
+            for key in ("statement_lines_max", "statement_chars_max", "points_max"):
+                text_stats[key] = max(text_stats[key], stats.get(key, 0))
+            text_stats["layers_used"] |= set(stats.get("layers_used", ()))
         if routing.ndrs:
             logger.info("%s: %d non-default rule(s)", name, len(routing.ndrs))
 
@@ -662,7 +688,7 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     }, sort_keys=True, default=str))
     return MetalData(root, _boundary_polys(assembler, blocks, root), grid_size, extent, rows,
                      cols, tech.layers, capacity_base, blocked, macro_block_layers,
-                     grids, warnings, blockage, totals)
+                     grids, warnings, blockage, totals, text_stats)
 
 
 def _file_note(path) -> Dict:

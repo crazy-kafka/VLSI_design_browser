@@ -10,7 +10,8 @@ import io
 
 import pytest
 
-from vlsi_viewer.parsers.routing import (POWER, SIGNAL, ShapeStream, TechRouting, parse_def)
+from vlsi_viewer.parsers.routing import (POWER, SHAPE_COUNTERS, SIGNAL, ShapeStream,
+                                         TechRouting, parse_def)
 
 TECH_LEF = """\
 LAYER poly
@@ -357,6 +358,73 @@ END DESIGN
 """)
     assert stream.n_via == 1
     assert stream.sink.rects == []
+
+
+# -- layers the tech LEF cannot route -----------------------------------------------
+#
+# A shape on a layer the tech LEF does not define, or declares without a width, is counted by
+# *what it is* rather than by how many points it has - three different rules, plus the
+# unusable-layer path, and 4.5 M shapes of the reporting design were of this kind. These are
+# pinned because a fast path that decided counters without building shapes would have to
+# reproduce every one of them.
+SPECIAL_TECH = """\
+LAYER metal1
+  TYPE ROUTING ;
+  WIDTH 0.1 ;
+  SPACING 0.1 ;
+  PITCH 0.2 ;
+  DIRECTION HORIZONTAL ;
+END metal1
+LAYER metal2
+  TYPE ROUTING ;
+  SPACING 0.1 ;
+  PITCH 0.2 ;
+  DIRECTION VERTICAL ;
+END metal2
+"""
+
+
+def _special(tmp_path, forms):
+    body = "SPECIALNETS 1 ;\n- VDD + USE POWER\n" + forms + "\nEND SPECIALNETS\nEND DESIGN\n"
+    stream = ShapeStream(_tech(tmp_path, SPECIAL_TECH), Collect())
+    return _run(tmp_path, body, stream=stream)[1]
+
+
+@pytest.mark.parametrize("forms, expected", [
+    # A filled ring is one shape; its edges are counted separately, so it is 1 + 3, not 3.
+    ("  + POLYGON XX ( 0 0 ) ( 100 0 ) ( 100 100 ) ( 0 100 ) ;",
+     {"unknown": 1, "polygon_edges": 3}),
+    # A rect is one shape.
+    ("  + RECT XX ( 0 0 ) ( 100 100 ) ;", {"unknown": 1}),
+    # A routed form is one shape per segment, and a single point is still one shape.
+    ("  + ROUTED XX 100 ( 0 0 ) ( 100 0 ) ;", {"unknown": 1}),
+    ("  + ROUTED XX 100 ( 0 0 ) ;", {"unknown": 1}),
+    # A via is never an unknown layer: its name is a via name, not a layer name.
+    ("  + VIA V12 ( 0 0 ) ( 100 100 ) ;", {"vias": 2, "unknown": 0}),
+    # A layer declared without a width routes nothing, and says so once per shape - a special
+    # form states its own width, so it reaches the geometry and only the lookup is counted.
+    ("  + ROUTED metal2 100 ( 0 0 ) ( 0 100 ) ;", {"unusable": 1, "emitted": 1}),
+])
+def test_a_shape_on_a_layer_the_tech_lef_cannot_route_is_counted_by_what_it_is(
+        tmp_path, forms, expected):
+    stream = _special(tmp_path, forms)
+    attributes = dict(SHAPE_COUNTERS)
+    for counter, value in expected.items():
+        assert getattr(stream, attributes[counter]) == value, counter
+
+
+def test_a_regular_wire_on_an_unusable_layer_is_counted_twice(tmp_path):
+    """Its width comes from the layer, so the lookup *and* the wire report it.
+
+    The difference from the special case above is where the width comes from: a regular wire
+    has none of its own, so a layer without one is reported once when the layer is looked up
+    and again when the zero width is found.
+    """
+    body = "NETS 1 ;\n- n1 ( u1 A )\n  + ROUTED metal2 ( 0 0 ) ( 0 100 ) ;\nEND NETS\nEND DESIGN\n"
+    stream = ShapeStream(_tech(tmp_path, SPECIAL_TECH), Collect())
+    stream = _run(tmp_path, body, stream=stream)[1]
+    assert stream.n_usable_layer_missing == 2
+    assert stream.n_emitted == 0
 
 
 def test_a_via_form_still_advances_the_star_coordinate(tmp_path):

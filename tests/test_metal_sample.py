@@ -44,6 +44,59 @@ def test_generator_verify_passes(generator, capsys):
     assert "verify: OK" in printed
 
 
+# The committed sample, counted end to end. A golden of the whole vector rather than one
+# counter, so a future fast path is judged on everything it produces at once - the numbers
+# below were measured, and the two fixtures differ in shape: `sub.def` is signal wiring with
+# jogs, `top.def` is a power grid with a filled ring.
+SAMPLE_SHAPES = {
+    "sub.def": {"vias": 0, "jogs": 135, "degenerate": 0, "unknown": 0, "unusable": 0,
+                "polygon_edges": 0, "emitted": 19817, "rects": 19817, "polygons": 0,
+                "area_um2": 84491.294890},
+    "top.def": {"vias": 0, "jogs": 0, "degenerate": 0, "unknown": 0, "unusable": 0,
+                "polygon_edges": 3, "emitted": 9, "rects": 8, "polygons": 1,
+                "area_um2": 15242.880000},
+}
+
+
+@pytest.mark.parametrize("name", sorted(SAMPLE_SHAPES))
+def test_the_committed_sample_produces_exactly_these_shapes(name):
+    """Every counter and the geometry itself, for both committed DEFs."""
+    import contextlib
+    import io
+
+    from vlsi_viewer.parsers.routing import ShapeStream, TechRouting, parse_def
+
+    class Collect:
+        def __init__(self):
+            self.rects = []
+            self.polygons = []
+
+        def add_rects(self, layer_index, scope, x0, y0, x1, y1):
+            for index in range(x0.size):
+                self.rects.append((float(x1[index]) - float(x0[index])) *
+                                  (float(y1[index]) - float(y0[index])))
+
+        def add_diagonal(self, *args):
+            pass
+
+        def add_polygon(self, layer_index, scope, ring):
+            self.polygons.append(ring)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        tech = TechRouting.read([os.path.join(SAMPLE, "tech.lef")])
+        sink = Collect()
+        stream = ShapeStream(tech, sink)
+        parse_def(os.path.join(SAMPLE, name), stream=stream)
+        stream.flush()
+    from vlsi_viewer.parsers.routing import SHAPE_COUNTERS
+
+    expected = SAMPLE_SHAPES[name]
+    got = {key: getattr(stream, attribute) for key, attribute in SHAPE_COUNTERS}
+    got.update(rects=len(sink.rects), polygons=len(sink.polygons),
+               area_um2=sum(sink.rects))
+    assert got == pytest.approx(expected, rel=1e-9)
+
+
 def test_the_tech_lef_carries_the_awkward_shapes(generator):
     """Each one corresponds to a parser bug found in a real file; losing one loses the test."""
     text = generator.tech_lef_text()

@@ -193,6 +193,15 @@ class TechRouting:
         return cls(routing)
 
 
+# What the stream counted, as (name in a summary, attribute on the stream). Shared because
+# three places need the same mapping - the build accumulates these across blocks, the tests
+# assert on them, and a single source is what keeps the log's names and the counters' names
+# from drifting apart.
+SHAPE_COUNTERS = (("emitted", "n_emitted"), ("vias", "n_via"), ("jogs", "n_jog"),
+                  ("unknown", "n_unknown_layer"), ("unusable", "n_usable_layer_missing"),
+                  ("degenerate", "n_degenerate"), ("polygon_edges", "n_polygon_edge"))
+
+
 class ShapeStream:
     """Turns parsed nets into micron-normalised shapes, in batches, retaining nothing.
 
@@ -523,7 +532,7 @@ class DefRouting:
 
 
 def parse_def(def_path: AnyStr, stream: Optional[ShapeStream] = None,
-              top=None, skip_components: bool = False, cancel=None) -> DefRouting:
+              top=None, skip_components: bool = False, cancel=None, lines=None) -> DefRouting:
     """Parse one DEF, streaming its wiring into ``stream`` if one is given.
 
     Net, special-net and rule parsing are always enabled: the metal flow needs all three,
@@ -549,7 +558,7 @@ def parse_def(def_path: AnyStr, stream: Optional[ShapeStream] = None,
     # `cancel` is consulted once per heartbeat; returning True from it raises `Cancelled`,
     # which abandons the parse and leaves whatever was already handed to the sink in place.
     parser = DefParser(def_path, parse_net=True, parse_specialnet=True, parse_ndr=True,
-                       skip_comp=skip_components, cancel=cancel,
+                       skip_comp=skip_components, cancel=cancel, lines=lines,
                        sink=None if stream is None else sink)
     db_unit = parser.dbUnit()
     boundary = [[x / db_unit, y / db_unit] for x, y in parser.shape()]

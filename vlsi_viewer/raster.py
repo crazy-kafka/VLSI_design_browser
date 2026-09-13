@@ -340,6 +340,19 @@ class Bins:
         self._pending = []
         self._queued = 0
 
+    def add_grid(self, grid) -> None:
+        """Add one already-rasterised grid, for a caller that rasterised it elsewhere.
+
+        The parallel wiring pass has each worker accumulate its own grids and sums them here,
+        which is one array addition per layer rather than the per-shape work that produced it.
+        A shape cannot land in two layers, so the sums are the same ones; only their order
+        differs, which is why the last bits of a float32 sum can differ from a single run.
+        """
+        grid = np.asarray(grid, dtype=np.float64)
+        if grid.shape != self._sum.shape:
+            raise ValueError(f"grid is {grid.shape}, this layer's is {self._sum.shape}")
+        self._sum += grid
+
     def grid(self, dtype="float32") -> np.ndarray:
         """The accumulated per-bin totals, as a ``(rows, cols)`` array."""
         self.flush()

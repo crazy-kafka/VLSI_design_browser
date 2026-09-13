@@ -133,12 +133,15 @@ python main.py verilog --verilog v1.v --compare_verilog v2.v --lef cells.lef --t
 | `json` | `--cell_info`, `--block_info`, `--compare_block_info` | compare, `--physical_mode` |
 | `verilog` | `--verilog`, `--lef`, `--top`, `--compare_verilog`, `--out` | compare only |
 | `def` | `--def`, `--lef`, `--top`, `--compare_def`, `--out` | compare, `--physical_mode` |
-| `metal` | `--def`, `--lef`, `--tech-lef`, `--top` | `--grid-size`, `--macro-block-layers`, `--min-segment-length` |
+| `metal` | `--def`, `--lef`, `--tech-lef`, `--top` | `--grid-size`, `--macro-block-layers`, `--min-segment-length`, `--jobs`, `--profile` |
 
 Options shared by the first three: `--min-instances`, `--include-macros`, `--cache-dir`,
 `--force`, `--verbose`. `--grid_size` and `--contour_gap` apply to the two flows that can
 render a heat map; `metal` has its own `--grid-size` (default 10 µm) because the useful
-resolution is different. Within a subcommand, physical mode and the compare flag are
+resolution is different. `metal --jobs N` spreads the wiring pass over N processes — the
+per-net work has no dependency between nets, so it scales nearly linearly with cores; `1` (the
+default) keeps it all in one process, and `--profile` prints where a build's time went.
+Within a subcommand, physical mode and the compare flag are
 mutually exclusive, and `metal` has neither — nor the JSON pipeline's options, which it
 cannot act on: it converts nothing, builds no tree and caches nothing. In physical mode, hover the layout view to read
 the cursor coordinates and the heat-map grid value in the bottom-right status bar; in metal

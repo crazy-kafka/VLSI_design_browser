@@ -1038,6 +1038,44 @@ whole path: cancel stops the build, keeps the partial map, and says so in a warn
 `python -m pytest -q` -> **510 passed**, with the pinned real-file numbers unchanged (gcd 2504
 via / 5 jogs / 2327 rects / `means["metal2"] == 0.2527`).
 
+## Phase 16 — the wiring pass across processes
+
+The plan's rule was to adopt parallelism only if the single-core work left the target out of
+reach, and it did: 2.4x on the dominant shape class against a 7.8x target. `--jobs N` runs the
+wiring pass across processes, off by default.
+
+**The first version was slower than one process, and measuring is what found it.** It cut the DEF
+into blocks in the parent and shipped the text to the workers: on a 5 M-line input, 53 s against
+44 s, and flat from two workers up. A chip-level DEF is gigabytes, so moving it through pipes
+costs more than parsing it. The design now has **every worker read the file itself** and keep
+every `jobs`-th net statement, sending back only per-layer grids - a megabyte a worker.
+
+| | |
+|---|---|
+| one worker through the machinery, 9.1 M lines | 73.1 s against 64.9 s sequential - the machinery is **+13 %** |
+| two workers | 51.5 s (1.26x) |
+| four workers | 34.3 s (1.9x) |
+| eight workers | 28.5 s (2.3x) |
+
+`wall ~= 8 s of machinery + parse/N + ~10 s of per-worker scan and startup`, so a 65 s job is
+mostly fixed cost; against the real design's ~3000 s read those terms are noise and the same
+model predicts **~3.9x at four cores**, which is the Amdahl ceiling for this problem. That is a
+prediction from measured terms, not a measurement at scale - a 3000 s synthetic would be 430 M
+lines.
+
+**Two things the work needed that only measurement would have shown.** The first synthetic put
+2 M via points into one 500,000-line power statement, and a statement is atomic (its `*`
+coordinate state cannot be split across workers), so no pool can parallelise that shape - the
+measurement showed exactly the nothing it should have. And the first pooled build lost
+**0.77 % of the metal area** while every counter matched: the block cutter had captured the
+`NONDEFAULTRULES` body without its section header, so a net naming a rule silently fell back to
+the layer defaults. Counters identical, map wrong - the failure mode the review had warned
+about, caught by comparing grids rather than counters.
+
+`python -m pytest -q` -> **526 passed**, including pool-versus-sequential on the committed sample
+(counters exactly, grids to float32 rounding) and the cutter's own invariant, since a split
+statement would still parse and still draw, just in the wrong place.
+
 ## Where this ended up
 
 | phase | state |

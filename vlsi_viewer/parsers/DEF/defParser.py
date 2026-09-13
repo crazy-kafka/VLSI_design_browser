@@ -37,7 +37,7 @@ class DefParser:
     IGNORE_FILLER = False
     IGNORE_COVER = False
 
-    def __init__(self, def_file: AnyStr, skip_comp=False, parse_pin=False, batch_mode=False, parse_net=False, parse_blockage=False, parse_specialnet=False, parse_ndr=True, sink=None, cancel=None):
+    def __init__(self, def_file: AnyStr, skip_comp=False, parse_pin=False, batch_mode=False, parse_net=False, parse_blockage=False, parse_specialnet=False, parse_ndr=True, sink=None, cancel=None, lines=None):
         if batch_mode is True:
             self.puts = print
         else:
@@ -80,7 +80,15 @@ class DefParser:
         self.__section_started_at = self.__started_at
         self.__section_start_count = 0
 
-        if self.def_file.endswith('.gz'):
+        # A DEF also arrives as text: the parallel wiring pass hands each worker a block of
+        # statements, and a worker has no file to open. `def_file` is still required, for the
+        # heartbeat's log line and for a caller to name where the text came from.
+        self.__lines: Optional[List] = None if lines is None else list(lines)
+        self.__at = 0
+        if lines is not None:
+            self.fh = None
+            self.fetchLine_method = self.fetchLineMemory
+        elif self.def_file.endswith('.gz'):
             self.fh = gzip.open(self.def_file)
             self.fetchLine_method = self.fetchLineGz
         else:
@@ -111,7 +119,10 @@ class DefParser:
 
         self.__parsingStart()
 
-        self.fh.close()
+        # A DEF handed over as text has no handle to close; `def_file` still names where it
+        # came from, which is what the log and the heartbeat use.
+        if self.fh is not None:
+            self.fh.close()
         delattr(self, 'fh')
 
     def __parsingStart(self):
@@ -699,6 +710,18 @@ class DefParser:
     def fetchLine(self) -> AnyStr:
         self.__count_line()
         return self.fh.readline()
+
+    def fetchLineMemory(self) -> AnyStr:
+        """One line from the text handed to the constructor, or '' once it runs out.
+
+        Empty is what a caller reads as end-of-input, the same contract as a file at EOF.
+        """
+        self.__count_line()
+        if self.__at >= len(self.__lines):
+            return ''
+        line = self.__lines[self.__at]
+        self.__at += 1
+        return line
 
     def __count_line(self) -> None:
         """One line read: the counter, the heartbeat, and the cancel check.

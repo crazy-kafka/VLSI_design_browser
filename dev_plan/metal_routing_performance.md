@@ -153,8 +153,49 @@ Each fix carries an equivalence argument, and a fix that cannot be shown equival
 
 ## Phase 2 - the parallel option, evaluated
 
-**Evaluated against the measurements, and it clears the bar - but the decision waits on one
-number from a real run.**
+*(Executed: `vlsi_viewer/parallel.py`, `--jobs N`, off by default. The scaling below is measured
+on this machine, with one design iteration in the middle of it that the measurement forced.)*
+
+**The first version was slower than one process, and the measurement said why.** It cut the DEF
+into blocks in the parent and shipped the text to the workers: measured on a 5 M-line input,
+53 s against 44 s, flat from two workers up. A chip-level DEF is gigabytes, and moving it
+through pipes costs more than parsing it. The design is now that **every worker reads the file
+itself** and keeps every `jobs`-th net statement; only per-layer grids come back, a megabyte a
+worker.
+
+**What that costs, measured:**
+
+| | |
+|---|---|
+| one worker through the machinery, 9.1 M lines | 73.1 s against 64.9 s sequential - **the machinery is +13 %** |
+| two workers, same input | 51.5 s (1.26x over sequential) |
+| four workers | 34.3 s (1.9x) |
+| eight workers | 28.5 s (2.3x) |
+
+The shape of those numbers is the whole evaluation: `wall ~= 8 s of machinery + parse/N + ~10 s of
+per-worker scan and startup`, so a 65 s job is mostly fixed cost. **For the real design those
+fixed terms are noise**: 30 M lines is ~23 s of scanning per worker (in parallel, one floor to
+the wall) against a ~3000 s read, so the same model predicts **~3.9x at four cores** - the
+Amdahl ceiling, since the only sequential part left is that scan. That is a prediction from the
+measured terms, not a measurement at scale: a 3000 s synthetic would be 430 M lines, which is
+not something to build on a workstation.
+
+**It also needed a fix that only a realistic input would have shown.** The first synthetic put
+2 M via points into *one* 500,000-line power statement, and a statement is atomic - its `*`
+coordinate state cannot be split across workers - so no pool can parallelise that shape, and the
+measurement showed none. Real DEFs hold millions of statements (the run's 124.7 M via points
+across ~24 M lines cannot be fewer than ~5 M statements); with a statement count of that order
+the pool scales as above. Worth knowing before trusting a benchmark's statement-size
+distribution.
+
+**Decision: adopted, off by default.** `--jobs 1` is the default and does not go through the
+machinery at all, which the +13 % above is the reason for. The equivalence tests
+(`tests/test_metal_parallel.py`) compare a pooled build against a single-process one on the
+committed sample - counters exactly, grids to float32 rounding - and the block cutter's own
+invariant is pinned separately, because a split statement would still parse and still draw, just
+in the wrong place.
+
+### The original evaluation, before implementing
 
 The sequential fraction is only the reader: `fetchLine`, the `re_net` test per line, and joining
 a statement's lines. Pass 1 measures that loop at 4.2 us/line, so 30 M lines is ~126 s of the

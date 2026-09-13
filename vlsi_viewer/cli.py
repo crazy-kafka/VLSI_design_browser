@@ -150,6 +150,10 @@ def parse_args(argv=None):
     p.add_argument("--min-segment-length", type=float, default=None, metavar="N",
                    help="drop non-preferred-direction jogs shorter than N um; default is "
                         "each layer's track pitch, 0 keeps every jog")
+    p.add_argument("--jobs", type=int, default=1, metavar="N",
+                   help="processes to use for the wiring pass (default: %(default)s). The pass "
+                        "is per-net work with no dependency between nets, so it scales nearly "
+                        "linearly with cores; 1 keeps everything in one process")
     p.add_argument("--profile", nargs="?", const="", metavar="PSTATS",
                    help="time the build with cProfile and print the top 15 by self time; "
                         "optionally write a .pstats file. The wall clock it reports is "
@@ -279,7 +283,7 @@ def _run_metal(args):
                            macro_block_layers=args.macro_block_layers,
                            min_segment=args.min_segment_length, top=args.top,
                            on_progress=lambda message: logger.info("metal: %s", message),
-                           cancel=stop.is_set)
+                           cancel=stop.is_set, jobs=args.jobs)
     except Exception as exc:  # surface load errors on the CLI, no window needed
         print(f"error: {exc}", file=sys.stderr)
         return 1

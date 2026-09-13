@@ -335,6 +335,42 @@ def test_the_via_points_contribute_no_area():
     assert stream.n_jog == 5
 
 
+def test_the_real_file_yields_the_same_shapes_with_the_keyword_lookahead_restored():
+    """The tokeniser's keyword rejection moved out of the pattern and into `__scan_tokens`.
+
+    The pattern used to carry a ~40-keyword negative lookahead so that `+ SHAPE STRIPE` could
+    not read `SHAPE` as a via name; that lookahead was retried at every character of every
+    tail, and it never actually protected the token stream - rejecting `SHAPE` at its first
+    character let the engine match `HAPE` one character later. This parses the real routed DEF
+    both ways and asserts the shapes and every counter are identical, which is the claim the
+    change rests on.
+    """
+    import re
+
+    from vlsi_viewer.metal import _GridSink
+    from vlsi_viewer.parsers.DEF.compiledRe import CompiledRe
+
+    previous = CompiledRe.re_wire_token
+    restored = re.compile(
+        rf'{CompiledRe.WIRE_POINT}|(?P<via>{CompiledRe.NOT_KEYWORD}{CompiledRe.NAME})'
+        rf'(?:\s+(?P<via_orient>{CompiledRe.ORIENT_CODE}))?')
+    shape = []
+    for pattern in (previous, restored):
+        CompiledRe.re_wire_token = pattern
+        tech = _quiet(TechRouting.read, [TECH])
+        sink = _GridSink((0.0, 0.0, DIE, DIE), GRID)
+        stream = ShapeStream(tech, sink)
+        _quiet(parse_def, GCD, stream=stream)
+        with contextlib.redirect_stdout(io.StringIO()):
+            stream.flush()
+        shape.append((stream.n_via, stream.n_jog, stream.n_degenerate,
+                      stream.n_unknown_layer, stream.n_usable_layer_missing,
+                      stream.n_polygon_edge, stream.n_emitted,
+                      sum(float(grid.sum()) for grid in sink.grids().values())))
+    CompiledRe.re_wire_token = previous
+    assert shape[0] == shape[1]
+
+
 def test_the_design_routes_across_a_star_reuse_coordinate():
     """`( 52630 55580 ) ( 53770 * )` — a real coordinate reuse, in the spaced form tools write.
 
