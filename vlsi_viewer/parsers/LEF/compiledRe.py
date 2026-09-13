@@ -75,12 +75,32 @@ class CompiledRe:
     re_layer_table_end = re.compile(r';')
     re_area = re.compile(rf'^\s*AREA\s+(?P<AREA>{FLOAT})\s*;')
 
+    # A PROPERTY statement starts a value that may be a quoted string spanning lines. The
+    # scanner consumes the whole statement rather than reading its payload as layer
+    # statements - see `TlefParser.__readProperty`.
+    re_property_statement = re.compile(r'^\s*PROPERTY\b', re.IGNORECASE)
+    # An unquoted value ends on its own line; a quoted one ends at the quote's semicolon.
+    re_property_one_line = re.compile(r'^\s*PROPERTY\b[^"]*\;\s*$', re.IGNORECASE)
+
     # LEF58_TYPE names a variant of the base type (a NWELL region layer, say). It must
     # not overwrite TYPE, or a routing layer carrying one loses 'ROUTING' and drops out
     # of any routing-layer filter.
     re_LEF58_type = re.compile(
-        rf'PROPERTY\s+LEF58_TYPE\s+"TYPE\s+(?P<LEF58_TYPE>[^;\s]+)\s*;')
-    re_LEF58_region = re.compile(rf'PROPERTY\s+LEF58_REGION\s+"\s*REGION\s+(?P<REGION>\S+)\s+BASEDLAYER\s+(?P<BASEDLAYER>\S+)\s*;\s*"\s+;')
+        rf'LEF58_TYPE\s+"TYPE\s+(?P<LEF58_TYPE>[^;\s]+)\s*;', re.IGNORECASE)
+    # LEF58_REGION marks a layer whose rules are a *region's*, derived from a base layer
+    # rather than being a track system of its own - so it is not a routing layer of the
+    # stack. The marker is the property *name*: matching the payload instead is what let
+    # a real file slip through, because `REGION FB1 BASEDLAYE R M2` (a space inside the
+    # keyword) does not fit the exact grammar.
+    re_LEF58_region_marker = re.compile(r'LEF58_REGION\b', re.IGNORECASE)
+    # The region and base-layer names, for reporting only. Matched against the statement with
+    # its whitespace removed, so `BASEDLAYE R` and `BASEDLAYER` are the same thing - a name is
+    # never split, since LEF identifiers cannot contain whitespace. Anchored on the property
+    # name, which itself contains "REGION", and with the quote optional so an unquoted value
+    # reads the same way.
+    re_LEF58_region_names = re.compile(
+        r'LEF58_REGION"?REGION(?P<REGION>[^;]+?)BASEDLAYER(?P<BASEDLAYER>[^;]+?);',
+        re.IGNORECASE)
 
     #propertydefinition
     re_property_definitions = re.compile(rf'^\s*PROPERTYDEFINITIONS')

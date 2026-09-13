@@ -189,19 +189,190 @@ def test_lef58_type_does_not_overwrite_the_base_type(tmp_path):
 
     Otherwise a routing layer carrying 'PROPERTY LEF58_TYPE "TYPE NWELL ;"' loses
     'ROUTING' and drops out of every routing-layer filter.
+
+    The property is written *last* on purpose: consuming a property statement must stop at
+    its own semicolon, and with the property first an over-consuming reader would still pass
+    this test by accident, having already read the statements above.
     """
     layers = _layers(tmp_path, """LAYER m4
   TYPE ROUTING ;
-  PROPERTY LEF58_TYPE "TYPE NWELL ;" ;
   WIDTH 0.1 ;
   SPACING 0.1 ;
   PITCH 0.2 ;
   DIRECTION VERTICAL ;
+  PROPERTY LEF58_TYPE "TYPE NWELL ;" ;
 END m4
 """)
     assert layers["m4"].type == "ROUTING"
     assert layers["m4"].lef58_type == "NWELL"
+    assert layers["m4"].width == pytest.approx(0.1)
+    assert layers["m4"].spacing == pytest.approx(0.1)
+    assert layers["m4"].pitch_y == pytest.approx(0.2)
     assert list(_routing(layers)) == ["m4"]
+
+
+# -- property payloads are not layer statements -------------------------------------
+#
+# The stanzas below are verbatim from `dev_plan/issue.tech_layer_detect.md`, a real 18-layer
+# design's tech LEF. A property's value is a mini-language belonging to that property, but
+# the stanza scanner reads it as layer statements: a quoted SPACINGTABLE body supplied a
+# spacing (from its PRL breakpoints, one of them negative) and a quoted LEF58_SPACING
+# supplied another (from its conditional clauses). The layer declares no default spacing at
+# all, and saying so is the parser's job - the `pitch - width` fallback belongs to
+# `TechRouting`, and is tested there.
+
+REPORT_M5 = """LAYER M5
+   TYPE ROUTING ;
+   DIRECTION HORIZONTAL ;
+   PITCH 0.076 0.076 ;
+   OFFSET 0.000 ;
+   WIDTH 0.038 ;
+   MINWIDTH 0.038 ;
+   MAXWIDTH 2.1 ;
+   PROPERTY LEF58_SPACINGTABLE "
+   SPACINGTABLE
+   DIRECTIONALSPANLENGTH
+   EXACTSPANLENGTHSPACING 0.0380 TO 0.038 PRL -0.0765 0.038 0.114 0.180
+   EXACTSPANLENGTHSPACING 0.0380 TO 0.060 PRL -0.2000 0.199
+   SPANLENGTH   0.0000       0.1800    0.1800 0.1800
+   SPANLENGTH   0.2305       0.0800   0.1300 0.1590 ;
+   ";
+END M5
+"""
+
+REPORT_B1 = """LAYER B1
+   TYPE ROUTING ;
+   DIRECTION HORIZONTAL ;
+   PITCH 0.126 0.126 ;
+   OFFSET 0.000 0.000 ;
+   WIDTH 0.062 ;
+   PROPERTY LEF58_SPACINGTABLE "
+   SPACINGTABLE TWOWIDTHS
+   WIDTH 0.0            0.064  0.089  0.110  0.133   0.190   0.450
+   WIDTH 0.155 PRL 0.25   0.089  0.089  0.110  0.133   0.190   0.450
+   ";
+   PROPERTY LEF58_SPACING "
+   SPACING 0.089 ENDINLINE 0.09 WITHIN 0.0335 PARALLELEDGE 0.089 WITHIN 0.0985 MINLENGTH 0.063 ;
+   SPACING 0.126 ENDINLINE 0.09 WITHIN 0.0335 PARALLELEDGE 0.1055 WITHIN 0.0985 MINLENGTH 0.063 ENCLOSECUT BELOW 0.045 CUTSPACING 0.152 ;
+   ";
+END B1
+"""
+
+
+def test_a_quoted_spacing_table_does_not_supply_the_layer_spacing(tmp_path):
+    """M5's table lives inside a property, and its numbers are not the layer's rules.
+
+    Ingested, the minimum is -0.2 - a PRL breakpoint - which the `spacing <= 0` guard turns
+    into a plausible-looking 0.038 by accident. The parser has to say "no spacing stated",
+    because the fallback for that is a documented decision and this is not.
+    """
+    layers = _layers(tmp_path, REPORT_M5)
+    assert layers["M5"].spacing == 0.0
+    assert layers["M5"].width == pytest.approx(0.038)
+    assert (layers["M5"].pitch_x, layers["M5"].pitch_y) == pytest.approx((0.076, 0.076))
+
+
+def test_a_quoted_property_does_not_open_table_mode(tmp_path):
+    """The payload neither contributes spacings nor swallows the statements after it."""
+    layers = _layers(tmp_path, REPORT_M5.replace("   \";\nEND M5", "   \";\n  SPACING 0.5 ;\nEND M5"))
+    assert layers["M5"].spacing == pytest.approx(0.5)
+
+
+def test_a_quoted_spacing_property_does_not_contribute_conditionals(tmp_path):
+    """B1: two conditional `SPACING` clauses inside a quoted LEF58_SPACING.
+
+    They are rules for specific geometry, not the layer's default, and the tool showed the
+    smaller of them (0.089) as the layer's spacing.
+    """
+    layers = _layers(tmp_path, REPORT_B1)
+    assert layers["B1"].spacing == 0.0
+    assert layers["B1"].spacing != pytest.approx(0.089)
+    assert layers["B1"].spacing != pytest.approx(0.064)
+
+
+def test_an_unquoted_property_does_not_swallow_the_stanza(tmp_path):
+    """LEF also allows `PROPERTY name value ;` with no quotes.
+
+    A reader that waited for a closing quote would run past it - to the next quoted line, or
+    to the end of the layer, losing every statement in between.
+    """
+    layers = _layers(tmp_path, """LAYER m9
+  TYPE ROUTING ;
+  PROPERTY FOOBAR 1 ;
+  WIDTH 0.1 ;
+  SPACING 0.1 ;
+  PITCH 0.2 ;
+  DIRECTION VERTICAL ;
+  PROPERTY LEF58_TYPE "TYPE NWELL ;" ;
+END m9
+""")
+    assert layers["m9"].width == pytest.approx(0.1)
+    assert layers["m9"].spacing == pytest.approx(0.1)
+    assert layers["m9"].pitch_x == pytest.approx(0.2)
+    assert layers["m9"].direction == "VERTICAL"
+    assert layers["m9"].lef58_type == "NWELL"
+
+
+def test_a_property_whose_quote_opens_on_the_next_line(tmp_path):
+    """How `asap7` writes it: the statement line ends, the payload starts on the next one.
+
+    That trailing-space form is real - `PROPERTY LEF58_SPACING ` with the quote on the line
+    below - and a reader keyed on the statement line's own quote would eat the layer.
+    """
+    layers = _layers(tmp_path, """LAYER m7
+  TYPE ROUTING ;
+  WIDTH 0.1 ;
+  PITCH 0.2 ;
+  DIRECTION VERTICAL ;
+  PROPERTY LEF58_SPACING
+    " SPACING 0.9 ENDOFLINE 0.1 WITHIN 0.08 PARALLELEDGE 0.1 WITHIN 0.08 ; " ;
+  SPACING 0.1 ;
+END m7
+""")
+    assert layers["m7"].spacing == pytest.approx(0.1)      # the clause after the property
+    assert layers["m7"].width == pytest.approx(0.1)
+    assert layers["m7"].pitch_x == pytest.approx(0.2)
+
+
+# -- region layers -----------------------------------------------------------------
+
+def test_a_region_property_is_captured_however_it_is_spelled(tmp_path):
+    """`M2_FB1`'s clause is spelled `REGION FB1 BASEDLAYE R M2` - a space inside the keyword.
+
+    The marker is what matters (the layer is region-defined), but the names are worth
+    reading too: an exact grammar quietly left this one layer with no region at all, which
+    is how it kept its place in the routing list while its neighbours could be excluded.
+    """
+    layers = _layers(tmp_path, """LAYER M2_FB1
+   TYPE ROUTING ;
+   DIRECTION VERTICAL ;
+   PITCH 0.038 0.038 ;
+   PROPERTY LEF58_REGION " REGION FB1 BASEDLAYE R M2 ; " ;
+   WIDTH 0.0190 ;
+   SPACING 0.0190 ;
+END M2_FB1
+LAYER M3_FB1
+   TYPE ROUTING ;
+   DIRECTION HORIZONTAL ;
+   PITCH 0.04 0.04 ;
+   PROPERTY LEF58_REGION " REGION FB1 BASEDLAYER M3 ; " ;
+   WIDTH 0.019 ;
+   SPACING 0.029 ;
+END M3_FB1
+LAYER M1
+   TYPE ROUTING ;
+   DIRECTION HORIZONTAL ;
+   PITCH 0.020 0.032 ;
+   WIDTH 0.016 ;
+   SPACING 0.016 ;
+END M1
+""")
+    for name, base in (("M2_FB1", "M2"), ("M3_FB1", "M3")):
+        assert layers[name].region_layer is True, name
+        assert layers[name].region == "FB1", name
+        assert layers[name].based_layer == base, name
+    assert layers["M1"].region_layer is False
+    assert layers["M1"].region is None
 
 
 # -- punctuation and numeric forms -------------------------------------------------

@@ -24,6 +24,11 @@ class DefSWire:
     anchored in the DEF text).
     """
 
+    # One object per segment, so the per-instance dict is a real cost at 10^8 segments -
+    # and whole power nets are held at once before their sink call.
+    __slots__ = ("layer_name", "width", "x0", "y0", "e0", "x1", "y1", "e1", "via",
+                 "via_orient", "shape")
+
     def __init__(self, layer_name: AnyStr, width: int, x0: int, y0: int, e0: int,
                  x1: int, y1: int, e1: int, via: str = None, via_orient: AnyStr = None,
                  shape: AnyStr = 'PATH'):

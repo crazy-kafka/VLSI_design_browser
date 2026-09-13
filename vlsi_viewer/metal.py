@@ -40,7 +40,11 @@ signal metal makes a region under a stripe read as a routing hotspot.
 """
 from __future__ import annotations
 
+import gc
+import json
 import logging
+import os
+import time
 from typing import AnyStr, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -49,6 +53,7 @@ import pandas as pd
 from . import config
 from .assembly import Frame, HierarchyAssembler, find_single_top
 from .loader import load_block, load_cell_info
+from .parsers import Cancelled
 from .parsers.convert import cell_info_from_lef, instance_info_from_def
 from .parsers.routing import (POWER, SIGNAL, RouteLayer, ShapeStream, TechRouting, parse_def)
 from .raster import Bins
@@ -74,6 +79,91 @@ OBS_MIN_FOOTPRINT_FRACTION = 0.10
 OBS_CLOSE_UM = 0.1
 
 
+class GcMonitor:
+    """Time inside the collector, and collections per generation.
+
+    Worth measuring rather than assuming, because the cost is invisible where it happens: a
+    live set of millions of objects - one power net held whole, every component of a flat
+    design - makes each gen-2 collection walk all of it, and the walk is attributed to
+    whichever code happened to be allocating when it fired.
+    """
+
+    def __init__(self):
+        self.seconds = 0.0
+        self.counts = [0, 0, 0]
+        self._started = None
+        gc.callbacks.append(self)
+
+    def __call__(self, phase, info):
+        if phase == "start":
+            self._started = time.perf_counter()
+        else:
+            self.seconds += time.perf_counter() - self._started
+            self.counts[info["generation"]] += 1
+
+    def close(self) -> None:
+        gc.callbacks.remove(self)
+
+
+def resident_mb():
+    """(resident, peak) megabytes, or (None, None) where the OS will not say.
+
+    /proc first, because the runs that matter are on Linux and it is where the request's
+    memory limit bites; psutil only if it happens to be installed, since it is not a
+    dependency.
+    """
+    try:
+        with open("/proc/self/status") as handle:
+            found = {line.split(":")[0]: line.split()[1] for line in handle
+                     if line.startswith(("VmRSS", "VmHWM"))}
+        return int(found["VmRSS"]) / 1024, int(found["VmHWM"]) / 1024
+    except (OSError, KeyError, IndexError):
+        pass
+    try:
+        import psutil
+        info = psutil.Process().memory_info()
+        return info.rss / 1e6, getattr(info, "peak_wset", info.rss) / 1e6
+    except Exception:                                   # noqa: BLE001 - best effort only
+        return None, None
+
+
+class Stages:
+    """Per-stage seconds, logged as each stage closes.
+
+    A run used to have exactly one elapsed number - the parser's own "End DEF parsing in
+    7005s" - which covers parsing, conversion and rasterisation together and so cannot say
+    where the time went. One line per stage is what makes a real run diagnosable from its log
+    alone, which is the only thing available when the design cannot be handed over.
+    """
+
+    def __init__(self):
+        self.seconds: Dict[AnyStr, float] = {}
+        self.gc = GcMonitor()
+        self._name = "start"
+        self._started = time.perf_counter()
+
+    def mark(self, name: AnyStr, detail: AnyStr = "") -> None:
+        """Close the open stage, report it, and open ``name``.
+
+        ``detail`` describes the stage being *closed* - its elapsed time and what it
+        produced belong on the same line - so a call reads "open this, and here is what the
+        last one did".
+        """
+        now = time.perf_counter()
+        elapsed = now - self._started
+        self.seconds[self._name] = self.seconds.get(self._name, 0.0) + elapsed
+        resident = resident_mb()[0]
+        logger.info("metal: stage %-17s %9.2fs  %s%s", self._name, elapsed, detail,
+                    "" if resident is None else f"  rss {resident:,.0f} MB")
+        self._name, self._started = name, now
+
+    def close(self) -> Dict[AnyStr, float]:
+        self.mark("done")
+        self.seconds.pop("done", None)
+        self.gc.close()
+        return self.seconds
+
+
 class MetalData:
     """Per-layer routing utilisation, ready to render.
 
@@ -88,7 +178,7 @@ class MetalData:
                  layers: Sequence[RouteLayer], capacity_base,
                  blocked: Dict[int, np.ndarray], macro_block_layers: int,
                  grids: Dict[Tuple[int, str], np.ndarray], warnings: List[AnyStr],
-                 blockage: Dict = None):
+                 blockage: Dict = None, totals: Dict = None):
         self.top_name = top_name
         self.boundary_polys = boundary_polys
         self.grid_size = float(grid_size)
@@ -101,6 +191,10 @@ class MetalData:
         # How the blockage was decided - which macros declared OBS, which fell back to the
         # layer count. The readout reports it, because the two are not equally trustworthy.
         self.blockage = dict(blockage or {})
+        # What the stream dropped and why: vias, jogs, unknown layers, degenerate shapes,
+        # polygon edges. The warnings say it in prose; this is the same thing a caller can
+        # read, for a summary line or a benchmark.
+        self.totals = dict(totals or {})
         self._capacity_base = np.asarray(capacity_base, dtype=np.float64)
         self._grids = grids                    # (layer index, scope) -> inflated area
         self._scope = SCOPE_ALL
@@ -360,7 +454,7 @@ class _GridSink:
 def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
                 tech_paths: Sequence[AnyStr], grid_size: float = None,
                 macro_block_layers: int = None, min_segment=None,
-                top: AnyStr = None, on_progress=None) -> MetalData:
+                top: AnyStr = None, on_progress=None, cancel=None) -> MetalData:
     """Build the per-layer utilisation grids for a DEF hierarchy.
 
     The DEFs are read twice, deliberately. The first pass takes only the components and the
@@ -369,6 +463,11 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     frame and can therefore stream its wiring straight into the accumulating grids without
     ever holding the geometry. Reading once would mean buffering every segment, which at 10^8
     segments is gigabytes.
+
+    ``cancel`` is an optional callable consulted during the wiring pass; when it returns True
+    the build stops and returns what it has measured, with a warning saying so. A chip-level
+    build runs for hours, and the useful answer to "this input was wrong" is a partial map in
+    seconds rather than a killed job.
     """
     grid_size = config.DEFAULT_METAL_GRID_SIZE if grid_size is None else float(grid_size)
     if macro_block_layers is None:
@@ -380,18 +479,24 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
         if on_progress is not None:
             on_progress(message)
 
+    stages = Stages()
+    stages.mark("tech-lef")
     tech = TechRouting.read(tech_paths)
     if not tech.layers:
         raise ValueError("the tech LEF declares no TYPE ROUTING layers; there is nothing "
                          "to measure")
 
     # Pass 1: block table, so every block's frame is known before any wiring is streamed.
+    stages.mark("components")
     progress("reading block outlines")
     blocks: Dict[AnyStr, tuple] = {}
     path_of_block: Dict[AnyStr, AnyStr] = {}
     for path in def_paths:
         data = instance_info_from_def(path, top)
         name, instances, boundary = load_block(data)
+        # `data` is the decoded DEF and `instances` the block it was turned into; only the
+        # latter outlives this line, and holding both is holding a whole DEF twice.
+        del data
         if name in blocks:
             logger.warning("two DEFs define a block named %r; the later one is ignored",
                            name)
@@ -402,6 +507,7 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
         raise ValueError("no DEF was readable")
 
     root = top if (top in blocks) else find_single_top(blocks)
+    stages.mark("cell-index", f"{len(blocks)} block(s), root {root!r}")
     # One cell-table lookup for the whole build. It used to be read twice - once here and
     # again inside the blockage measurement - which parsed the macro LEF twice over.
     cells = _indexed_cells(lef_paths)
@@ -419,12 +525,16 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     # Capacity: the die's own area per cell, then the macro footprint removed from the
     # layers macros block. Both are the rasteriser's job - it already does exact per-bin
     # clipping, and reusing it keeps one definition of "area in this cell".
+    stages.mark("capacity", f"{0 if cells is None else len(cells):,} cell(s) from "
+                            f"{len(lef_paths)} LEF file(s)")
     progress("measuring capacity")
     die = Bins(extent, grid_size)
     die.add_polygon([(float(x), float(y)) for x, y in boundary_points])
     capacity_base = die.grid(dtype="float64")
 
     warnings: List[AnyStr] = []
+    stages.mark("blockage", f"{rows} x {cols} grid @ {grid_size:g} um, die "
+                            f"{extent[2] - extent[0]:.1f} x {extent[3] - extent[1]:.1f} um")
     try:
         obstructions = _macro_obstructions(lef_paths)
     except Exception as exc:                            # pragma: no cover - defensive
@@ -443,9 +553,14 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
             f"less memory")
 
     # Pass 2: stream each block's wiring through its frame.
+    stages.mark("routing", f"{len(blockage)} macro type(s) with obstruction data")
     sink = _GridSink(extent, grid_size)
-    totals = {"vias": 0, "jogs": 0, "unknown": 0, "unusable": 0, "degenerate": 0,
-              "polygon_edges": 0}
+    totals = {"emitted": 0, "vias": 0, "jogs": 0, "unknown": 0, "unusable": 0,
+              "degenerate": 0, "polygon_edges": 0}
+    # Summed over blocks: what the DEFs were like, as opposed to what came out of them.
+    text_stats: Dict[AnyStr, object] = {"forms": 0, "points": 0, "lines": 0,
+                                        "statement_lines_max": 0, "statement_chars_max": 0,
+                                        "points_max": 0, "layers_used": set()}
 
     def on_block(name, frame: Frame) -> None:
         path = path_of_block.get(name)
@@ -458,19 +573,35 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
             return
         progress(f"reading routing in {name}")
         stream = ShapeStream(tech, sink, frame=frame, min_segment=min_segment)
-        routing = parse_def(path, stream=stream)
+        # The components were read in pass 1; this pass wants the wiring, and re-building
+        # three million DefComponents that nothing reads costs memory for nothing.
+        routing = parse_def(path, stream=stream, skip_components=True, cancel=cancel)
         stream.flush()
-        for key, attribute in (("vias", "n_via"), ("jogs", "n_jog"),
-                               ("unknown", "n_unknown_layer"),
+        for key, attribute in (("emitted", "n_emitted"), ("vias", "n_via"),
+                               ("jogs", "n_jog"), ("unknown", "n_unknown_layer"),
                                ("unusable", "n_usable_layer_missing"),
                                ("degenerate", "n_degenerate"),
                                ("polygon_edges", "n_polygon_edge")):
             totals[key] += getattr(stream, attribute)
+        stats = routing.stats
+        text_stats["forms"] += stats.get("forms", 0)
+        text_stats["points"] += stats.get("points", 0)
+        text_stats["lines"] += stats.get("lines", 0)
+        for key in ("statement_lines_max", "statement_chars_max", "points_max"):
+            text_stats[key] = max(text_stats[key], stats.get(key, 0))
+        text_stats["layers_used"] |= set(stats.get("layers_used", ()))
         if routing.ndrs:
             logger.info("%s: %d non-default rule(s)", name, len(routing.ndrs))
 
     progress("reading routing")
-    assembler.walk(root, on_block)
+    try:
+        assembler.walk(root, on_block)
+    except Cancelled as stopped:
+        # Not a failure: the grids hold everything read up to the interrupt, and saying so is
+        # what keeps a partial map from being mistaken for a complete one.
+        warnings.append(f"stopped early on request ({stopped}); the map covers only the "
+                        f"wiring that had been read")
+        logger.warning("metal: %s", warnings[-1])
     if assembler.missing:
         missing = sorted(set(assembler.missing))
         warnings.append(f"{len(missing)} cell type(s) are neither in the LEF nor a block, "
@@ -479,6 +610,10 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
 
     if not tech.usable:
         warnings.append("no routing layer in the tech LEF has a usable width")
+
+    shapes = totals["emitted"] + sum(value for key, value in totals.items()
+                                     if key != "emitted")
+    stages.mark("grids", f"{shapes:,} shape(s), {text_stats['points']:,} point(s)")
 
     # Metal where there is said to be no room. Either the DEF routes over a macro - which a
     # real design does not do on the layers that macro blocks - or the model is over-blocking.
@@ -491,10 +626,53 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
             f"{stranded} cell(s) carry signal wire on a layer a macro obstructs there, so "
             f"their utilisation is not a congestion reading")
 
+    stage_seconds = stages.close()
     _describe(totals, warnings)
+
+    # One machine-readable line for the whole run. Its point is that the evidence can be
+    # carried back without the design: what was measured, how the time split, what the input
+    # was like, and where the memory went. The fields a synthetic benchmark has to be checked
+    # against - statement sizes, points per form, the layer names - are the ones a DEF's own
+    # header does not carry.
+    resident, peak = resident_mb()
+    logger.info("metal-summary: %s", json.dumps({
+        "design": root,
+        "grid": [rows, cols],
+        "grid_size_um": grid_size,
+        "die_um": [round(extent[2] - extent[0], 3), round(extent[3] - extent[1], 3)],
+        "params": {"min_segment": min_segment, "macro_block_layers": macro_block_layers,
+                   "top": top},
+        "inputs": {"defs": [_file_note(path) for path in def_paths],
+                   "lefs": len(lef_paths),
+                   "tech_lefs": [_file_note(path) for path in tech_paths]},
+        "stages_s": {name: round(seconds, 2) for name, seconds in stage_seconds.items()},
+        "shapes": dict(totals, total=shapes),
+        "input_text": dict(text_stats, layers_used=len(text_stats["layers_used"])),
+        "layers_not_in_tech": sorted(set(text_stats["layers_used"]) -
+                                     {layer.name for layer in tech.layers}),
+        "layers": [{"name": layer.name, "direction": layer.direction,
+                    "width_um": layer.width, "pitch_um": layer.pitch,
+                    "usable": layer.usable} for layer in tech.layers],
+        "blockage": blockage,
+        "gc_s": round(stages.gc.seconds, 2),
+        "gc_counts": stages.gc.counts,
+        "rss_mb": None if resident is None else round(resident),
+        "peak_rss_mb": None if peak is None else round(peak),
+        "warnings": warnings,
+    }, sort_keys=True, default=str))
     return MetalData(root, _boundary_polys(assembler, blocks, root), grid_size, extent, rows,
                      cols, tech.layers, capacity_base, blocked, macro_block_layers,
-                     grids, warnings, blockage)
+                     grids, warnings, blockage, totals)
+
+
+def _file_note(path) -> Dict:
+    """Path, bytes and mtime - enough to say which file a result came from."""
+    try:
+        info = os.stat(path)
+        return {"path": str(path), "mb": round(info.st_size / 1e6, 1),
+                "mtime": int(info.st_mtime)}
+    except OSError:
+        return {"path": str(path)}
 
 
 def _indexed_cells(lef_paths):
@@ -783,6 +961,11 @@ def _boundary_polys(assembler, blocks, root):
 
 def _describe(totals, warnings):
     """Turn the conversion counters into the one-line notes a user should see."""
+    # Reported first, because it is the number the rest are relative to: without it a log
+    # saying "147 M shapes dropped" leaves everything else in the run unaccounted for.
+    if totals["emitted"]:
+        logger.info("metal: %d shape(s) measured and handed to the rasteriser",
+                    totals["emitted"])
     if totals["vias"]:
         logger.info("metal: %d via point(s) omitted (no wire area)", totals["vias"])
     if totals["jogs"]:

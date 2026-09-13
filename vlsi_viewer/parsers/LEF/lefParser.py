@@ -103,6 +103,13 @@ class TlefParser:
                 # __readTableLine ignores anything that is not a WIDTH row.
                 in_table = not CompiledRe.re_layer_table_end.search(line)
                 continue
+            if CompiledRe.re_property_statement.search(line):
+                # A property *value* is a mini-language belonging to that property, not a
+                # set of layer statements. Reading it as one is what put a spacing table's
+                # PRL breakpoints (-0.2) into a layer's spacing, and a LEF58_SPACING
+                # clause's 0.089 into another's.
+                cursor = self.__readProperty(lines, cursor, layer)
+                continue
 
             if type_match := CompiledRe.re_layer_type.search(line):
                 layer.type = type_match['TYPE']
@@ -126,11 +133,6 @@ class TlefParser:
                 spacings.append(float(spacing_match['SPACING']))
             elif area_match := CompiledRe.re_area.search(line):
                 layer.area = float(area_match['AREA'])
-            elif LEF58_region_match := CompiledRe.re_LEF58_region.search(line):
-                layer.region = LEF58_region_match['REGION']
-                layer.based_layer = LEF58_region_match['BASEDLAYER']
-            elif LEF58_type_match := CompiledRe.re_LEF58_type.search(line):
-                layer.lef58_type = LEF58_type_match['LEF58_TYPE']
 
         # The first WIDTH is the layer default; MINWIDTH is the fallback for a layer that
         # declares no WIDTH at all. Cut and masterslice layers may legitimately have
@@ -144,6 +146,55 @@ class TlefParser:
             layer.spacing = min(table_spacings)
         self.__layers[layer.name] = layer
         return cursor
+
+    def __readProperty(self, lines, cursor, layer) -> int:
+        """Consume one ``PROPERTY`` statement, returning the cursor at its last line.
+
+        A property's value is a string that may span lines, and the opening quote may sit on
+        the statement line *or* a later one - `asap7` writes `PROPERTY LEF58_SPACING` with a
+        trailing space and the quote on the next line. It may also be unquoted
+        (`PROPERTY propName propVal ;`), which is why the fast path exists: a rule that only
+        waited for a closing quote would run past such a statement to the next quoted line,
+        or to the end of the stanza, and the layer would silently lose everything after it.
+
+        Nothing inside the value may be read as a layer statement - that is the whole point.
+        Two properties are still consulted by name below, because they carry values this
+        project uses; everything else is a mini-language belonging to its property.
+        """
+        if CompiledRe.re_property_one_line.search(lines[cursor]):
+            return cursor
+        text = lines[cursor]
+        while cursor < len(lines) - 1:
+            if text.count('"') % 2 == 0 and ';' in text:
+                break
+            cursor += 1
+            line = lines[cursor]
+            # A statement that never terminates must not swallow the rest of the layer. The
+            # guard stops *on* this line, so the caller's next iteration sees it - the END
+            # ends the stanza, a LAYER opens the next - and reports, because otherwise a
+            # missing terminator just empties the layer with no explanation.
+            if re.search(rf'^\s*END\s+{re.escape(layer.name)}\b', line) or \
+                    CompiledRe.re_layer_name.search(line):
+                logger.warning("tech LEF: unterminated PROPERTY in layer %s before %r",
+                               layer.name, line.strip()[:40])
+                break
+            text += line
+        self.__applyProperty(layer, text)
+        return cursor
+
+    @staticmethod
+    def __applyProperty(layer, text: str) -> None:
+        """Take the two property values this project uses; ignore every other payload."""
+        if CompiledRe.re_LEF58_region_marker.search(text):
+            layer.region_layer = True
+            # The names, for reporting, matched with the payload's whitespace removed so
+            # that a keyword split by a stray space (`BASEDLAYE R`) reads as one word.
+            names = CompiledRe.re_LEF58_region_names.search(re.sub(r'\s+', '', text))
+            if names:
+                layer.region = names['REGION']
+                layer.based_layer = names['BASEDLAYER']
+        if type_match := CompiledRe.re_LEF58_type.search(text):
+            layer.lef58_type = type_match['LEF58_TYPE']
 
     @staticmethod
     def __readTableLine(line, table_spacings: List[float]) -> None:

@@ -18,6 +18,8 @@ See :mod:`vlsi_viewer.parsers.convert` for turning these into the viewer's JSON.
 """
 from .DEF import DefParser
 from .LEF import LefParser, TlefParser
+from ._util import Cancelled
 from .verilog import VerilogParser, InstExtractor
 
-__all__ = ["DefParser", "LefParser", "TlefParser", "VerilogParser", "InstExtractor"]
+__all__ = ["Cancelled", "DefParser", "LefParser", "TlefParser", "VerilogParser",
+           "InstExtractor"]

@@ -150,6 +150,10 @@ def parse_args(argv=None):
     p.add_argument("--min-segment-length", type=float, default=None, metavar="N",
                    help="drop non-preferred-direction jogs shorter than N um; default is "
                         "each layer's track pitch, 0 keeps every jog")
+    p.add_argument("--profile", nargs="?", const="", metavar="PSTATS",
+                   help="time the build with cProfile and print the top 15 by self time; "
+                        "optionally write a .pstats file. The wall clock it reports is "
+                        "inflated, so use it to find the cost, not to measure it")
     _add_shared(p)
 
     return parser.parse_args(argv)
@@ -247,18 +251,48 @@ def _run_metal(args):
     synchronous-startup shape is what the physical mode's performance review identified as
     its "stuck GUI at launch".
     """
+    import signal
+    import threading
+
     from .metal import build_metal
 
+    # An interrupt asks the build to stop and keep what it has, instead of killing the job.
+    # The parse checks this during its heartbeat, so the response is within ~30 s.
+    stop = threading.Event()
+
+    def on_interrupt(_signum, _frame):
+        if stop.is_set():
+            raise KeyboardInterrupt                   # a second ^C means it
+        stop.set()
+        logger.warning("metal: interrupt received; stopping after the current block")
+
+    previous = signal.signal(signal.SIGINT, on_interrupt)
+    profiler = None
+    if args.profile is not None:
+        import cProfile
+        profiler = cProfile.Profile()
+        profiler.enable()
     logger.info("metal: reading %d DEF file(s)", len(args.def_files))
     try:
         data = build_metal(args.def_files, args.lef, args.tech_lef,
                            grid_size=args.grid_size,
                            macro_block_layers=args.macro_block_layers,
                            min_segment=args.min_segment_length, top=args.top,
-                           on_progress=lambda message: logger.info("metal: %s", message))
+                           on_progress=lambda message: logger.info("metal: %s", message),
+                           cancel=stop.is_set)
     except Exception as exc:  # surface load errors on the CLI, no window needed
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        if profiler is not None:
+            import pstats
+            profiler.disable()
+            stats = pstats.Stats(profiler)
+            stats.sort_stats("tottime").print_stats(15)
+            if args.profile:
+                stats.dump_stats(args.profile)
+                logger.info("metal: profile written to %s", args.profile)
 
     for warning in data.warnings:
         logger.warning("metal: %s", warning)

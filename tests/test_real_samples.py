@@ -95,6 +95,30 @@ def test_the_real_files_are_committed():
         assert os.path.getsize(path) > 1000, f"{path} looks truncated"
 
 
+def test_the_vendored_files_are_the_bytes_provenance_records():
+    """The `sha256` and size in `PROVENANCE.md`, checked against the files themselves.
+
+    That record is the only thing making "these are the upstream bytes" verifiable, and it is
+    what `.gitattributes`' `-text` pin exists to keep true across platforms. Parsed from the
+    document rather than repeated here, so the two cannot drift apart.
+    """
+    import hashlib
+    import re
+
+    text = open(f"{SAMPLE}/PROVENANCE.md", encoding="utf-8").read()
+    sections = re.findall(
+        r"^## `(?P<path>[^`]+)` — (?P<size>[\d,]+) B\n(?P<body>.*?)(?=^## |\Z)",
+        text, re.S | re.M)
+    assert len(sections) == len(ALL_FILES), "PROVENANCE.md should describe every file"
+    for path, size, body in sections:
+        digest = re.search(r"sha256 \| `([0-9a-f]{64})`", body)
+        assert digest, path
+        with open(f"{SAMPLE}/{path}", "rb") as handle:
+            data = handle.read()
+        assert len(data) == int(size.replace(",", "")), path
+        assert hashlib.sha256(data).hexdigest() == digest.group(1), path
+
+
 def test_the_real_files_are_pure_ascii():
     """`DefParser` opens the DEF with no encoding argument, so the locale decides.
 
@@ -350,12 +374,44 @@ def test_the_placed_design_reaches_physical_mode(gcd_physical, gcd_metal):
 # -- the other two PDKs ---------------------------------------------------------------
 
 def test_the_modern_node_tech_lef_parses():
-    """ASAP7: ten 7 nm-class layers, and a second real `W + S < P` case."""
+    """ASAP7: ten 7 nm-class layers, and the one real layer whose two pitches differ.
+
+    `M2` is `DIRECTION HORIZONTAL` with `PITCH 0.180 0.144`, so its pitch is the *y* value -
+    the distance between its own horizontal tracks - and `0.072 + 0.072` equals it exactly,
+    giving the usual factor of 1.0. Reading the x value instead made it 0.8, which is what
+    this test asserted until the direction rule went in.
+
+    Both LEF values are pinned below, so "the factor is 1.0" cannot be confused with "the
+    LEF stopped declaring a pitch".
+    """
+    parsed = _quiet(TlefParser, ASAP7).layers
+    assert (parsed["M2"].pitch_x, parsed["M2"].pitch_y) == pytest.approx((0.180, 0.144))
+    assert parsed["M2"].direction == "HORIZONTAL"
+
     tech = _quiet(TechRouting.read, [ASAP7])
     assert [layer.name for layer in tech.layers] == \
         ["M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "Pad"]
     assert len(tech.usable) == 10
-    assert MetalData.pitch_factor(tech["M2"]) == pytest.approx(0.144 / 0.18, abs=5e-4)
+    assert tech["M2"].pitch == pytest.approx(0.144)
+    assert MetalData.pitch_factor(tech["M2"]) == pytest.approx(1.0)
+
+
+def test_no_real_layer_comes_out_with_a_negative_spacing():
+    """A spacing is a distance, so it cannot be negative - and it was.
+
+    A quoted `LEF58_SPACINGTABLE` payload used to be scanned as the layer's own table, and
+    the `PRL` breakpoints in one are negative numbers, so a real design's M5 came out at
+    -0.2 and only escaped the GUI by way of the `spacing <= 0` fallback.
+
+    Deliberately *not* asserted: `spacing <= pitch`. ASAP7's `Pad` declares an 8 um spacing
+    against a 0.32 pitch, both straight from its LEF - it is a pad plane, not a track
+    system, and its `PITCH` is the distance between pads. Asserting the track relation would
+    fail on a file that is not wrong.
+    """
+    for path in (TECH, ASAP7, SKY130):
+        tech = _quiet(TechRouting.read, [path])
+        for layer in tech.layers:
+            assert layer.spacing >= 0, (layer.name, layer)
 
 
 def test_the_differently_named_stack_parses():

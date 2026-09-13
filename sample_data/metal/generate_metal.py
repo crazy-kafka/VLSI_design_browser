@@ -637,20 +637,297 @@ def stress(count: int, out_dir: str) -> int:
     return 0
 
 
+# -- real-shape mode -------------------------------------------------------------------
+#
+# `--stress` answers "how does this scale with net count" for a shape mix a real chip-level
+# DEF does not have: one two-point form per net, one line per statement, four layers, plain
+# text, no special nets. The run this mode exists for took 7005 s over ~30 M lines, and its
+# own counters say what its mix was instead: 124,711,987 via points, 12,964,342 jogs,
+# 4,539,783 shapes on layers the tech LEF does not define, 4,517,711 zero-extent shapes.
+# This mode writes that mix with knobs, so a sweep can tell a linear cost from a non-linear
+# one - which the per-shape constants already measured (~2 us) say it must be, since they
+# account for ~500 s of the 7005.
+
+REAL_DIE = (1060.2, 1226.64)          # the reporting design's die, microns
+REAL_GRID = 10.0                      # its bin size; 107 x 123 bins
+UNDEFINED_LAYERS = ("XD1", "XD2")     # names no tech LEF defines: the unknown-layer class
+JOG_EVERY = 8                         # 1 net in 8 is a non-preferred short jog
+UNDEFINED_EVERY = 20                  # 1 net in 20 lands on a layer the tech LEF lacks
+NDR_EVERY = 4                         # 1 net in 4 references a non-default rule
+
+
+class _Writer:
+    """The output file, counting lines so the cost has a per-line figure too.
+
+    That figure is the comparable the real log speaks in: 7005 s over 30 M lines. The real
+    host is Linux and where the 20 GB cap bites, so nothing here depends on the platform.
+    """
+
+    def __init__(self, handle):
+        self.handle = handle
+        self.lines = 0
+
+    def write(self, text):
+        self.lines += text.count("\n")
+        self.handle.write(text)
+
+
+def real_shape(out_dir, nets, instances, via_forms, via_points, lines_per_form, via_nets,
+               gzip_out, gc_mode, profile) -> int:
+    """Write the real design's shape mix and time the routing read on it.
+
+    The via points are what the real file is mostly made of, and they are written in both
+    spellings real tools use, alternating per form, because they are different code paths:
+
+    - ``+ VIA via1_2 ( x1 y ) ( x2 y ) ...`` - one form carrying every point. The parser
+      scans these and counts them without building a shape per point, which is the fastest
+      path the file can take;
+    - ``NEW M1 0 + SHAPE STRIPE ( x y ) via1_2`` - one form per point, the spelling the
+      vendored gcd DEF uses, where ``routeWidth 0`` is what marks a via.
+
+    ``--lines-per-form`` spreads a form's points over several lines, which is the case the
+    committed fixtures do not contain and the reason a statement can be long.
+    """
+    import gc
+    import gzip
+    import time
+
+    from vlsi_viewer.metal import GcMonitor, resident_mb
+
+    rng = random.Random(11)
+    width, height = REAL_DIE
+    path = os.path.join(out_dir, "real_shape.def" + (".gz" if gzip_out else ""))
+    open_out = (lambda: gzip.open(path, "wt", newline="\n")) if gzip_out else \
+        (lambda: open(path, "w", newline="\n"))
+
+    total_via = via_forms * via_points
+    shapes = 0                     # counted as they are written, below
+
+    started = time.perf_counter()
+    with open_out() as raw:
+        handle = _Writer(raw)
+        handle.write("VERSION 5.8 ;\nDESIGN real_shape ;\n")
+        handle.write(f"UNITS DISTANCE MICRONS {UNITS_PER_MICRON} ;\n")
+        handle.write(f"DIEAREA ( 0 0 ) ( {dbu(width)} {dbu(height)} ) ;\n")
+        for name, _direction, pitch, _w, _s in LAYERS:
+            handle.write(f"TRACKS X {dbu(1.0)} DO {int(width / pitch)} STEP {dbu(pitch)} "
+                         f"LAYER {name} ;\n")
+        handle.write("NONDEFAULTRULES 1 ;\n- CTS_2W2S\n")
+        for name in ("M2", "M3"):
+            rule = dict((l[0], (l[3], l[4])) for l in LAYERS)[name]
+            handle.write(f"  + LAYER {name} WIDTH {dbu(2 * rule[0])} "
+                         f"SPACING {dbu(2 * rule[1])}\n")
+        handle.write("  ;\nEND NONDEFAULTRULES\n")
+
+        # Components: pass 1 reads them, and pass 2 reads them again into a table nothing
+        # consumes - which is half of the memory hypothesis.
+        handle.write(f"COMPONENTS {instances} ;\n")
+        for index in range(instances):
+            x = rng.uniform(0.0, width)
+            y = rng.uniform(0.0, height)
+            handle.write(f"- u{index} BUF_X1 + SOURCE DIST + PLACED "
+                         f"( {dbu(x)} {dbu(y)} ) N ;\n")
+        handle.write("END COMPONENTS\n")
+        # Everything from here on is the routing read's input. Reported separately because
+        # that is the section the 7005 s is in: pass 2 reads the components again but the
+        # real file's cost is 233 us per line of *its* routing.
+        component_lines = handle.lines
+
+        # The power mesh: die-spanning stripes, a filled ring, then the via arrays in both
+        # spellings real tools use, one statement per net as the real file writes them.
+        handle.write(f"SPECIALNETS {via_nets + 2 + len(UNDEFINED_LAYERS)} ;\n")
+        handle.write("- VDD ( * VDD ) + USE POWER\n")
+        for stripe in range(4):
+            x = width * (stripe + 1) / 6.0
+            handle.write(f"  + ROUTED M9 {dbu(3.0)} + SHAPE STRIPE "
+                         f"( {dbu(x)} 0 ) ( {dbu(x)} {dbu(height)} )\n")
+            shapes += 1
+        handle.write("  ;\n")
+        ring = (15.0, 15.0, width - 15.0, height - 15.0)
+        handle.write("- VDD_RING + USE POWER\n")
+        handle.write(f"  + POLYGON M11 ( {dbu(ring[0])} {dbu(ring[1])} ) "
+                     f"( {dbu(ring[2])} {dbu(ring[1])} ) ( {dbu(ring[2])} {dbu(ring[3])} ) "
+                     f"( {dbu(ring[0])} {dbu(ring[3])} ) ;\n")
+        shapes += 4                                     # three edges plus the filled ring
+        step = max(1, via_forms // max(1, via_nets))
+        per_line = max(1, (via_points + lines_per_form - 1) // lines_per_form)
+        for net in range(via_nets):
+            handle.write(f"- VIA{net} ( * VDD ) + USE POWER\n")
+            first, last = net * step, min((net + 1) * step, via_forms)
+            for form in range(first, last):
+                x = (form % 64) * 16.0 + 8.0
+                y = (form // 64) * 16.0 + 8.0
+                if form % 2 == 0:
+                    # One '+ VIA' form holding every point: the fan-out that builds one
+                    # zero-length object per point for the stream to count and discard.
+                    points = [f"( {dbu(x + point * 0.5)} {dbu(y)} )"
+                              for point in range(via_points)]
+                    for start in range(0, via_points, per_line):
+                        head = "  + VIA via1_2 " if start == 0 else "  "
+                        handle.write(head + " ".join(points[start:start + per_line]) + "\n")
+                else:
+                    # The spelling the real file uses: a width-0 routed form per via point,
+                    # whose `routeWidth 0` is what marks a via rather than a zero-width wire.
+                    for point in range(via_points):
+                        handle.write(f"  NEW M1 0 + SHAPE STRIPE "
+                                     f"( {dbu(x + point * 0.5)} {dbu(y)} ) via1_2\n")
+                shapes += via_points
+            handle.write("  ;\n")
+        for name in UNDEFINED_LAYERS:                   # the unknown-layer class
+            handle.write(f"- {name}_NET ( * VDD ) + USE POWER\n")
+            handle.write(f"  + RECT {name} ( 0 0 ) ( {dbu(width)} {dbu(height)} ) ;\n")
+            shapes += 1
+        handle.write("END SPECIALNETS\n")
+
+        handle.write(f"NETS {nets} ;\n")
+        for index in range(nets):
+            x = rng.uniform(0.0, width)
+            y = rng.uniform(0.0, height)
+            layer = SIGNAL_LAYERS[index % len(SIGNAL_LAYERS)]
+            if index % UNDEFINED_EVERY == UNDEFINED_EVERY - 1:
+                layer = UNDEFINED_LAYERS[index % len(UNDEFINED_LAYERS)]
+            clause = " + NONDEFAULTRULE CTS_2W2S" if index % NDR_EVERY == 0 else ""
+            handle.write(f"- n{index} ( u{index % max(1, instances)} A ) + USE "
+                         f"SIGNAL{clause}\n")
+            if index % JOG_EVERY == JOG_EVERY - 1:
+                # A short step perpendicular to the layer's own direction: under one track
+                # pitch, so the metric drops it - 12.9 M of these in the real run.
+                if layer in H_LAYERS:
+                    end = f"( {dbu(x)} {dbu(y + 0.05)} )"
+                else:
+                    end = f"( {dbu(x + 0.05)} {dbu(y)} )"
+                handle.write(f"  + ROUTED {layer} ( {dbu(x)} {dbu(y)} ) {end}\n")
+            else:
+                end = (f"( {dbu(min(x + 2.0, width))} {dbu(y)} )" if layer in H_LAYERS
+                       else f"( {dbu(x)} {dbu(min(y + 2.0, height))} )")
+                handle.write(f"  + ROUTED {layer} ( {dbu(x)} {dbu(y)} ) {end}\n")
+                # ... and the via points of that net, as the real file writes them.
+                for _point in range(2):
+                    handle.write(f"  NEW M1 ( {dbu(x)} {dbu(y)} ) via1_2\n")
+                    shapes += 1
+            handle.write(" ;\n")
+            shapes += 1
+        handle.write("END NETS\nEND DESIGN\n")
+    write_seconds = time.perf_counter() - started
+    size_mb = os.path.getsize(path) / 1e6
+
+    from vlsi_viewer.metal import build_metal
+    monitor = GcMonitor()
+    if gc_mode == "disabled":
+        gc.disable()
+    rss_before, _peak = resident_mb()
+    if profile:
+        import cProfile
+        import pstats
+        profiler = cProfile.Profile()
+        profiler.enable()
+    started = time.perf_counter()
+    with _quiet():
+        data = build_metal([path], [], [os.path.join(HERE, "tech.lef")], grid_size=REAL_GRID)
+    build_seconds = time.perf_counter() - started
+    if profile:
+        profiler.disable()
+        pstats.Stats(profiler).sort_stats("tottime").print_stats(15)
+        print("  (profiled: the wall clock below is inflated by cProfile)")
+    rss_after, rss_peak = resident_mb()
+    if gc_mode == "disabled":
+        gc.enable()
+        gc.collect()
+    monitor.close()
+    live = len(gc.get_objects())
+
+    every = data.group_kind([layer.name for layer in data.layers])
+    # `totals` now carries the shapes actually measured alongside the six drop counters; the
+    # total is what says whether this run's workload resembles the one being calibrated
+    # against, so it is reported rather than summed into the drops.
+    dropped = {key: value for key, value in data.totals.items() if key != "emitted"}
+    emitted = data.totals.get("emitted", 0)
+    route_lines = handle.lines - component_lines
+    # Only meaningful when the routing section is big enough to speak for itself; the
+    # component-only runs exist to be subtracted, not normalised.
+    route_us = (round(build_seconds / route_lines * 1e6, 2)
+                if route_lines >= 1000 else None)
+    summary = {"nets": nets, "instances": instances, "via_points": total_via,
+               "shapes": shapes, "lines": handle.lines, "route_lines": route_lines,
+               "us_per_route_line": route_us,
+               "size_mb": round(size_mb, 1),
+               "gzip": gzip_out, "write_s": round(write_seconds, 2),
+               "build_s": round(build_seconds, 2),
+               "us_per_line": round(build_seconds / max(1, handle.lines) * 1e6, 2),
+               "us_per_shape": round(build_seconds / max(1, shapes) * 1e6, 2),
+               "emitted": emitted, "dropped": dropped,
+               "gc_s": round(monitor.seconds, 3),
+               "gc_counts": monitor.counts, "live_objects": live,
+               "rss_before_mb": rss_before, "rss_mb": rss_after,
+               "peak_rss_mb": rss_peak, "grid": [data.rows, data.cols],
+               "max_util": round(data.max_util(every), 4)}
+    print(f"real-shape: {data.rows}x{data.cols} grid @{REAL_GRID:g}um, {via_forms:,} via "
+          f"forms x {via_points} points = {total_via:,} via points, {nets:,} nets, "
+          f"{instances:,} instances")
+    print(f"  write   {write_seconds:7.2f}s   {handle.lines:>11,} lines "
+          f"({route_lines:,} routing)   {size_mb:7.1f} MB{' (gz)' if gzip_out else ''}")
+    print(f"  build   {build_seconds:7.2f}s   "
+          + (f"{route_us:7.1f} us/routing-line   " if route_us is not None
+             else "     (no routing section)   ")
+          + f"{build_seconds / max(1, handle.lines) * 1e6:5.1f} us/line")
+    print(f"  measured {emitted:,}   dropped via {dropped.get('vias', 0):,}  "
+          f"jog {dropped.get('jogs', 0):,}  unknown {dropped.get('unknown', 0):,}  "
+          f"degenerate {dropped.get('degenerate', 0):,}  polygon edges "
+          f"{dropped.get('polygon_edges', 0):,}   of {shapes:,} written")
+    print(f"  gc      {monitor.seconds:7.3f}s   "
+          f"{monitor.counts[0]}/{monitor.counts[1]}/{monitor.counts[2]} gen0/1/2   "
+          f"live {live:,} objects")
+    if rss_after is not None:
+        print(f"  rss     {rss_before:7.1f} -> {rss_after:.1f} MB   peak {rss_peak:.1f} MB")
+    print(f"  max util {data.max_util(every):.4f}")
+    import json
+    print("real-shape-summary: " + json.dumps(summary, sort_keys=True))
+    return 0
+
+
 # -- entry point ---------------------------------------------------------------------
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--stress", type=int, metavar="NETS",
                         help="write a synthetic DEF of this many nets to --out and time it")
+    parser.add_argument("--real-shape", action="store_true",
+                        help="write the real design's shape mix (via arrays, a giant power "
+                             "net, undefined layers, a gzipped DEF) and time it")
+    parser.add_argument("--nets", type=int, default=20000,
+                        help="--real-shape: signal nets (default 20000)")
+    parser.add_argument("--instances", type=int, default=200000,
+                        help="--real-shape: COMPONENTS instances (default 200000)")
+    parser.add_argument("--via-forms", type=int, default=2000,
+                        help="--real-shape: via forms (default 2000)")
+    parser.add_argument("--via-points", type=int, default=4,
+                        help="--real-shape: points per via form (default 4)")
+    parser.add_argument("--lines-per-form", type=int, default=1,
+                        help="--real-shape: lines to spread one form's points over "
+                             "(default 1)")
+    parser.add_argument("--via-nets", type=int, default=1,
+                        help="--real-shape: special nets carrying the via arrays; 1 makes it "
+                             "one giant net, as the real file's peak is (default 1)")
+    parser.add_argument("--gzip", action="store_true",
+                        help="--real-shape: write the DEF gzipped, as the real input is")
+    parser.add_argument("--gc", choices=("default", "disabled"), default="default",
+                        help="--real-shape: run the build with the collector disabled, the "
+                             "measurement of the live-set hypothesis and of its fix")
+    parser.add_argument("--profile", action="store_true",
+                        help="--real-shape: profile the build and print the top 15 by self "
+                             "time (the only way to split parser-self from sink-self)")
     parser.add_argument("--out", default=None,
-                        help="where --stress writes (default: a scratch directory)")
+                        help="where --stress/--real-shape writes (default: a scratch dir)")
     args = parser.parse_args(argv)
 
-    if args.stress:
+    if args.real_shape or args.stress:
         import tempfile
         out = args.out or tempfile.mkdtemp(prefix="metal_stress_")
         os.makedirs(out, exist_ok=True)
+        if args.real_shape:
+            return real_shape(out, args.nets, args.instances, args.via_forms,
+                              args.via_points, args.lines_per_form, args.via_nets,
+                              args.gzip, args.gc, args.profile)
         return stress(args.stress, out)
 
     rng = random.Random(0)

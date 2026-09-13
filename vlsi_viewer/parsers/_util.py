@@ -10,6 +10,16 @@ use was inlined, so nothing under ``vlsi_viewer/`` depends on the repo root bein
 import gzip
 
 
+class Cancelled(Exception):
+    """Abandons a parse that is no longer wanted, keeping what it has produced so far.
+
+    Not an error: the caller that asks for it is expected to use the partial result - a map
+    of the part of the design that was read - rather than to report a failure. A chip-level
+    build runs for hours, and a run that turns out to be mis-specified should stop in seconds
+    without taking the job's work with it.
+    """
+
+
 def Print(*args, **kwargs):
     """Print a message to stdout (stand-in for a richer logging/print helper)."""
     print(*args, **kwargs)

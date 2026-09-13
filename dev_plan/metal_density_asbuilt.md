@@ -891,6 +891,153 @@ capacity identity intact.
 
 `python -m pytest -q` → **487 passed**.
 
+## Phase 14 — three defects in the layer extraction, from a real design
+
+[`issue.tech_layer_detect.md`](issue.tech_layer_detect.md) reports three defects from an 18-layer
+design's tech LEF (`wha1cd082-hs`). All three are in the extraction that feeds the metric, and
+every reported number reproduced with the real parser before anything changed. The plan is
+[`tech_lef_layer_extraction.md`](tech_lef_layer_extraction.md).
+
+**The root cause of two of them is one missing concept.** `__parseLayer` scans line by line and had
+no notion of a quoted `PROPERTY` payload, so statements belonging to a property's *own
+mini-language* were read as the layer's base statements. A quoted `SPACINGTABLE` supplied a spacing
+from its PRL breakpoints - `M5`'s minimum was **−0.2** - and a quoted `LEF58_SPACING` supplied
+another from its conditional clauses (`B1` → **0.089**). The repository had been bitten by this
+before, when `PROPERTY LEF58_TYPE` clobbered `TYPE`, and that was patched narrowly. It is now
+consumed as a unit.
+
+Two mechanisms, because one does not cover both shapes: an *unquoted* `PROPERTY name value ;` is
+self-terminating and a one-line regex ends it, where a quote-parity reader would run on to the next
+quoted line; everything else ends on the first line with an even number of quotes that also
+contains `;`. Since a payload can contain any base statement, the fallback guard is the stanza's
+own end - `END <layer>` or the next `LAYER` breaks the read with a warning, so a malformed library
+loses one property rather than the rest of the layer. The unquoted tables - Nangate45's, sky130's,
+the sample's - are base statements and keep working.
+
+**Region layers are dropped, keyed on the property name.** `M2_FB1`/`M3_FB1`/`M4_FB1` declare
+`TYPE ROUTING` and carry `PROPERTY LEF58_REGION`, and were listed as routing layers. The old
+pattern matched `BASEDLAYER M3` but not the file's `BASEDLAYE R M2`, so the fix keys the exclusion
+on `LEF58_REGION` itself and parses the names best-effort for the log line. Three layers now
+disappear from the panel with a reason in `-v` output instead of looking like a parse failure.
+
+**The pitch is the one perpendicular to the layer's own tracks** - the defect that silently changes
+what the map *means*. `M1` is `HORIZONTAL` with `PITCH 0.020 0.032`, and taking the x value made
+`(W + S) / P` = 1.6: its capacity overstated 60 %, so the map read too low. It is 0.032, and the
+factor 1.000. The axis convention is not cited from a document in this repository - the reference
+in `dev_plan/` is a syntax card with no prose - so it is pinned by two real files instead:
+
+- `M1`'s `WIDTH 0.016` + `SPACING 0.016` equals exactly its y-pitch 0.032;
+- ASAP7's `M2` carries `PITCH 0.180 0.144` beside a quoted `LEF58_PITCH " PITCH 0.144
+  FIRSTLASTPITCH 0.180 ;"`, and the payload names 0.144 - the y value - as the layer's pitch.
+
+A measurement over all three vendored tech LEFs (26 routing layers: direction, `pitch_x`,
+`pitch_y`, chosen pitch, width, spacing, `f`) confirms exactly one row moves: ASAP7's `M2`,
+0.180 → 0.144. Nangate45's ten and sky130's six are unchanged, and sky130's `li1` (`VERTICAL`,
+0.46/0.34) keeps the x value as a positive control for a layer whose two pitches differ and whose
+direction is the other one. That move also updated the one vendored expectation that had encoded
+the bug: `test_real_samples.py` asserted `M2`'s factor as `0.144/0.18`, and it is now 1.0.
+
+**A sanity assertion found a real file that violates it.** The plan added "every real layer's
+`spacing <= pitch`" - and ASAP7's `Pad` failed it: `WIDTH 0.16`, `PITCH 0.32`, and a spacing table
+whose values are 8 and 12 µm, all three straight out of the file. A pad plane is not a track
+system; its `PITCH` is the distance between pads, so `(W + S) / P` is meaningless and **`Pad` has
+`f = 25.5`**, reading as almost unused on a map. Recorded in `PROVENANCE.md` rather than fixed -
+the honest fixes are to exclude it from the routing stack the way a region layer is, or clamp the
+factor at 1.0, and neither is decided. The assertion is `spacing >= 0`, because the LEF genuinely
+does not guarantee the stronger one.
+
+`tests/test_real_samples.py` also gained a check that the size and `sha256` in `PROVENANCE.md` are
+what the vendored bytes are - parsed out of the document rather than repeated in the test, so the
+record cannot quietly drift away from the files it describes.
+
+`python -m pytest -q` → **500 passed**.
+
+## Phase 15 — the 7005-second routing read
+
+`real_design_case_record.md` recorded a chip-level run whose routing read took **7005 s** for
+~30 M lines, single-threaded, peaking at 18.9 GB of a 20 GB request. Two proposals existed for
+it - one from another agent - and neither had been measured. The plan is
+[`metal_routing_performance.md`](metal_routing_performance.md).
+
+**Neither document had found the cost, and neither had I.** A first set of four "obvious" fast
+paths was killed by an adversarial review with working counterexamples against the real code:
+skipping the tokenisation of a `+ VIA` array breaks `*` coordinate reuse across a statement's
+forms; "fewer than two points emits nothing" is false in both branches (a single-point routed
+form is a real rectangle from its extension field, a single-point regular form is a deliberate
+zero-length wire); and counting unknown-layer shapes as `points - 1` is wrong in four different
+ways. Measured on the vendored gcd DEF, the middle one takes `n_via` from 2504 to 66.
+
+**So the first phase was measurement, not code.** `generate_metal.py --real-shape` writes the
+mix the run's own counters describe - via arrays in both real spellings, a giant power net,
+die-spanning stripes, undefined layers, jogs, NDR-referencing nets, 3.36 M instances, gzipped
+on request - with knobs for points per form, lines per form and via nets, and reports stage
+seconds, GC time, live objects and RSS. On this machine it runs at the same speed as the one
+Phase 5 measured on (`--stress 200000`: 10.55 s against 11.5 s recorded), so its constants are
+comparable. What it says:
+
+| test | result |
+|---|---|
+| per via-point shape, 200 k vs 2 M | 13.5 -> 12.5 us, **constant** |
+| one giant power net vs 1,000 nets | 19.1 vs 18.2 us/line - none |
+| points spread over 8 lines vs 1 | 12.7 vs 19.1 us/line - none |
+| gzipped vs plain input | 19.2 vs 19.1 us/routing-line - gzip is free |
+| 3.36 M instances, GC | 4.96 s of 41 s = 12 % |
+| the real OpenROAD gcd DEF, as reference | **200 ns/char, 11.8 us/shape - the same constants** |
+
+**There is no quadratic to delete.** Both documents' rankings are wrong in checkable ways: the
+line-by-line loop its #1 blames reads the *same file* at 4.2 us/line (pass 1, 6 M lines in 25 s)
+against pass 2's 233 us/line, and its #2 and #4 optimise work that is already batched - numpy is
+entered once per 65,536 shapes, not once per shape. Its #5's premise ("a segment spans ~1 bin
+vertically") is false for vertical layers, whose wires run the die's full height.
+
+**What the missing factor turned out to be.** By the run's own counters, 147 M dropped shapes at
+12.5 us is 1838 s, plus 41 s of components and ~150 s of reading - about 2,100 s against the
+observed 7005 s. The gap is not a hidden pathology: the log counts only the shapes it *drops* and
+never says how many it *measures*. The arithmetic closes at ~250 M total shapes. That counter
+(`n_emitted`) is now reported, and it is the first thing the next real run will supply.
+
+**The fixes that the measurement justified**, each with its equivalence argument in the code:
+
+| change | effect |
+|---|---|
+| form scan: a required first character, and a digit lookahead before the 40-keyword check | **182 -> 37 ns per character**, match stream identical over 16,000 forms |
+| tokeniser: the 40-keyword lookahead removed, rejection moved to a set lookup per matched word | the lookahead never protected the token stream (it produced `HAPE` from `SHAPE`); 0 point divergences over 19,646 real tails |
+| `re_glued_star.sub` and the clause scans guarded by a literal substring check | provable no-ops otherwise; the gcd parse's `re.sub` was 6.7 % of it |
+| `+ VIA` arrays: points still scanned, no shapes built, counted on the net | removes a fan-out of one object per point at 85 % of a real DEF's shapes |
+| pass 2 skips components; the decoded DEF is released; `__slots__` on both wire types | 3.36 M objects no longer built twice, and no per-instance dict at 10^8 shapes |
+
+| case | before | after | |
+|---|---|---|---|
+| via-heavy (the real design's dominant class) | 25.68 s | **10.72 s** | **2.4x** |
+| per via shape | 12.5 us | **5.2 us** | 2.4x |
+| 3.36 M instances | 41.3 s | **31.0 s** | 1.34x |
+| the real gcd DEF | 59.2 ms | 49.1 ms | 1.21x |
+| `--stress 200000` (2-point nets) | 10.55 s | 9.52 s | 1.11x |
+
+The boundary is now visible and worth stating: **the win is where the design is via-dominated**
+(124.7 M via points against 12.9 M jogs, in the real run). The 2-point-wire path barely moved,
+because its cost is ~40 us per *net* spread across ten per-statement sites - each a full scan of
+the statement - and no single surgical change touches that.
+
+**The log strategy — because a run's log is the only evidence when the design cannot be
+shared.** One line per stage with elapsed, rate and RSS (the only elapsed number before this was
+the parser's own, which mixes parsing, conversion and rasterisation); the emitted-shape counter
+beside the six drop counters; the input's own shape (forms, points, points per form, the longest
+statement, lines, and which layer names the DEF uses that the tech LEF does not - the 4.5 M-shape
+class's cause); RSS, GC seconds, collections per generation and live objects; and a single
+`metal-summary:` JSON line carrying all of it. `--profile` adds cProfile's top 15 by self time,
+which is the only way to separate parser-self from sink-self, and the heartbeat is now time-based
+with a rate and an estimate from the section's declared count, flushed every time - a line-based,
+unflushed heartbeat is 230 s of silence that a killed job loses.
+
+**A test caught a real bug in that work**: the cancel callable was being assigned to the parser
+*after* construction, and `DefParser` parses from `__init__` - so cancelling would have silently
+never fired. It is a constructor argument now, and `tests/test_metal_diagnostics.py` pins the
+whole path: cancel stops the build, keeps the partial map, and says so in a warning.
+
+`python -m pytest -q` -> **510 passed**, with the pinned real-file numbers unchanged (gcd 2504
+via / 5 jogs / 2327 rects / `means["metal2"] == 0.2527`).
+
 ## Where this ended up
 
 | phase | state |
@@ -908,6 +1055,9 @@ capacity identity intact.
 | 9 | the blank sidebar, the misplaced boundary, `Auto`, and a legible readout |
 | 10 | three panes, the range in the toolbar, and W/S/P per layer |
 | 11 | the startup map, the readout table's height, and the table's alignment |
+| 12 | the real files, vendored, and `CLASS CORE SPACER` read as a macro |
+| 13 | the LEF's own `OBS` blockage in place of a layer count |
+| 14 | property payloads, region layers, and the pitch perpendicular to the tracks |
 
 Nine bugs were found by checks rather than by reading, and four of them would have produced a
 wrong map with no error at all: the scope lookup that left the default view empty, the missing

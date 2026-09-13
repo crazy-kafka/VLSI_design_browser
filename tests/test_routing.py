@@ -124,6 +124,158 @@ END ghost
     assert tech.usable == []
 
 
+# -- the reported design's tech LEF -------------------------------------------------
+#
+# Verbatim stanzas from `dev_plan/issue.tech_layer_detect.md` (a real 18-layer design), and
+# the acceptance table from its report. It is one file doing three things at once: a region
+# layer, a layer with no stated spacing, and a layer whose two pitch values differ.
+
+REPORT_STANZAS = """\
+LAYER M1
+   TYPE ROUTING ;
+   MASK 2 ;
+   DIRECTION HORIZONTAL ;
+   PITCH 0.020 0.032 ;
+   OFFSET 0.0 ;
+   WIDTH 0.016 ;
+   SPACING 0.016 ;
+END M1
+LAYER M2_FB1
+   TYPE ROUTING ;
+   MASK 2 ;
+   DIRECTION VERTICAL ;
+   PITCH 0.038 0.038 ;
+   OFFSET 0.000 0.000 ;
+   PROPERTY LEF58_REGION " REGION FB1 BASEDLAYE R M2 ; " ;
+   WIDTH 0.0190 ;
+   MAXWIDTH 0.5 ;
+   SPACING 0.0190 ;
+END M2_FB1
+LAYER M3_FB1
+   TYPE ROUTING ;
+   MASK 2 ;
+   DIRECTION HORIZONTAL ;
+   PITCH 0.04 0.04 ;
+   PROPERTY LEF58_REGION " REGION FB1 BASEDLAYER M3 ; " ;
+   WIDTH 0.019 ;
+   SPACING 0.029 ;
+END M3_FB1
+LAYER M5
+   TYPE ROUTING ;
+   DIRECTION HORIZONTAL ;
+   PITCH 0.076 0.076 ;
+   OFFSET 0.000 ;
+   WIDTH 0.038 ;
+   MINWIDTH 0.038 ;
+   SPACINGTABLE
+     PARALLELRUNLENGTH 0 1.2
+     WIDTH 0 0.038 0.038 ;
+END M5
+LAYER B1
+   TYPE ROUTING ;
+   DIRECTION HORIZONTAL ;
+   PITCH 0.126 0.126 ;
+   OFFSET 0.000 0.000 ;
+   WIDTH 0.062 ;
+   PROPERTY LEF58_SPACING "
+   SPACING 0.089 ENDINLINE 0.09 WITHIN 0.0335 PARALLELEDGE 0.089 WITHIN 0.0985 ;
+   ";
+END B1
+LAYER TM1
+   TYPE ROUTING ;
+   DIRECTION VERTICAL ;
+   PITCH 0.4 0.4 ;
+   WIDTH 0.2 ;
+   SPACING 0.2 ;
+END TM1
+"""
+
+
+def test_a_region_layer_is_not_a_routing_layer(tmp_path):
+    """`M2_FB1`/`M3_FB1` declare TYPE ROUTING but their rules belong to a region over M2/M3.
+
+    They are not track systems of the stack, so they are not routing layers - and the one
+    spelled `BASEDLAYE R` must be excluded by the same rule as the cleanly spelled one, or
+    the defect survives for exactly one of the layers.
+    """
+    tech = _tech(tmp_path, REPORT_STANZAS)
+    assert [layer.name for layer in tech] == ["M1", "M5", "B1", "TM1"]
+    assert tech["M1"].index == 0 and tech["TM1"].index == 3       # re-indexed, no gaps
+
+
+def test_a_horizontal_layer_takes_the_y_pitch(tmp_path):
+    """`PITCH xDistance yDistance`: x is the spacing of *vertical* tracks, y of horizontal.
+
+    M1 is horizontal with `PITCH 0.020 0.032`, so 0.032 is the distance between its own
+    tracks - and 0.016 + 0.016 equals it exactly, the usual factor of 1.0. Its capacity was
+    60 % overstated while the x value was taken instead.
+
+    The vertical control below is what stops this passing under "always take y".
+    """
+    tech = _tech(tmp_path, REPORT_STANZAS)
+    assert tech["M1"].pitch == pytest.approx(0.032)
+    vertical = _tech(tmp_path, REPORT_STANZAS.replace("DIRECTION HORIZONTAL ;\n   PITCH 0.020",
+                                                      "DIRECTION VERTICAL ;\n   PITCH 0.020"))
+    assert vertical["M1"].pitch == pytest.approx(0.020)
+
+
+def test_the_reported_layers_read_the_reported_values(tmp_path):
+    """The report's acceptance table, in one place.
+
+    M5 and B1 state no default spacing - the rules that look like one live inside properties
+    - so `pitch - width` supplies it, which is what the report expects and what the LEF's own
+    table base row agrees with for B1.
+    """
+    tech = _tech(tmp_path, REPORT_STANZAS)
+    table = {"M1": (0.016, 0.016, 0.032), "M5": (0.038, 0.038, 0.076),
+             "B1": (0.062, 0.064, 0.126)}
+    for name, (width, spacing, pitch) in table.items():
+        layer = tech[name]
+        assert (layer.width, layer.spacing, layer.pitch) == pytest.approx(
+            (width, spacing, pitch)), name
+
+
+def test_the_pitch_falls_back_along_the_axis_not_across_it(tmp_path):
+    """A layer that declares only the other axis still gets a pitch rather than none."""
+    tech = _tech(tmp_path, """\
+LAYER h
+  TYPE ROUTING ;
+  DIRECTION HORIZONTAL ;
+  WIDTH 0.1 ;
+  SPACING 0.1 ;
+  PITCH 0 0.4 ;
+END h
+LAYER v
+  TYPE ROUTING ;
+  DIRECTION VERTICAL ;
+  WIDTH 0.1 ;
+  SPACING 0.1 ;
+  PITCH 0.4 0 ;
+END v
+""")
+    assert tech["h"].pitch == pytest.approx(0.4)
+    assert tech["v"].pitch == pytest.approx(0.4)
+
+
+def test_a_diagonal_layer_keeps_the_previous_pitch_choice(tmp_path):
+    """Nothing is perpendicular to a diagonal, so the rule has no axis to prefer.
+
+    DIAG45 is not horizontal either - the layer table groups it with the vertical ones - and
+    keeping the x value first means this change alters nothing for it.
+    """
+    tech = _tech(tmp_path, """\
+LAYER d
+  TYPE ROUTING ;
+  DIRECTION DIAG45 ;
+  WIDTH 0.1 ;
+  SPACING 0.1 ;
+  PITCH 0.2 0.3 ;
+END d
+""")
+    assert tech["d"].pitch == pytest.approx(0.2)
+    assert tech["d"].is_horizontal is False
+
+
 def test_tech_lef_order_is_not_sorted(tmp_path):
     """metal10 must stay after metal2, or the GUI's layer panel order is nonsense."""
     body = "".join(f"""LAYER metal{n}
@@ -205,6 +357,31 @@ END DESIGN
 """)
     assert stream.n_via == 1
     assert stream.sink.rects == []
+
+
+def test_a_via_form_still_advances_the_star_coordinate(tmp_path):
+    """'*' means "the last coordinate used", and a via form's points set it.
+
+    A '+ VIA' array's points are still *scanned*; only their shapes are not built. The
+    statement shares that coordinate state across its forms, so a fast path that skipped the
+    tail to save the work would resolve the wire below against the wrong point - or raise,
+    when the statement has no earlier point at all. This is the counterexample that killed
+    the first version of that optimisation, so it is pinned here.
+    """
+    _routing, stream = _run(tmp_path, """\
+SPECIALNETS 1 ;
+- VDD + USE POWER
+  + VIA V12 ( 100 200 ) ( 300 400 )
+  NEW metal3 400 ( * 900 ) ( 800 900 ) ;
+END SPECIALNETS
+END DESIGN
+""")
+    assert stream.n_via == 2                       # counted, not built
+    assert len(stream.sink.rects) == 1
+    rect = stream.sink.rects[0]
+    # The wire runs 300 -> 800 in database units, so '*' resolved to the via form's last
+    # point; the keep-out expansion is symmetric, which leaves the midpoint where it was.
+    assert (rect[2] + rect[4]) / 2 == pytest.approx((300 + 800) / 2 / 1000)
 
 
 # -- width sources -----------------------------------------------------------------

@@ -106,8 +106,21 @@ What it exercises that nothing synthetic here does:
 | licence | BSD 3-Clause — "Copyright 2020 Lawrence T. Clark, Vinay Vashishtha, or Arizona State University" |
 
 ASAP7, the 7 nm predictive PDK: the closest openly licensed analogue to a modern foundry node.
-10 routing layers named `M1`–`M9` plus `Pad`, all usable, pitches 0.144–0.4 µm. `M2` is a second
-real `W + S < P` case (0.144 against a 0.18 pitch, `f = 0.8`).
+10 routing layers named `M1`–`M9` plus `Pad`, all usable, pitches 0.144–0.4 µm.
+
+`M2` is the only layer here - and in any vendored file - whose two `PITCH` values differ:
+`PITCH 0.180 0.144` on a `HORIZONTAL` layer. The pitch a layer's tracks are separated by is the
+*y* value, 0.144, which its own quoted `LEF58_PITCH` payload agrees with
+(`PITCH 0.144 FIRSTLASTPITCH 0.180`), and `0.072 + 0.072` equals it exactly — `f = 1.0`. Reading
+the x value gave 0.8 and overstated the layer's capacity; that was the old behaviour.
+
+**Known consequence, recorded rather than fixed: `Pad` has `f = 25.5`.** It declares
+`WIDTH 0.16`, `PITCH 0.32` and a spacing *table* whose values are 8 and 12 µm
+(`PARALLELRUNLENGTH 0 47.999` / `WIDTH 0 8 8` / `WIDTH 47.999 8 12`). All three come straight out
+of the file: a pad plane is not a track system, and its `PITCH` is the distance between pads
+rather than between routing tracks. The metric's `(W + S) / P` is meaningless for it, and since
+its capacity then exceeds its own area the layer reads as almost unused. `Pad` should arguably
+be excluded from the routing stack the way a region layer is, or its factor clamped at 1.0.
 
 ## `sky130/sky130_fd_sc_hd.tlef` — 18,031 B
 

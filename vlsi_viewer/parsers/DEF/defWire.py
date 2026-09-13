@@ -13,6 +13,9 @@ class DefWire:
     ``'default'``. ``via``/``via_orient`` are the via at the segment's start point.
     """
 
+    # One object per segment: the per-instance dict is a real cost at 10^8 segments.
+    __slots__ = ("layer_name", "rule", "from_pt", "to_pt", "via", "via_orient")
+
     def __init__(self, layer_name: AnyStr, rule: AnyStr, from_pt: Tuple[int, int],
                  to_pt: Tuple[int, int], via: AnyStr = None,
                  via_orient: AnyStr = None):

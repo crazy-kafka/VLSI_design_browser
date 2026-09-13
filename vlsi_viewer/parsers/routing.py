@@ -51,6 +51,27 @@ POWER = 1
 DEFAULT_BATCH = 1 << 16
 
 
+def _routing_pitch(layer) -> float:
+    """The pitch that separates adjacent tracks of ``layer``, from its LEF ``PITCH``.
+
+    ``PITCH {distance | xDistance yDistance}``: the x value is the spacing of *vertical*
+    tracks, the y value of *horizontal* ones, so the number this metric wants is the one
+    perpendicular to the layer's own direction. A single-value ``PITCH`` sets both, so it
+    makes no difference there - but where they differ (a real design's M1 `PITCH 0.020
+    0.032`) reading the x value overstated that layer's capacity by 60 %.
+
+    A layer with no direction, or a diagonal one, has no axis to prefer and keeps the x
+    value first, as before. A zero for the chosen axis falls back to the other rather than
+    reporting no pitch at all.
+    """
+    direction = (layer.direction or "").upper()
+    if direction.startswith("H"):
+        return layer.pitch_y or layer.pitch_x
+    if direction.startswith("V"):
+        return layer.pitch_x or layer.pitch_y
+    return layer.pitch_x or layer.pitch_y
+
+
 class RouteLayer:
     """One routing layer, in microns and in stack order.
 
@@ -122,12 +143,20 @@ class TechRouting:
 
         Only ``TYPE ROUTING`` layers are kept. A real tech LEF is about half non-routing -
         Nangate45 has 22 ``LAYER`` blocks of which 10 are routing - and accepting a cut or
-        masterslice layer would put phantom layers in the GUI.
+        masterslice layer would put phantom layers in the GUI. A layer whose rules come from
+        a region over a base layer (``PROPERTY LEF58_REGION``) is also dropped: it is not a
+        track system of the stack, and counting its metal as a layer of its own would
+        measure the same silicon twice.
 
-        Spacing falls back to ``pitch - width`` when the LEF states none, which is the
-        usual relation and far better than the zero a missing clause would otherwise leave
-        behind (see the as-built notes: nine of the ten Nangate45 routing layers used to
-        come out with no spacing at all).
+        The pitch is the one perpendicular to the layer's own tracks, because that is the
+        distance between two adjacent tracks of *that* layer: a horizontal layer's tracks
+        are stacked vertically, so its pitch is the y value. Taking the x value whenever one
+        exists overstated the capacity of a real 18-layer design's M1 by 60 %.
+
+        Spacing falls back to ``pitch - width`` when the LEF states none, which is the usual
+        relation and far better than the zero a missing clause would otherwise leave behind
+        (see the as-built notes: nine of the ten Nangate45 routing layers used to come out
+        with no spacing at all).
         """
         parsed: Dict[AnyStr, object] = {}
         for path in lef_paths:
@@ -136,10 +165,14 @@ class TechRouting:
 
         routing: List[RouteLayer] = []
         skipped = 0
+        regions: List[AnyStr] = []
         for name, layer in parsed.items():
             if (layer.type or "").upper() != "ROUTING":
                 continue
-            pitch = layer.pitch_x or layer.pitch_y
+            if layer.region_layer:
+                regions.append(name)
+                continue
+            pitch = _routing_pitch(layer)
             width = layer.width or layer.min_width
             spacing = layer.spacing
             if spacing <= 0 and pitch > 0 and width > 0:
@@ -152,8 +185,11 @@ class TechRouting:
                     name)
             routing.append(RouteLayer(name, len(routing), layer.direction, pitch, width,
                                       spacing))
-        logger.info("tech LEF: %d routing layer(s) of %d layer(s), %d unusable",
-                    len(routing), len(parsed), skipped)
+        if regions:
+            logger.info("tech LEF: %d region-defined layer(s) are not routing layers of the "
+                        "stack and are skipped: %s", len(regions), ", ".join(regions))
+        logger.info("tech LEF: %d routing layer(s) of %d layer(s), %d unusable, "
+                    "%d region-defined", len(routing), len(parsed), skipped, len(regions))
         return cls(routing)
 
 
@@ -197,13 +233,17 @@ class ShapeStream:
         self._pending: Dict[Tuple[int, int], List[list]] = {}
         self._diagonals: list = []
         self._count = 0
-        # Diagnostics the caller reports rather than hides.
+        # Diagnostics the caller reports rather than hides. The six drop counters say what
+        # was thrown away; `n_emitted` says what was *measured*, and without it a run's
+        # shapes cannot be reconciled with its clock: a log that reports 147 M dropped
+        # shapes and no emitted count leaves the rest of the work unaccounted for.
         self.n_via = 0
         self.n_jog = 0
         self.n_degenerate = 0
         self.n_polygon_edge = 0
         self.n_usable_layer_missing = 0
         self.n_unknown_layer = 0
+        self.n_emitted = 0
 
     def configure(self, db_unit, ndrs) -> None:
         """Adopt the database unit and rule table of the DEF being parsed."""
@@ -263,6 +303,7 @@ class ShapeStream:
         bucket[2].append(x1)
         bucket[3].append(y1)
         self._count += 1
+        self.n_emitted += 1
         if self._count >= self.batch:
             self.flush()
 
@@ -284,6 +325,7 @@ class ShapeStream:
                 x0, y0 = self.frame.apply_point(x0, y0)
                 x1, y1 = self.frame.apply_point(x1, y1)
             self.sink.add_diagonal(layer_index, scope, x0, y0, x1, y1, half)
+        self.n_emitted += len(self._diagonals)
         self._diagonals = []
 
     # -- nets ------------------------------------------------------------------------
@@ -298,6 +340,10 @@ class ShapeStream:
             self._add_special(swire, scope)
         for polygon in net.polygons:
             self._add_polygon(polygon, scope)
+        # '+ VIA' points the parser counted instead of building. Each would have taken the
+        # `shape == 'VIA'` branch above and done nothing but increment this counter, so the
+        # total is the same number by a shorter route.
+        self.n_via += net.via_points
 
     @staticmethod
     def _scope(net) -> int:
@@ -449,6 +495,9 @@ class ShapeStream:
             shape = shape.buffer(grow, join_style=2)
         self.sink.add_polygon(layer.index, scope,
                               np.asarray(shape.exterior.coords, dtype=np.float64))
+        # Counted where the screen counts it: the ring arrives as one shape, while its edges
+        # went to `n_polygon_edge` above.
+        self.n_emitted += 1
 
 
 class DefRouting:
@@ -459,7 +508,8 @@ class DefRouting:
     instance conversion already knows how to scale those.
     """
 
-    def __init__(self, path, design_name, db_unit, boundary, components, tracks, ndrs):
+    def __init__(self, path, design_name, db_unit, boundary, components, tracks, ndrs,
+                 stats: Dict = None):
         self.path = path
         self.design_name = design_name
         self.db_unit = db_unit
@@ -467,10 +517,13 @@ class DefRouting:
         self.components = components
         self.tracks = tracks
         self.ndrs = ndrs
+        # What the text was like - statement sizes, points, layer names. See
+        # `DefParser.getStats`.
+        self.stats = dict(stats or {})
 
 
 def parse_def(def_path: AnyStr, stream: Optional[ShapeStream] = None,
-              top=None) -> DefRouting:
+              top=None, skip_components: bool = False, cancel=None) -> DefRouting:
     """Parse one DEF, streaming its wiring into ``stream`` if one is given.
 
     Net, special-net and rule parsing are always enabled: the metal flow needs all three,
@@ -478,6 +531,11 @@ def parse_def(def_path: AnyStr, stream: Optional[ShapeStream] = None,
     ``END NETS``. The declared section counts are compared against what was parsed, because
     a DEF that puts a section where the dispatcher has already stopped would otherwise lose
     it silently - the same check ``convert`` already applies to components.
+
+    ``skip_components`` is for a caller that has already read them - the metal flow's second
+    pass, which wants the wiring and nothing else. The section is still scanned; what it no
+    longer does is build and hold a ``DefComponent`` per instance, which on a flat
+    chip-level DEF is millions of objects that no one reads.
     """
     def sink(net, db_unit, ndrs):
         # The stream is configured lazily, on the first net: the database unit and the
@@ -488,7 +546,10 @@ def parse_def(def_path: AnyStr, stream: Optional[ShapeStream] = None,
             stream.configure(db_unit, ndrs)
         stream.add_net(net)
 
+    # `cancel` is consulted once per heartbeat; returning True from it raises `Cancelled`,
+    # which abandons the parse and leaves whatever was already handed to the sink in place.
     parser = DefParser(def_path, parse_net=True, parse_specialnet=True, parse_ndr=True,
+                       skip_comp=skip_components, cancel=cancel,
                        sink=None if stream is None else sink)
     db_unit = parser.dbUnit()
     boundary = [[x / db_unit, y / db_unit] for x, y in parser.shape()]
@@ -500,7 +561,8 @@ def parse_def(def_path: AnyStr, stream: Optional[ShapeStream] = None,
     return DefRouting(def_path, parser.designName or top, db_unit, boundary,
                       parser.getAllComponents(), parser.getTracks(),
                       {name: _scaled_rule(rule, db_unit)
-                       for name, rule in parser.getNdrRules().items()})
+                       for name, rule in parser.getNdrRules().items()},
+                      parser.getStats())
 
 
 def _scaled_rule(rule, db_unit):

@@ -25,6 +25,12 @@ class DefNet:
         # Whole '+ POLYGON' shapes. Distinct from `swiring`, which holds their edges and
         # cannot be reassembled into them - see DefSPolygon.
         self.polygons: List[DefSPolygon] = []
+        # Via points from a '+ VIA <name> pt pt ...' form, counted rather than built. Each
+        # one is a zero-length shape whose geometry nothing reads, so a fan-out of one
+        # object per point is a fan-out of garbage: the stream counts them as `n_via` and
+        # returns. A via point is 85 % of a real chip-level DEF's shapes, and holding a
+        # million of them alive at once is what the memory peak is made of.
+        self.via_points = 0
 
     def __repr__(self):
         out_str = [f'DefWire {self.net_name}']

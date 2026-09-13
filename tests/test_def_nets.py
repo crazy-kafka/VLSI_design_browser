@@ -99,10 +99,18 @@ def test_special_wire_polygon_form(tmp_path):
 
 
 def test_special_wire_via_form(tmp_path):
-    """'+ VIA viaName [orient] pt ...' — the via was previously unmatchable."""
-    parser = _specialnets(tmp_path, ["- VDD + VIA V12 N ( 500 600 ) ;\n"])
-    wire = parser.getNet("VDD").swiring[0]
-    assert wire.via == "V12" and wire.via_orient == "N"
+    """'+ VIA viaName [orient] pt ...' is counted, not built.
+
+    The form was previously unmatchable, so the test that pinned it asserted the object it
+    produced: a zero-length DefSWire carrying the via's name. Nothing reads that name - the
+    metric counts a via point and asks nothing else about it, and one object per point is
+    85 % of a real chip-level DEF's shapes. Recognition is what matters, and the count pins
+    it, including for the multi-point arrays that a real power grid is written of.
+    """
+    parser = _specialnets(tmp_path, ["- VDD + VIA V12 N ( 500 600 ) ( 700 800 ) ;\n"])
+    net = parser.getNet("VDD")
+    assert net.via_points == 2
+    assert net.swiring == []
 
 
 def test_via_between_points_keeps_its_orientation(tmp_path):

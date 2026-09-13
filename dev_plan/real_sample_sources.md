@@ -23,7 +23,7 @@ make them re-checkable.
 |---|---|---|---|---|
 | **ORFS `flow/platforms/nangate45/lef/NangateOpenCellLibrary.tech.lef`** | 45 nm | Nangate OCL — non-commercial, redistribution permitted with the licence text, benchmarking against other libraries prohibited | 19 KB | 22 layers, 10 routing; `SPACINGTABLE` on 9; metal1 spacing 0.065; metal2 `f = 0.737` — **the file that found the worst bug, and the reason the capacity normalisation exists** |
 | **ORFS `flow/platforms/sky130hd/lef/sky130_fd_sc_hd.tlef`** | 130 nm | Apache-2.0 | 18 KB | layers named `li1`, `met1`…`met5` — name variance nothing else here has; two real `W + S < P` cases (`li1` 0.739, `met1` 0.824) |
-| **`The-OpenROAD-Project/asap7sc7p5t_27` `techlef_misc/asap7_tech_4x_201209.lef`** | 7 nm predictive | BSD-3-Clause | 21 KB | **the closest openly licensed analogue to a modern foundry node**; 10 layers `M1`–`M9` + `Pad`, pitches down to 0.144; another `W + S < P` case |
+| **`The-OpenROAD-Project/asap7sc7p5t_27` `techlef_misc/asap7_tech_4x_201209.lef`** | 7 nm predictive | BSD-3-Clause | 21 KB | **the closest openly licensed analogue to a modern foundry node**; 10 layers `M1`–`M9` + `Pad`, pitches down to 0.144; the only layer anywhere in the corpus whose two `PITCH` values differ (`M2`), and a `Pad` plane whose numbers are not track rules |
 | ORFS `flow/platforms/asap7/`, `gf180mcu`, IHP `sg13g2` | various | Apache-2.0 / BSD | KB–MB | unexamined; `gf180mcu` would add a second non-`M<digit>` naming scheme and IHP a 130 nm BiCMOS stack |
 
 ## Designs / DEFs

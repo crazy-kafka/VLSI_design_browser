@@ -17,18 +17,27 @@ from .defWire import DefWire
 from .defSWire import DefSWire
 from .defNdr import DefNdrLayer, DefNdrRule
 from .defSPolygon import DefSPolygon
-from .._util import Print
+from .._util import Cancelled, Print
+
+# Parsed-versus-declared counters per section, for the heartbeat's estimate. Only the sections
+# a DEF declares a size for are listed - a DEF's line count is not declared anywhere, and its
+# net counts are.
+_SECTION_PROGRESS = {"NETS": ("n_nets", "declared_nets"),
+                     "SPECIALNETS": ("n_special_nets", "declared_special_nets")}
 
 
 class DefParser:
 
     CURRENT_LINE_CNT = 0
-    LINE_CNT_STEP = 1000000
+    # How often to report progress, in seconds. It used to be every million lines, which on a
+    # chip-level DEF is 230 s of silence per line - and the print was unflushed, so a job that
+    # was killed lost even that.
+    HEARTBEAT_SECONDS = 30.0
     IGNORE_PHY = False
     IGNORE_FILLER = False
     IGNORE_COVER = False
 
-    def __init__(self, def_file: AnyStr, skip_comp=False, parse_pin=False, batch_mode=False, parse_net=False, parse_blockage=False, parse_specialnet=False, parse_ndr=True, sink=None):
+    def __init__(self, def_file: AnyStr, skip_comp=False, parse_pin=False, batch_mode=False, parse_net=False, parse_blockage=False, parse_specialnet=False, parse_ndr=True, sink=None, cancel=None):
         if batch_mode is True:
             self.puts = print
         else:
@@ -46,6 +55,30 @@ class DefParser:
         # so a design with 10^8 wire segments never has to fit in memory. Without a sink
         # the nets accumulate in `self.__nets`, which is what the existing callers expect.
         self.sink = sink
+
+        # Called once per heartbeat; returning True abandons the parse (see `__count_line`).
+        # A callable rather than a flag so the caller keeps ownership of the policy - and a
+        # constructor argument rather than something to set afterwards, because the parse
+        # runs from `__parsingStart` below, before any caller could assign it.
+        self.cancel = cancel
+
+        # Input characterisation: how much text, how it is divided into statements, and which
+        # layers it names. Counted per statement or per form, never per character, so it costs
+        # nothing measurable - and it is what says whether a benchmark resembles the file it
+        # is standing in for. See `getStats`.
+        self.n_forms = 0
+        self.n_points = 0
+        self.statement_lines_max = 0
+        self.statement_chars_max = 0
+        self.points_max = 0
+        self.layers_used: Set[AnyStr] = set()
+
+        # Heartbeat state; see `__count_line`.
+        self.__started_at = time.time()
+        self.__reported_at = self.__started_at
+        self.__section = None
+        self.__section_started_at = self.__started_at
+        self.__section_start_count = 0
 
         if self.def_file.endswith('.gz'):
             self.fh = gzip.open(self.def_file)
@@ -120,11 +153,19 @@ class DefParser:
                 break
             for mtype in func_dict:
                 if line.startswith(mtype):
+                    self.__enter_section(mtype)
                     func_dict[mtype](line)
                     if mtype == last_type:
-                        self.puts(f'End DEF parsing in {round(time.time() - t0, 4)}s')
+                        self.puts(f'End DEF parsing in {round(time.time() - t0, 4)}s', flush=True)
                         return
                     continue
+
+    def __enter_section(self, name: AnyStr) -> None:
+        """Note which section is being read, so the heartbeat can say what is left of it."""
+        self.__section = name
+        self.__section_started_at = time.time()
+        pair = _SECTION_PROGRESS.get(name)
+        self.__section_start_count = getattr(self, pair[0]) if pair else 0
 
     def __extractDesignName(self, line: AnyStr):
         design_match = CompiledRe.re_design.search(line)
@@ -295,10 +336,25 @@ class DefParser:
         while ';' not in parts[-1]:
             line = self.fetchLine_method()
             if not line or line.lstrip().startswith('END '):
-                return ' '.join(parts), line
+                return self.__size(parts), line
             parts.append(line)
         parts[-1] = parts[-1].split(';', 1)[0]
-        return ' '.join(parts), self.fetchLine_method()
+        return self.__size(parts), self.fetchLine_method()
+
+    def __size(self, parts: List) -> AnyStr:
+        """Join a statement and record how big it was.
+
+        A statement's size is not reported anywhere else, and it is the first thing to check
+        when a benchmark is supposed to stand in for a real file: a power net written as one
+        statement of a million points is not the same input as a million statements of one
+        point, and the two cost differently.
+        """
+        statement = ' '.join(parts)
+        if len(parts) > self.statement_lines_max:
+            self.statement_lines_max = len(parts)
+        if len(statement) > self.statement_chars_max:
+            self.statement_chars_max = len(statement)
+        return statement
 
     def __statement_net(self, header: AnyStr) -> DefNet:
         """The net a statement defines, created on first sight, with its connections.
@@ -345,7 +401,11 @@ class DefParser:
         # are split before tokenising so the point pattern can keep requiring a separator
         # between coordinates, which is what stops a malformed '(1234)' from silently
         # splitting into 123 and 4.
-        tail = CompiledRe.re_glued_star.sub(' ', tail)
+        # The substitution only fires across a digit/star boundary, so a tail without a '*'
+        # is returned unchanged - and most tails have none, which makes the check worth
+        # making (a regex call per form on every DEF costs more than the scan it guards).
+        if '*' in tail:
+            tail = CompiledRe.re_glued_star.sub(' ', tail)
         for token in CompiledRe.re_wire_token.finditer(tail):
             x, y = token.group('x'), token.group('y')
             if x is not None:
@@ -355,7 +415,14 @@ class DefParser:
                 ext = token.group('ext')
                 out.append(('pt', x, y, int(ext) if ext is not None else None))
             else:
-                out.append(('via', token.group('via'), token.group('via_orient')))
+                name = token.group('via')
+                if name in CompiledRe.WIRE_KEYWORDS:
+                    # A clause keyword where a via name would sit ('+ SHAPE STRIPE'). The
+                    # token pattern no longer rejects these with a lookahead, because that
+                    # test was retried at every character of the tail; here it is paid once
+                    # per matched word. No metric path reads a via name.
+                    continue
+                out.append(('via', name, token.group('via_orient')))
         return out
 
     @staticmethod
@@ -391,7 +458,10 @@ class DefParser:
         if first is None:
             return statement, ''
         text = statement[first.start():]
-        cut = CompiledRe.re_non_wiring_clause.search(text)
+        # Every clause keyword needs a '+', so a text without one cannot hold a clause and
+        # the scan is skipped. Both branches are the same statement text that the form scan
+        # then walks, so an avoidable scan here costs as much as the one that matters.
+        cut = CompiledRe.re_non_wiring_clause.search(text) if '+' in text else None
         return statement[:first.start()], (text[:cut.start()] if cut else text)
 
     def __extractNdrRules(self, line: AnyStr):
@@ -440,21 +510,27 @@ class DefParser:
     def __add_special_wiring(self, net: DefNet, text: AnyStr):
         """Emit ``DefSWire`` segments for every special-wiring form in the text."""
         forms = list(CompiledRe.re_special_wiring_form.finditer(text))
+        self.n_forms += len(forms)
         last = [None, None]
         for i, match in enumerate(forms):
             end = forms[i + 1].start() if i + 1 < len(forms) else len(text)
             fields = match.groupdict()
             points, vias = self.__split_points(
                 self.__scan_tokens(text[match.end():end], last))
+            self.n_points += len(points)
+            if len(points) > self.points_max:
+                self.points_max = len(points)
+            for key in ('poly_layer', 'rect_layer', 'layer'):
+                if fields.get(key):
+                    self.layers_used.add(fields[key])
 
             if fields['via_name']:
-                # '+ VIA via [orient] pt ...': each point carries the via, so there is
-                # no segment - record it as a zero-length one rather than dropping it.
-                for _index, (_, x, y, ext) in enumerate(points):
-                    net.swiring.append(DefSWire(
-                        None, None, x, y, ext or 0, x, y, ext or 0,
-                        via=fields['via_name'], via_orient=fields['via_orient'],
-                        shape='VIA'))
+                # '+ VIA via [orient] pt ...': each point carries the via, so there is no
+                # segment. The points are *scanned* (so '*' keeps resolving across the
+                # statement) but not turned into shapes: the stream counts a via point and
+                # reads nothing else about it, so building one zero-length object per point
+                # buys exactly the same counter at the price of the allocation.
+                net.via_points += len(points)
                 continue
 
             width = int(fields['width']) if fields['width'] else None
@@ -491,14 +567,19 @@ class DefParser:
     def __add_regular_wiring(self, net: DefNet, text: AnyStr, rule: AnyStr):
         """Emit ``DefWire`` segments for every regular-wiring form in the text."""
         forms = list(CompiledRe.re_regular_wiring_form.finditer(text))
+        self.n_forms += len(forms)
         last = [None, None]
         for i, match in enumerate(forms):
             end = forms[i + 1].start() if i + 1 < len(forms) else len(text)
             fields = match.groupdict()
             # A per-wire TAPERRULE wins over the net-level + NONDEFAULTRULE.
             wire_rule = fields['taper_rule'] or rule
+            self.layers_used.add(fields['layer'])
             points, vias = self.__split_points(
                 self.__scan_tokens(text[match.end():end], last))
+            self.n_points += len(points)
+            if len(points) > self.points_max:
+                self.points_max = len(points)
             if len(points) == 1:
                 _, x, y, _ext = points[0]
                 via, via_orient = vias.get(0, (None, None))
@@ -550,7 +631,8 @@ class DefParser:
                 # so a '+ NONDEFAULTRULE X' sitting after the wiring belongs to neither
                 # part and was dropped silently - leaving the net on the default rule,
                 # which reads a 2W2S clock net as 1W1S.
-                ndr_match = CompiledRe.re_ndr.search(statement)
+                ndr_match = (CompiledRe.re_ndr.search(statement)
+                             if 'NONDEFAULTRULE' in statement else None)
                 rule = ndr_match['ndr'] if ndr_match else 'default'
                 if text:
                     self.__add_regular_wiring(net, text, rule)
@@ -580,7 +662,10 @@ class DefParser:
         The grammar allows it on either side of the wiring, so it is read from the whole
         statement rather than from the header.
         """
-        use_match = CompiledRe.re_net_use.search(statement)
+        # The pattern needs the literal 'USE', so a statement without it cannot match and
+        # the scan over the whole statement is skipped. A guard has to be a *superset* of
+        # the pattern's own requirement - '+ USE' would be wrong, since '+\tUSE' matches.
+        use_match = CompiledRe.re_net_use.search(statement) if 'USE' in statement else None
         if use_match:
             net.use = use_match.groupdict()['use']
 
@@ -608,16 +693,49 @@ class DefParser:
             return False
 
     def fetchLineGz(self) -> AnyStr:
-        self.CURRENT_LINE_CNT += 1
-        if self.LINE_CNT_STEP and self.CURRENT_LINE_CNT % self.LINE_CNT_STEP == 0:
-            self.puts(f'Read DEF {self.CURRENT_LINE_CNT} lines')
+        self.__count_line()
         return self.fh.readline().decode()
 
     def fetchLine(self) -> AnyStr:
-        self.CURRENT_LINE_CNT += 1
-        if self.LINE_CNT_STEP and self.CURRENT_LINE_CNT % self.LINE_CNT_STEP == 0:
-            self.puts(f'Read DEF {self.CURRENT_LINE_CNT} lines')
+        self.__count_line()
         return self.fh.readline()
+
+    def __count_line(self) -> None:
+        """One line read: the counter, the heartbeat, and the cancel check.
+
+        The heartbeat carries the rate and, inside a section whose size the header declares,
+        what is left of it - the only estimate available, since a DEF does not say how long it
+        is. It is flushed every time: to a pipe, an unflushed line is a line the job log does
+        not have.
+        """
+        self.CURRENT_LINE_CNT += 1
+        now = time.time()
+        if now - self.__reported_at < self.HEARTBEAT_SECONDS:
+            return
+        self.__reported_at = now
+        elapsed = now - self.__started_at
+        rate = self.CURRENT_LINE_CNT / elapsed if elapsed > 0 else 0.0
+        self.puts(f"Read DEF {self.CURRENT_LINE_CNT:,} lines  {rate:,.0f} lines/s  "
+                  f"{elapsed / 60:.0f} min elapsed{self.__section_eta(now, rate)}",
+                  flush=True)
+        if self.cancel is not None and self.cancel():
+            raise Cancelled(f"stopped after {self.CURRENT_LINE_CNT:,} lines")
+
+    def __section_eta(self, now, rate) -> AnyStr:
+        """What is left of the section being read, when its header declared a size."""
+        pair = _SECTION_PROGRESS.get(self.__section)
+        if pair is None:
+            return ""
+        done = getattr(self, pair[0])
+        declared = getattr(self, pair[1])
+        if not declared:
+            return f"  {self.__section} {done:,}"
+        span = now - self.__section_started_at
+        pace = (done - self.__section_start_count) / span if span > 0 else 0.0
+        if pace <= 0:
+            return f"  {self.__section} {done:,}/{declared:,}"
+        return (f"  {self.__section} {done:,}/{declared:,}"
+                f"  ~{(declared - done) / pace / 60:.1f} min left")
 
     @property
     def designName(self) -> AnyStr:
@@ -631,6 +749,21 @@ class DefParser:
 
     def getNdrRules(self) -> Dict[AnyStr, DefNdrRule]:
         return self.__ndrs
+
+    def getStats(self) -> Dict:
+        """What the file was like, as opposed to what was parsed out of it.
+
+        Reported by the metal flow so its log describes its input: a run's cost follows
+        the shape of the text - statements per net, points per statement, which layers are
+        named - and none of that is visible in a DEF's header or in a counter of what was
+        dropped.
+        """
+        return {"forms": self.n_forms, "points": self.n_points,
+                "lines": self.CURRENT_LINE_CNT,
+                "statement_lines_max": self.statement_lines_max,
+                "statement_chars_max": self.statement_chars_max,
+                "points_max": self.points_max,
+                "layers_used": sorted(self.layers_used)}
 
     def getComponent(self, comp_name: AnyStr) -> DefComponent:
         return self.__components[comp_name]

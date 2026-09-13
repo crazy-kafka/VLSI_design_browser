@@ -22,6 +22,12 @@ class LefLayer:
         self.spacing = 0.0
         self.area = 0.0
 
+        # Set when the stanza carried a `PROPERTY LEF58_REGION`: the layer's rules belong to
+        # a region over a base layer rather than describing a track system of the stack, so
+        # it is not a routing layer. A flag of its own because `region`/`based_layer` below
+        # are parsed from the payload and can legitimately come out empty - a real file
+        # spells the clause `REGION FB1 BASEDLAYE R M2`, with a space inside the keyword.
+        self.region_layer = False
         self.region = None
         self.based_layer = None
 
@@ -39,6 +45,7 @@ Lef Layer {self.name}
     area        {self.area}
     region      {self.region}
     based_layer {self.based_layer}
+    region_layer {self.region_layer}
 '''
 
 
