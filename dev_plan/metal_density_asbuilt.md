@@ -1076,6 +1076,74 @@ about, caught by comparing grids rather than counters.
 (counters exactly, grids to float32 rounding) and the cutter's own invariant, since a split
 statement would still parse and still draw, just in the wrong place.
 
+## What each change bought
+
+Every number below is measured on a committed or reproducible fixture; the fixtures are named so
+each can be re-run. "Cost" is what the change asks of the codebase and the reader, not just its
+lines.
+
+### On the project's own test cases
+
+| # | change | gain, measured | fixture | cost |
+|---|---|---|---|---|
+| 1 | form scan refuses a position on its first character, and asserts the digit before the ~40-keyword lookahead | **182 -> 37 ns per character** (4.9x), match stream identical over 16,000 forms | routing-shaped text, both spellings | two pattern constants; the equivalence is argued in the comment and pinned by the fixture goldens |
+| 2 | tokeniser's keyword lookahead replaced by a set lookup per matched word | 890 -> 515 ns per short tail (1.73x, measured in review); 0 point divergences over 19,646 real tails | `sample_data/real/nangate45/gcd_nangate45.def` | via *names* for junk keywords differ (`HAPE` vs `SHAPE`); no metric path reads a via name, and a test parses the real file both ways to prove the shapes and counters match |
+| 3 | `re_glued_star.sub` and the clause scans guarded by literal substring checks | `re.sub` alone was 6.7 % of the gcd parse; each guard is a provable no-op otherwise | gcd DEF, and every DEF | three one-line guards |
+| 4 | a `+ VIA` array's points are counted on the net instead of building one shape each | part of 25.68 -> 10.72 s below; removes one object per via point, 85 % of a real DEF's shape count | via-heavy synthetic | a net field, a stream counter fold; the points must still be *scanned* (the `*` state crosses forms), which a test pins |
+| 5 | pass 2 skips components, the decoded DEF is released, `__slots__` on both wire types | 41.3 -> 31.0 s (1.34x); GC 4.96 -> 1.75 s; 3.36 M objects no longer rebuilt | 3.36 M-instance synthetic (the real design's instance count) | one existing flag finally used, one `del`, two class attributes |
+| 6 | everything above, together, on the dominant shape class | **25.68 -> 10.72 s (2.4x)**; 12.5 -> 5.2 us per via shape; GC 1.23 -> 0.77 s | via-heavy synthetic, 2 M via points | - |
+| 7 | the same, on the shapes a signal-dominated DEF has | 10.55 -> 9.52 s (1.11x) | `generate_metal.py --stress 200000`, the Phase 5 configuration | the 2-point-wire path is ~40 us per net over ten per-statement scans; no single change reaches it |
+| 8 | the same, on a real routed DEF | 59.2 -> 49.1 ms (1.21x) | the vendored gcd DEF | - |
+| 9 | the wiring pass across processes (`--jobs N`) | 65 -> 34.3 s at four workers (1.9x), 28.5 s at eight (2.3x) on a 9.1 M-line synthetic; **+13 % at one worker**, which is why the default does not use it | `--real-shape --via-nets 2000000` | a new module, a CLI flag, its own tests; every worker re-reads the file (one line-level scan each, deliberately) |
+| 10 | diagnostics (no speed claim) | the log now carries the emitted count, the input's shape, per-stage seconds, RSS and GC - the evidence that made the real-design estimate below possible at all | `tests/test_metal_diagnostics.py` | ~150 lines of reporting |
+
+Equivalence throughout: the suite went from 500 to **526 tests**, and the pinned real-file numbers
+never moved (gcd 2504 via / 5 jogs / 2327 rects / `metal2` mean 0.2527). Three proposed fast paths
+were dropped before landing because a counterexample showed they changed the map.
+
+### Estimated on the real design
+
+The run's own counters, times the measured per-shape constants. The last row is the one term
+nobody has ever counted, and it is why the estimate is a range rather than a number.
+
+| term | the run's count | before | after | effect |
+|---|---|---|---|---|
+| via points | 124,711,987 | 12.5 us | 5.2 us | ~910 s saved |
+| signal jogs | 12,964,342 | ~13 us | ~13 us | unchanged |
+| shapes on undefined layers | 4,539,783 | ~13 us | ~13 us | unchanged |
+| zero-extent shapes | 4,517,711 | ~13 us | ~13 us | unchanged |
+| component objects | 3,355,697 x 2 passes | 41 s | 31 s | ~10 s saved |
+| line reading | ~30 M lines | 4.2 us each | unchanged | ~126 s, not a target |
+| LEF passes | 221 files x 2 | 21 s | unchanged | not a target |
+| garbage collection | - | 3-12 % of the run | less on the via class | ~100-200 s saved |
+| **shapes actually measured** | **never reported** | ~12 us | ~10-12 us | **the open term** |
+
+Those terms that *can* be priced save **~1,000-1,100 s, about 1.2x** - and that is the floor,
+because it counts only the shapes the log mentions. The rest of the 7005 s is the 5100-odd
+seconds of shapes the run never counted, and those go through the same parse path the changes
+1-3 sped up: at the via-heavy mix, which is what the counters say the file mostly is, that is
+another ~2x. So the honest estimate for the single-core changes is **1.2x at worst and 2.1x at
+best, 7005 s -> 5,900 s or -> 3,400 s**, and which end it lands on is exactly what the missing
+counter decides.
+
+With `--jobs 4` on top - ~3.9x predicted on the residual, from the scaling model in Phase 16 -
+that is **~18 to ~33 minutes** against the 1 h 57 m it took, and the proposed target of 15
+minutes is reachable only if the file is as via-dominated as its counters suggest. One
+instrumented run settles it: the `metal-summary:` line reports the emitted count, the shape
+classes and the stage split, and `--profile` reports which function holds the time.
+
+### Costs worth stating plainly
+
+- **The parallel pass costs CPU to save wall clock** - N extra file scans plus N interpreter
+  startups - and it is off by default because at one worker it is 13 % *slower* than not using it.
+- **Every change here is a constant-factor change to a per-shape loop.** Nothing made the work
+  asymptotically smaller: the design still parses every shape, and the only way past that is a
+  parser that emits coordinates directly instead of one object per segment, which is a rewrite
+  rather than an optimisation.
+- **The failure mode is silent.** A fast path that mis-reads geometry produces no error: the
+  counters stay identical and the map is wrong, which is what the first pooled build did at 0.77 %
+  of the area. Grids, not counters, are what the equivalence tests compare.
+
 ## Where this ended up
 
 | phase | state |
@@ -1096,6 +1164,8 @@ statement would still parse and still draw, just in the wrong place.
 | 12 | the real files, vendored, and `CLASS CORE SPACER` read as a macro |
 | 13 | the LEF's own `OBS` blockage in place of a layer count |
 | 14 | property payloads, region layers, and the pitch perpendicular to the tracks |
+| 15 | the 7005 s routing read: what it costs, and the changes that cut it |
+| 16 | the wiring pass across processes, and the measurement that redrew it |
 
 Nine bugs were found by checks rather than by reading, and four of them would have produced a
 wrong map with no error at all: the scope lookup that left the default view empty, the missing
@@ -1104,6 +1174,17 @@ the entire power grid, and the `mergeOrient` composition that mirrored sub-block
 its parent. The rest were performance or plumbing: two 51x and 2x pathologies in the rasteriser,
 the Python loop over millions of shapes, the 1448 MB peak, and a generator that collided its own
 component names.
+
+The performance work added five more of the same kind. Three were caught by an adversarial review
+before any code was written: a fast path that would have mis-resolved a `*` coordinate across a
+statement's forms, one that would have dropped a real rectangle carried by a single-point routed
+form, and one that counted shapes on undeclared layers four different ways - the middle one takes
+`n_via` from 2504 to 66 on the real DEF. Two more were caught by the new tests: a cancel callable
+that would never have fired, because the parser parses from its constructor and the callable had
+been assigned afterwards; and a parallel cutter that took a `NONDEFAULTRULES` body without its
+section header, so nets naming a rule fell back to layer defaults and **0.77 % of the metal area
+went missing while every counter matched**. The last one is the clearest argument in this document
+for comparing grids rather than counters.
 
 ## The sample's quick start
 
