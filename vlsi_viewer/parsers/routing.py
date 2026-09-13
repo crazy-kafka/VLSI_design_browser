@@ -109,9 +109,16 @@ class TechRouting:
     panel is built from this order.
     """
 
-    def __init__(self, layers: Sequence[RouteLayer]):
+    def __init__(self, layers: Sequence[RouteLayer], filtered_layers: Sequence = (),
+                 stack_offset: int = 0):
         self.layers: List[RouteLayer] = list(layers)
         self._by_name = {layer.name: layer for layer in self.layers}
+        # Only ever non-empty on the result of `trimmed`, which is the one producer of both:
+        # the names this stack dropped, and how many it dropped *below* the kept block. Both
+        # are needed to tell a layer the user excluded from a layer the LEF never declared,
+        # and to keep the bottom-of-stack rules anchored to the whole stack.
+        self.filtered_layers: frozenset = frozenset(filtered_layers)
+        self.stack_offset = int(stack_offset)
 
     def __len__(self):
         return len(self.layers)
@@ -136,6 +143,55 @@ class TechRouting:
     @property
     def vertical(self) -> List[RouteLayer]:
         return [layer for layer in self.layers if not layer.is_horizontal]
+
+    def trimmed(self, lo: Optional[int] = None, hi: Optional[int] = None) -> "TechRouting":
+        """A stack holding only positions ``lo..hi`` of this one - 1-based and inclusive.
+
+        The numbers are the panel's row numbers, which `ui_metal` labels from 1: they are what
+        a user reads off the screen, so they are what the flags take. They are **not** stable
+        across tech LEFs, filters or code versions, which is why the caller logs the resolved
+        names rather than only the numbers.
+
+        A new object, not an edit, because ``_by_name`` would otherwise keep resolving the
+        dropped layers: the panel, the blockage model and this lookup have to agree about
+        which layers exist. The kept layers are re-indexed from zero - ``RouteLayer.index`` is
+        set at construction and every consumer indexes grids by it - and the dropped names
+        travel with the result, because a layer excluded by the caller is not a layer the LEF
+        failed to declare (see ``ShapeStream._layer``).
+
+        Out-of-range bounds raise rather than clamp. An empty stack does not fail where the
+        mistake is: ``MetalData.kinds()`` returns no maps, and the window indexes entry zero of
+        that. ``lo=0`` is the same trap in a quieter form, because ``layers[lo - 1:hi]`` is
+        ``layers[-1:hi]`` - empty on any stack shorter than a dozen, and silently so.
+        """
+        first = 1 if lo is None else int(lo)
+        last = len(self.layers) if hi is None else int(hi)
+        if first < 1 or last < first or last > len(self.layers):
+            raise ValueError(
+                f"layer range {first}..{last} does not fit a stack of {len(self.layers)} "
+                f"routing layer(s); positions are 1-based and both ends are inclusive")
+        kept = [RouteLayer(layer.name, index, layer.direction, layer.pitch, layer.width,
+                           layer.spacing)
+                for index, layer in enumerate(self.layers[first - 1:last])]
+        dropped = [layer.name for layer in self.layers[:first - 1]]
+        dropped += [layer.name for layer in self.layers[last:]]
+        return TechRouting(kept, dropped, stack_offset=self.stack_offset + first - 1)
+
+    def fallback_layers(self, depth: int) -> List[RouteLayer]:
+        """The bottom ``depth`` layers of the **untrimmed** stack, as far as they are kept.
+
+        What a macro that declares no ``OBS`` is assumed to block. Counting from the bottom of
+        what is being *measured* instead would move the guess onto the user's range: with
+        ``--min-layer 2`` and a depth of 4 it would block M2-M5, so M5 - a layer they asked to
+        keep - would lose capacity for a reason they did not ask for. Anchored here, a trimmed
+        run is exactly the untrimmed run restricted to the kept layers, which is what a user
+        will assume and what the equivalence test asserts.
+
+        Two consequences the caller reports rather than hides: a depth larger than the stack
+        reaches the whole of it, so the fallback affects fewer layers than its count, and a
+        depth the range has passed blocks nothing inside it.
+        """
+        return [layer for layer in self.layers if layer.index + self.stack_offset < depth]
 
     @classmethod
     def read(cls, lef_paths: Sequence[AnyStr]) -> "TechRouting":
@@ -198,7 +254,8 @@ class TechRouting:
 # assert on them, and a single source is what keeps the log's names and the counters' names
 # from drifting apart.
 SHAPE_COUNTERS = (("emitted", "n_emitted"), ("vias", "n_via"), ("jogs", "n_jog"),
-                  ("unknown", "n_unknown_layer"), ("unusable", "n_usable_layer_missing"),
+                  ("unknown", "n_unknown_layer"), ("filtered", "n_filtered"),
+                  ("unusable", "n_usable_layer_missing"),
                   ("degenerate", "n_degenerate"), ("polygon_edges", "n_polygon_edge"))
 
 # Of those, the ones that describe the *text* rather than the placements. A block placed K times
@@ -206,7 +263,8 @@ SHAPE_COUNTERS = (("emitted", "n_emitted"), ("vias", "n_via"), ("jogs", "n_jog")
 # does contain K copies of that wiring, and a summary that disagreed with the grids would be
 # worse than no summary. `emitted` is the exception - the stream counts it per placement already,
 # so that its own count matches what its sink was handed.
-PER_PLACEMENT_COUNTERS = ("vias", "jogs", "unknown", "unusable", "degenerate", "polygon_edges")
+PER_PLACEMENT_COUNTERS = ("vias", "jogs", "unknown", "filtered", "unusable", "degenerate",
+                          "polygon_edges")
 
 
 class ShapeStream:
@@ -235,6 +293,12 @@ class ShapeStream:
     def __init__(self, tech: TechRouting, sink, db_unit=None, ndrs=None, frames=None,
                  batch: int = DEFAULT_BATCH, min_segment=None):
         self.tech = tech
+        # Layers the caller's range excluded, taken from the tech rather than passed in: the
+        # stream is built in three places (the sequential path, a worker, the parent's chunks)
+        # and deriving it removes an edit at each - and with it the failure mode where a
+        # worker and its parent disagree, which would leave the map right and only the
+        # diagnostics wrong. That is the one kind of bug nothing notices.
+        self.filtered_layers: frozenset = frozenset(getattr(tech, "filtered_layers", ()))
         # Set by configure() when the DEF is the source of these, because they are only
         # known partway through parsing it.
         self.db_unit = None if db_unit is None else float(db_unit)
@@ -264,6 +328,7 @@ class ShapeStream:
         self.n_polygon_edge = 0
         self.n_usable_layer_missing = 0
         self.n_unknown_layer = 0
+        self.n_filtered = 0
         self.n_emitted = 0
 
     def configure(self, db_unit, ndrs) -> None:
@@ -282,7 +347,13 @@ class ShapeStream:
     def _layer(self, name) -> Optional[RouteLayer]:
         layer = self.tech.get(name)
         if layer is None:
-            self.n_unknown_layer += 1
+            # A layer the caller left outside their range is not the same as one the LEF
+            # does not define, and only one of the two is worth a warning: the first is a
+            # choice, the second is data that surprised us.
+            if name in self.filtered_layers:
+                self.n_filtered += 1
+            else:
+                self.n_unknown_layer += 1
         elif not layer.usable:
             self.n_usable_layer_missing += 1
         return layer

@@ -250,7 +250,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"Metal mode · {self._metal.rows}×{self._metal.cols} grid @ "
                 f"{self._metal.grid_size:g} um · die {x1 - x0:g}×{y1 - y0:g} um · "
-                f"{len(self._metal.layers)} layers · top {self._metal.top_name}")
+                f"{self._metal.stack_note} · top {self._metal.top_name}")
             return
         if self._physical is not None:
             self.statusBar().showMessage(

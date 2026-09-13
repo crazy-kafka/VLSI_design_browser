@@ -390,14 +390,28 @@ class CellDetailPanel(QWidget):
         observed = blockage.get("obs_cells", 0)
         guessed = blockage.get("fallback_cells", 0)
         depth = self.data.macro_block_layers
+        # The fallback counts from the bottom of the *whole* stack, so the count is not always
+        # the answer once a range is being measured: the layers it did reach are named when it
+        # is not, so a reader does not go looking for capacity that was never taken. Empty
+        # when the flag is off, which blocks nothing whatever the macros declare.
+        names = blockage.get("fallback_layer_names") or []
+        if depth <= 0:
+            falls_back = ""
+        elif len(names) == depth:
+            falls_back = f"the bottom {depth} layer(s) of the stack"
+        elif names:
+            falls_back = (f"{depth} layer(s) of the whole stack, which is "
+                          f"{', '.join(names)} here")
+        else:
+            falls_back = "no layer inside the measured range"
         if observed and guessed:
-            return (f"capacity: less each macro's OBS; {guessed} declare none and block the "
-                    f"bottom {depth} layer(s)")
+            return (f"capacity: less each macro's OBS; {guessed} declare none"
+                    + (f" and block {falls_back}" if falls_back else ""))
         if observed:
             return f"capacity: less each macro's own OBS"
-        if guessed:
-            return (f"capacity: less macro area on the bottom {depth} layer(s) - no OBS in "
-                    f"the LEF to say which")
+        if guessed and falls_back:
+            return (f"capacity: less macro area on {falls_back} - no OBS in the LEF to say "
+                    f"which")
         return "capacity: no macro blocks anything"
 
     # -- rendering -------------------------------------------------------------------

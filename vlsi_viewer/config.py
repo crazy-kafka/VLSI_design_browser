@@ -23,6 +23,9 @@ DEFAULT_METAL_GRID_SIZE = 10.0
 # blocks and where, and that is what the metric uses; this is for the libraries that stay
 # silent, where the alternative is assuming nothing blocks at all. The bottom layers are the
 # guess because macros are built from the lower metals and the upper ones route over them.
+# Counted from the bottom of the *whole* stack the tech LEF declares, before any
+# --min-layer/--max-layer: a range the caller asked for must not move the guess onto a layer
+# they asked to keep.
 DEFAULT_MACRO_BLOCK_LAYERS = 4
 
 # Guard on the number of bins in a metal grid. A 20 mm die at a 10 um grid is 4M bins per

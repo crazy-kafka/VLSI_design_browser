@@ -37,6 +37,20 @@ def metal():
                            [f"{SAMPLE}/cells.lef"], [f"{SAMPLE}/tech.lef"], grid_size=10.0)
 
 
+@pytest.fixture(scope="module")
+def trimmed():
+    """The same sample measured over M4..M9: a range in the middle, so both ends are cut."""
+    import contextlib
+    import io
+
+    from vlsi_viewer.metal import build_metal
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        return build_metal([f"{SAMPLE}/top.def", f"{SAMPLE}/sub.def"],
+                           [f"{SAMPLE}/cells.lef"], [f"{SAMPLE}/tech.lef"], grid_size=10.0,
+                           min_layer=4, max_layer=9)
+
+
 @pytest.fixture
 def window(app, metal):
     from vlsi_viewer.ui_main import MainWindow
@@ -141,6 +155,42 @@ def test_status_bar_reports_the_die_size(window, metal):
     x0, y0, x1, y1 = metal.extent
     message = window.statusBar().currentMessage()
     assert f"die {x1 - x0:g}×{y1 - y0:g} um" in message
+
+
+def test_a_trimmed_window_shows_only_the_range(app, trimmed):
+    """Rows, map list and status bar all come from the measured stack, and say which it is.
+
+    `6 layers` would read as a short stack rather than a range somebody asked for, so the
+    status bar names both ends - the one place on screen where the numbers can be checked
+    against the flags.
+    """
+    from vlsi_viewer.ui_main import MainWindow
+
+    win = MainWindow(metal=trimmed)
+    try:
+        listed = list(win._panel._boxes)
+        assert listed == ["M4", "M5", "M6", "M7", "M8", "M9"]
+        assert [layer.name for layer in trimmed.layers] == listed
+        assert win.statusBar().currentMessage().count("layers M4..M9 (6 of 12)") == 1
+    finally:
+        win.close()
+
+
+def test_the_capacity_note_counts_the_fallback_from_the_whole_stack(app, trimmed):
+    """The sample's macro that declares no OBS blocks the stack's bottom four, M1..M4 - and
+    of those only M4 is being measured here, so the note has to say M4 rather than "4 layers".
+    """
+    from vlsi_viewer.ui_main import MainWindow
+
+    assert trimmed.blockage["fallback_layer_names"] == ["M4"]
+    win = MainWindow(metal=trimmed)
+    try:
+        win._detail.on_cell(0, 0)
+        note = win._detail.detail_note.text()
+        assert "which is M4 here" in note
+        assert "bottom 4 layer(s)" not in note
+    finally:
+        win.close()
 
 
 def test_both_side_panes_are_resizable_not_fixed(window):
@@ -501,13 +551,18 @@ def test_the_note_says_when_nothing_is_blocked(tmp_path):
     QApplication.instance() or QApplication([])
 
     class _Data(MetalData):
-        def __init__(self, blockage):
+        def __init__(self, blockage, depth=4):
             super().__init__("t", [], 10.0, (0.0, 0.0, 10.0, 10.0), 1, 1, [], np.full((1, 1), 1.0),
-                             {}, 4, {}, [], blockage)
+                             {}, depth, {}, [], blockage)
 
     panel = CellDetailPanel(_Data({"obs_cells": 2, "fallback_cells": 0}), lambda: "L:")
     assert "OBS" in panel.detail_note.text()
     assert "no macro blocks" in CellDetailPanel(_Data({}), lambda: "L:").detail_note.text()
+    # A macro that declares nothing while the flag is off blocks nothing either - the note
+    # used to promise "the bottom 0 layer(s)".
+    silenced = _Data({"obs_cells": 0, "fallback_cells": 1,
+                      "fallback_layer_names": []}, depth=0)
+    assert "no macro blocks" in CellDetailPanel(silenced, lambda: "L:").detail_note.text()
 
 
 def test_leaving_the_grid_clears_the_readout(window):

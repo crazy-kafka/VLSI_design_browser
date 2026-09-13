@@ -45,7 +45,8 @@ def sample_argv(extra=None):
     return argv + list(extra or [])
 
 
-def check(grid_size=None, macro_block_layers=None, top=None) -> int:
+def check(grid_size=None, macro_block_layers=None, top=None, min_layer=None,
+          max_layer=None) -> int:
     """Build the metric and print what it says, without Qt."""
     import numpy as np
 
@@ -55,7 +56,8 @@ def check(grid_size=None, macro_block_layers=None, top=None) -> int:
     data = build_metal([os.path.join(HERE, "top.def"), os.path.join(HERE, "sub.def")],
                        [os.path.join(HERE, "cells.lef")],
                        [os.path.join(HERE, "tech.lef")],
-                       grid_size=grid_size, macro_block_layers=macro_block_layers, top=top)
+                       grid_size=grid_size, macro_block_layers=macro_block_layers, top=top,
+                       min_layer=min_layer, max_layer=max_layer)
 
     print(f"{data!r}")
     blocked = ", ".join(data.layers[index].name for index in data.blocked_layers) or "none"
@@ -117,6 +119,12 @@ def main(argv=None) -> int:
                              "(default: 4)")
     parser.add_argument("--top", default=None, metavar="NAME",
                         help="override the top block name")
+    parser.add_argument("--min-layer", "--min_layer", dest="min_layer", type=int, default=None,
+                        metavar="N",
+                        help="lowest routing layer to measure, as a 1-based position in the "
+                             "stack (the layer panel's row number)")
+    parser.add_argument("--max-layer", "--max_layer", dest="max_layer", type=int, default=None,
+                        metavar="N", help="highest routing layer to measure")
     args, extra = parser.parse_known_args(argv)
 
     missing = missing_files()
@@ -128,7 +136,8 @@ def main(argv=None) -> int:
 
     if args.check:
         return check(grid_size=args.grid_size,
-                     macro_block_layers=args.macro_block_layers, top=args.top)
+                     macro_block_layers=args.macro_block_layers, top=args.top,
+                     min_layer=args.min_layer, max_layer=args.max_layer)
 
     forwarded = list(extra)
     if args.grid_size is not None:
@@ -137,6 +146,10 @@ def main(argv=None) -> int:
         forwarded += ["--macro-block-layers", str(args.macro_block_layers)]
     if args.top is not None:
         forwarded += ["--top", args.top]
+    if args.min_layer is not None:
+        forwarded += ["--min-layer", str(args.min_layer)]
+    if args.max_layer is not None:
+        forwarded += ["--max-layer", str(args.max_layer)]
 
     # The real CLI, so the flags here cannot drift from the ones that exist.
     from vlsi_viewer.cli import main as cli_main

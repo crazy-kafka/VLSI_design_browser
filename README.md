@@ -133,7 +133,7 @@ python main.py verilog --verilog v1.v --compare_verilog v2.v --lef cells.lef --t
 | `json` | `--cell_info`, `--block_info`, `--compare_block_info` | compare, `--physical_mode` |
 | `verilog` | `--verilog`, `--lef`, `--top`, `--compare_verilog`, `--out` | compare only |
 | `def` | `--def`, `--lef`, `--top`, `--compare_def`, `--out` | compare, `--physical_mode` |
-| `metal` | `--def`, `--lef`, `--tech-lef`, `--top` | `--grid-size`, `--macro-block-layers`, `--min-segment-length`, `--jobs`, `--profile` |
+| `metal` | `--def`, `--lef`, `--tech-lef`, `--top` | `--grid-size`, `--min-layer`, `--max-layer`, `--macro-block-layers`, `--min-segment-length`, `--jobs`, `--profile` |
 
 Options shared by the first three: `--min-instances`, `--include-macros`, `--cache-dir`,
 `--force`, `--verbose`. `--grid_size` and `--contour_gap` apply to the two flows that can
@@ -143,6 +143,11 @@ per-net work has no dependency between nets, so it scales nearly linearly with c
 default) keeps it all in one process, and `--profile` prints where a build's time went. `N` is a
 cap rather than an instruction — a worker costs a spawned interpreter and a full scan of the DEF,
 so an input only a few megabytes across is parsed in one process whatever you ask for.
+`metal --min-layer N --max-layer N` measures a range of the stack instead of all of it, in the
+1-based positions the layer panel numbers its rows with: a design that routes `M2`–`B2` can leave
+out `M1` and the thick top metals, which add rows and grids without measuring anything. Wiring on
+the layers left out is counted as *filtered* rather than silently dropped, and the run logs the
+range by name, because the numbers only mean something against the stack they were counted in.
 Within a subcommand, physical mode and the compare flag are
 mutually exclusive, and `metal` has neither — nor the JSON pipeline's options, which it
 cannot act on: it converts nothing, builds no tree and caches nothing. In physical mode, hover the layout view to read
@@ -380,10 +385,17 @@ pre-merged (exact) so the geometry scales to large (10M-instance) subsystems.
 
     python main.py metal --def top.def sub.def --lef cells.lef --tech-lef tech.lef
     python main.py metal --def core.def --lef cells.lef --tech-lef tech.lef --grid-size 5
+    python main.py metal --def chip.def --lef cells.lef --tech-lef tech.lef \
+        --min-layer 2 --max-layer 12
 
 Placement tells you where the cells are; this tells you where the **metal** is. It reads a
 routed DEF and the tech LEF that defines its routing layers, and renders a per-layer heat map
 of routing utilisation.
+
+`--min-layer`/`--max-layer` restrict that to a range of the stack, counted from 1 at the bottom
+in the order the tech LEF declares its routing layers — the same numbers the layer panel shows.
+A design whose router works `M2`–`B2` leaves the rest out, and the run says which layers it
+resolved the numbers to rather than leaving you to count rows.
 
 ### What the number means
 
@@ -414,7 +426,7 @@ column the two tables fought over the same height, and the loser went behind a s
 | **vias** | omitted. A via is a routing point with no extent, so it has no wire area; on a real routed DEF they are more than half of all parsed segments |
 | **non-preferred jogs** | dropped below one track pitch (a horizontal blip on a vertical layer used to shift track). `--min-segment-length 0` keeps every one; short segments running *along* their layer are never dropped |
 | **power** | counted separately from signal. A power stripe is fixed and deliberate, so merging the two makes a region under a stripe read as a hotspot; the panel's net-class selector switches between them |
-| **macros** | a hard macro removes capacity where its LEF `OBS` says it obstructs, on the layers it names — a macro that blocks `metal2` and `metal4` but not `metal3` is read that way. Obstructions covering under 10 % of the macro are pin-access bites, not keep-outs, and are ignored. Only cells whose `CLASS` is not `CORE` count. A macro whose LEF declares no `OBS` cannot be judged from data, so it falls back to the bottom `--macro-block-layers` layers (default 4) over its whole footprint; `0` cancels that guess, not the geometry |
+| **macros** | a hard macro removes capacity where its LEF `OBS` says it obstructs, on the layers it names — a macro that blocks `metal2` and `metal4` but not `metal3` is read that way. Obstructions covering under 10 % of the macro are pin-access bites, not keep-outs, and are ignored. Only cells whose `CLASS` is not `CORE` count. A macro whose LEF declares no `OBS` cannot be judged from data, so it falls back to the bottom `--macro-block-layers` layers (default 4) over its whole footprint; `0` cancels that guess, not the geometry. The count is from the bottom of the *stack*, not of the range being measured — `--min-layer 2 --macro-block-layers 4` still blocks `M1`–`M4`, so a layer you asked to keep never loses capacity to it |
 | **45° segments** | exact, as their Minkowski sum with a square; a bounding box would over-count a 10 µm diagonal about 25× |
 
 The **cell detail** pane shows the hovered cell's consumed area, capacity and utilisation for

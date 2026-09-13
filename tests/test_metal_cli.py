@@ -36,6 +36,63 @@ def test_metal_defaults():
     assert args.verbose is False
 
 
+def test_the_layer_range_defaults_to_the_whole_stack():
+    args = parse_args(METAL_ARGS)
+    assert args.min_layer is None and args.max_layer is None
+
+
+def test_the_layer_range_parses_in_both_spellings():
+    """Hyphens for the group's other flags, underscores for the two `build_metal` takes."""
+    assert parse_args(METAL_ARGS + ["--min-layer", "2", "--max-layer", "11"]).min_layer == 2
+    underscored = parse_args(METAL_ARGS + ["--min_layer", "2", "--max_layer", "11"])
+    assert (underscored.min_layer, underscored.max_layer) == (2, 11)
+
+
+def test_the_layer_range_reaches_the_builder(monkeypatch, capsys):
+    """A flag the CLI parses and then drops looks exactly like a flag that works.
+
+    `sample_data/metal/quickstart.py` had one of those - its `--check` path discarded the
+    arguments it did not know - so the wiring is pinned rather than assumed.
+    """
+    seen = {}
+
+    def fake(def_paths, lef_paths, tech_paths, **kwargs):
+        seen.update(kwargs)
+        raise ValueError("recorded")
+
+    monkeypatch.setattr("vlsi_viewer.metal.build_metal", fake)
+    assert main(METAL_ARGS + ["--min_layer", "2", "--max_layer", "11"]) == 1
+    assert (seen["min_layer"], seen["max_layer"]) == (2, 11)
+    assert "recorded" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("extra", [["--min-layer", "0"], ["--min-layer", "5", "--max-layer", "3"],
+                                   ["--max-layer", "99"]])
+def test_a_range_past_the_stack_errors_without_a_traceback(extra, capsys):
+    """`--min-layer 0` is the trap: `layers[lo - 1:hi]` is `layers[-1:hi]`, which is empty.
+
+    An empty stack does not fail where the mistake is - it fails when the window asks for its
+    first map - so the range is refused up front and reported like any other bad input.
+    """
+    assert main(METAL_ARGS + extra) == 1
+    err = capsys.readouterr().err
+    assert "error:" in err and "layer range" in err
+    assert "Traceback" not in err
+
+
+def test_the_help_says_how_the_range_is_counted(capsys):
+    """The number is a stack position, and the fallback counts from the bottom of the whole
+    stack - neither is guessable from the flag's name."""
+    with pytest.raises(SystemExit):
+        parse_args(METAL_ARGS + ["--help"])
+    # Unwrapped: argparse breaks the help to the terminal width, so a phrase can carry a
+    # newline in the middle of it.
+    out = " ".join(capsys.readouterr().out.split())
+    assert "1-based position in the stack" in out
+    assert "reported as filtered" in out
+    assert "bottom layers of the whole stack" in out
+
+
 def test_metal_flags():
     args = parse_args(METAL_ARGS + ["--grid-size", "2.5", "--macro-block-layers", "0",
                                     "--min-segment-length", "0", "--top", "CORE",

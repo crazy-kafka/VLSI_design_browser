@@ -448,6 +448,86 @@ def test_an_unknown_scope_is_rejected(tmp_path):
         data.set_scope("bogus")
 
 
+# -- a range of the stack ------------------------------------------------------------
+
+def test_trimming_to_a_range_measures_the_kept_layers_identically(tmp_path):
+    """The oracle for the feature: a trimmed run is the untrimmed run, restricted.
+
+    Two macros, one of each kind - SRAM declares OBS on M5, ROM declares none and so falls
+    back to the layer count - because that fallback is where the two runs could part company.
+    Anchored to the *measured* part it would block M4/M5 instead of M3/M4, so M4, a layer the
+    range keeps, would lose 16 um^2 for a reason nobody asked for.
+    """
+    lef = _macro_lef(obs=[("M5", [(0.0, 0.0, 4.0, 4.0)])]) + _macro_lef(name="ROM")
+    body = """\
+COMPONENTS 2 ;
+- m1 SRAM + PLACED ( 0 0 ) N ;
+- m2 ROM + PLACED ( 5000 5000 ) N ;
+END COMPONENTS
+""" + _nets([_one_horizontal_wire(x0=1000, x1=9000, y=1000, layer="M3"),
+             _one_horizontal_wire(x0=1000, x1=9000, y=1000, layer="M4"),
+             _one_horizontal_wire(x0=1000, x1=9000, y=1000, layer="M5")])
+    full = _build(tmp_path, body, macro_lef_text=lef, grid_size=5.0, macro_block_layers=2)
+    trimmed = _build(tmp_path, body, macro_lef_text=lef, grid_size=5.0, macro_block_layers=2,
+                     min_layer=2, max_layer=3)
+
+    assert [layer.name for layer in trimmed.layers] == ["M4", "M5"]
+    assert trimmed.totals["filtered"] > 0            # M3's wire, counted rather than lost
+    assert full.totals["filtered"] == 0
+    assert full.blockage["fallback_layers"] == trimmed.blockage["fallback_layers"] == 2
+    for name in ("M4", "M5"):
+        for ix, iy in ((0, 0), (1, 1)):
+            left = trimmed.cell_detail(ix, iy, f"L:{name}")
+            right = full.cell_detail(ix, iy, f"L:{name}")
+            assert left["consumed"] == pytest.approx(right["consumed"]), (name, ix, iy)
+            assert left["capacity"] == pytest.approx(right["capacity"]), (name, ix, iy)
+            assert left["util"] == pytest.approx(right["util"]), (name, ix, iy)
+    assert [layer.name for layer in full.layers] == ["M3", "M4", "M5"]
+
+
+def test_the_macro_fallback_still_names_where_it_landed(tmp_path):
+    """A range above the fallback leaves it blocking nothing, and the summary says so.
+
+    The flag's own text promises "the bottom N layers"; with `--min-layer 3` on this stack
+    the bottom two are both outside the range, so a capacity that is not missing has to be
+    distinguishable from one that is.
+    """
+    data = _build(tmp_path, _macro_body(), macro_lef=True, grid_size=10.0,
+                  macro_block_layers=2, min_layer=3)
+    assert [layer.name for layer in data.layers] == ["M5"]
+    assert data.blockage["fallback_layer_names"] == []
+    assert data.blocked_layers == []
+    assert data.cell_detail(0, 0, "L:M5")["capacity"] == pytest.approx(100.0)
+
+
+def test_the_fallback_names_the_kept_layers_it_does_reach(tmp_path):
+    """The other half: a depth of 2 with the range starting at 2 reaches M4 alone."""
+    data = _build(tmp_path, _macro_body(), macro_lef=True, grid_size=10.0,
+                  macro_block_layers=2, min_layer=2)
+    assert data.blockage["fallback_layer_names"] == ["M4"]
+    assert [data.layers[index].name for index in data.blocked_layers] == ["M4"]
+    assert data.cell_detail(0, 0, "L:M4")["capacity"] == pytest.approx(100.0 - 16.0)
+    assert data.cell_detail(0, 0, "L:M5")["capacity"] == pytest.approx(100.0)
+
+
+@pytest.mark.parametrize("kwargs", [{"min_layer": 0}, {"min_layer": 1, "max_layer": 0},
+                                    {"min_layer": 4}, {"max_layer": 4},
+                                    {"min_layer": 3, "max_layer": 2}])
+def test_a_range_outside_the_stack_is_refused(tmp_path, kwargs):
+    """Refused before anything is built, so the CLI reports it instead of the window."""
+    with pytest.raises(ValueError, match="layer range"):
+        _build(tmp_path, _nets([_one_horizontal_wire()]), **kwargs)
+
+
+def test_the_stack_note_says_the_range_a_trimmed_build_measured(tmp_path):
+    """`9 layers` reads as a short stack; `layers M4..M5 (2 of 3)` reads as a range."""
+    full = _build(tmp_path, _nets([_one_horizontal_wire()]), grid_size=10.0)
+    assert full.stack_note == "3 layers"
+    trimmed = _build(tmp_path, _nets([_one_horizontal_wire()]), grid_size=10.0,
+                     min_layer=2, max_layer=3)
+    assert trimmed.stack_note == "layers M4..M5 (2 of 3)"
+
+
 # -- robustness --------------------------------------------------------------------
 
 def test_no_nan_anywhere(tmp_path):

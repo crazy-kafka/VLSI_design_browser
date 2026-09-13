@@ -35,7 +35,7 @@ def _force_pool(monkeypatch, chunk=None):
         monkeypatch.setattr(parallel, "DEFAULT_CHUNK_STATEMENTS", chunk)
 
 
-def _build(jobs, monkeypatch=None, chunk=None):
+def _build(jobs, monkeypatch=None, chunk=None, **kwargs):
     """The committed sub-block, built with the pool or without it."""
     if chunk is not None:
         monkeypatch.setattr(parallel, "DEFAULT_CHUNK_STATEMENTS", chunk)
@@ -43,7 +43,7 @@ def _build(jobs, monkeypatch=None, chunk=None):
         return build_metal([os.path.join(SAMPLE, "sub.def")],
                            [os.path.join(SAMPLE, "cells.lef")],
                            [os.path.join(SAMPLE, "tech.lef")],
-                           grid_size=10.0, jobs=jobs)
+                           grid_size=10.0, jobs=jobs, **kwargs)
 
 
 def _heat(data, layers):
@@ -68,6 +68,23 @@ def test_the_pool_produces_the_same_map_as_one_process(tmp_path, monkeypatch):
     # a bin of 10 um holds a hundred of.
     assert np.allclose(_heat(pooled, layers), _heat(sequential, layers), rtol=1e-6, atol=1e-6)
     assert pooled.max_util(kind) == pytest.approx(sequential.max_util(kind), rel=1e-6)
+
+
+def test_a_trimmed_build_is_the_same_across_processes(monkeypatch):
+    """The trimmed stack has to reach the workers, and the count is what proves it does.
+
+    Comparing the pooled build with the sequential one cannot see a stream that does not know
+    which layers were left out: both paths would miss it and still agree. What a worker would
+    get wrong is only the diagnostics - its share of the out-of-range wiring would be reported
+    as a layer the LEF does not define, and the parent sums that into a user-facing warning.
+    """
+    _force_pool(monkeypatch, chunk=250)
+    sequential = _build(1, min_layer=4, max_layer=6)
+    pooled = _build(3, monkeypatch, min_layer=4, max_layer=6)
+    assert sequential.totals["filtered"] > 0
+    assert sequential.totals["unknown"] == 0
+    assert pooled.totals == sequential.totals
+    assert [layer.name for layer in pooled.layers] == ["M4", "M5", "M6"]
 
 
 def test_the_reported_input_size_does_not_depend_on_the_worker_count(monkeypatch):

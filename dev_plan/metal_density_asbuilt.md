@@ -1142,6 +1142,83 @@ once rather than once per placement, and it makes this summary incomparable with
 and the new tests in `tests/test_metal_hierarchy_frames.py` covering the frames and the
 multiplicity.
 
+## Phase 18 — measuring part of the stack
+
+The user's design routes `M2`–`B2`. Its stack also holds `M1` (the rail layer, reading 0.027) and
+`TM1`/`TM2`/`ALPA` (thick top metals, each 0.000), which are not routing layers and only add rows,
+grids and noise. `--min-layer` / `--max-layer` measure a range instead, and the plan is
+[`metal_layer_range.md`](metal_layer_range.md).
+
+**The number is the panel's row number.** `--min-layer 2 --max-layer 12` fits that stack exactly
+(`M1`=1, `M2`–`M8`=2–8, `FM1`=9, `FM2`=10, `B1`=11, `B2`=12), and the panel builds its rows with
+`enumerate(data.layers, start=1)` - so the flag names the row a user is looking at. Positions are a
+property of *(the tech LEF, the filters, the code version)*, though: dropping region layers already
+took that stack from 18 rows to 15, so the run logs the resolved ends **by name** -
+`metal: layers M2..B2 (11 of 15), ignoring M1, TM1, TM2, ALPA` - which is the only thing that lets
+someone confirm the number they typed. The summary carries the range and the excluded names too.
+
+**Two traps made validation mandatory, and both were found in review rather than in use.**
+
+- An empty trimmed stack does not fail where the mistake is: `MetalData.kinds()` returns `[]` and
+  `ui_layout.py:50` reads `self._kinds[0][0]` inside `MainWindow.__init__`, *outside* the CLI's
+  `try` - a traceback after a successful build and a printed summary.
+- `layers[lo - 1:hi]` with `lo = 0` is `layers[-1:12]` - empty on any stack shorter than a dozen,
+  and silently so.
+
+`trimmed` now rejects `lo < 1`, `hi < lo` and `hi > len(stack)`, and the CLI reports it as
+`error: layer range 0..12 does not fit a stack of 12 routing layer(s); positions are 1-based and
+both ends are inclusive`, exit 1, no traceback.
+
+**The trim is a new object, not an edit, and it re-indexes.** A third review finding: mutating
+`tech.layers` would leave `_by_name` resolving the dropped layers, so the panel and the wiring
+would be measuring two different stacks - visible only in the picture. And `TechRouting.__init__`
+only *copies* a list while `RouteLayer.index` is set at construction, so a naive slice leaves the
+kept layers numbered from `lo`: self-consistent for the grids, wrong for everything that reads a
+layer back by index.
+
+**A filtered layer is not a missing one**, and the trimmed stack alone cannot tell them apart -
+both are absent from `_by_name`. The dropped names travel on the tech object, `ShapeStream` derives
+them from it (three construction sites, one source), and the shape is counted as `filtered`: an
+`info` line, not a warning, because excluding a layer is a choice and `assert not data.warnings` is
+what a caller uses to mean "this run is clean". `layers_not_in_tech` and the blockage model's
+`unknown` bucket subtract the same names, so a trimmed run stops claiming the LEF does not define
+layers it does define. The existing `ignored` bucket (OBS below the 10 % footprint threshold) is a
+different concept and keeps its name.
+
+**The macro-blockage fallback stays anchored to the full stack**, which is the one deliberate
+behaviour decision beyond the flag. `--min-layer 2 --macro-block-layers 4` must still block
+`M1`–`M4`; anchored to the measured stack it would block `M2`–`M5`, and `M5` - a layer the caller
+asked to keep - would lose 16 um² of capacity for a reason they did not ask for. Anchored this way
+a trimmed run *is* the untrimmed run restricted to its layers, which is what the equivalence test
+asserts, and the log names the layers the fallback actually reached rather than only counting them.
+
+**Verified on the committed sample** (`--min-layer 2 --max-layer 12` against untrimmed):
+
+| | full | trimmed |
+|---|---|---|
+| layers | 12 | 11 (`M2`–`M12`) |
+| shapes measured | 79,277 | 79,181 |
+| skipped as `filtered` | 0 | 96 |
+| total shapes in the text | 79,820 | 79,820 (unchanged) |
+| jogs / polygon edges | 540 / 3 | 540 / 3 (unchanged) |
+| `unknown` | 0 | 0 |
+| `layers_not_in_tech` | `[]` | `[]` |
+| per-layer heat over the kept layers | - | **identical**, and `M1` really has metal (max 0.0820) |
+
+`python -m pytest -q` -> **568 passed** (531 before), with the vendored real-file numbers unmoved.
+The tests that matter most are the ones that would have passed while the map was wrong: the
+equivalence one was checked against a deliberately mis-anchored fallback and failed where it
+should (M5's capacity 9.0 against 25.0), and the pooled-build one was checked against a stream that
+forgets the range - which the existing pooled-vs-sequential comparison cannot see, because both
+paths would miss it.
+
+**Stage 2 is gated on a measurement rather than done by default.** Filtering saves a layer's
+geometry work (keep-out arithmetic, raster, grid) but not the parse: the object is still built and
+the tail still tokenised - and it *must* still be tokenised, because `*` coordinate reuse lives per
+*statement*, so skipping a tail mis-resolves a later form. Skipping the object construction for a
+filtered form is the next step, and whether it is worth the parser's hot path depends on the
+`filtered` share a real run reports.
+
 ## What each change bought
 
 Every number below is measured on a committed or reproducible fixture; the fixtures are named so

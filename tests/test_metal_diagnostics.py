@@ -211,3 +211,89 @@ def test_every_stage_of_a_build_is_announced_and_timed(tmp_path, caplog):
                          .split("metal-summary: ", 1)[1])
     # Announced, timed, and in the summary: the three places a stage has to appear.
     assert announced == set(summary["stages_s"])
+
+
+# -- a range of the stack ------------------------------------------------------------
+
+def _summaries(caplog):
+    """Every `metal-summary:` line in a recorded run, parsed."""
+    return [json.loads(record.getMessage().split("metal-summary: ", 1)[1])
+            for record in caplog.records
+            if record.getMessage().startswith("metal-summary: ")]
+
+
+def _messages(caplog):
+    return [record.getMessage() for record in caplog.records]
+
+
+def test_a_filtered_layer_is_counted_as_a_choice_not_as_missing_data(tmp_path, caplog):
+    """The DEF wires M1, M2 and M3; the range keeps M2.
+
+    M1 is in the tech LEF and was excluded by the caller; M3 is not in the tech LEF at all.
+    Both are absent from the trimmed stack, so only the caller knows which is which - and
+    only the second one is a warning.
+    """
+    path, tech = _files(tmp_path)
+    with caplog.at_level(logging.INFO, logger="vlsi_viewer.metal"):
+        with contextlib.redirect_stdout(io.StringIO()):
+            full = build_metal([path], [], [tech], grid_size=10.0)
+            known = full.totals["unknown"]           # M3, and nothing to do with the range
+            data = build_metal([path], [], [tech], grid_size=10.0, min_layer=2)
+
+    assert data.totals["filtered"] > 0
+    assert data.totals["unknown"] == known
+    assert data.totals["emitted"] < full.totals["emitted"]   # M1's wire is not measured
+    summary = _summaries(caplog)[-1]
+    assert summary["params"]["min_layer"] == 2 and summary["params"]["max_layer"] is None
+    assert summary["filtered_layers"] == ["M1"]
+    assert [layer["name"] for layer in summary["layers"]] == ["M2"]
+    # The run no longer claims the LEF does not define a layer it does define.
+    assert "M1" not in summary["layers_not_in_tech"]
+    assert "M3" in summary["layers_not_in_tech"]
+    # The resolved names, because the numbers are only meaningful against the stack they
+    # were counted in - and that stack moves with the LEFs, the filters and the code.
+    assert any("layers M2..M2 (1 of 2), ignoring M1" in message for message in _messages(caplog))
+
+
+def test_a_trimmed_build_warns_about_nothing(tmp_path, caplog):
+    """`assert not data.warnings` is what a caller uses to mean "this run is clean", and it
+    has to survive the flag: an out-of-range layer is a decision, not suspect data."""
+    tech = tmp_path / "tech.lef"
+    tech.write_text(TECH)
+    lef = tmp_path / "cells.lef"
+    lef.write_text("MACRO INV\n  CLASS CORE ;\n  SIZE 1 BY 1 ;\nEND INV\n")
+    path = tmp_path / "d.def"
+    path.write_text("VERSION 5.8 ;\nDESIGN d ;\nUNITS DISTANCE MICRONS 1000 ;\n"
+                    "DIEAREA ( 0 0 ) ( 10000 10000 ) ;\n"
+                    "COMPONENTS 1 ;\n- u1 INV + PLACED ( 0 0 ) N ;\nEND COMPONENTS\n"
+                    "NETS 1 ;\n- n1 ( u1 A )\n  + ROUTED M1 ( 0 0 ) ( 0 100 )\n"
+                    "  NEW M2 ( 0 0 ) ( 0 100 ) ;\nEND NETS\nEND DESIGN\n")
+    with caplog.at_level(logging.INFO, logger="vlsi_viewer.metal"):
+        with contextlib.redirect_stdout(io.StringIO()):
+            data = build_metal([str(path)], [str(lef)], [str(tech)], grid_size=10.0,
+                               min_layer=2)
+    assert data.totals["filtered"] > 0 and data.totals["unknown"] == 0
+    assert data.warnings == []
+    assert any("outside the requested range" in message for message in _messages(caplog))
+
+
+def test_a_macro_obstructing_only_a_filtered_layer_is_not_reported_as_a_missing_one(
+        tmp_path, caplog):
+    """The same distinction in the blockage model: its `unknown` bucket is about the LEF."""
+    tech = tmp_path / "tech.lef"
+    tech.write_text(TECH)
+    lef = tmp_path / "cells.lef"
+    lef.write_text("MACRO BLK\n  CLASS BLOCK ;\n  SIZE 4 BY 4 ;\n  SYMMETRY X Y ;\n"
+                   "  OBS\n    LAYER M1 ;\n      RECT 0 0 4 4 ;\n  END\nEND BLK\n")
+    path = tmp_path / "m.def"
+    path.write_text(DEF.replace("COMPONENTS 1 ;", "COMPONENTS 2 ;").replace(
+        "- u1 INV + PLACED ( 0 0 ) N ;",
+        "- u1 INV + PLACED ( 0 0 ) N ;\n- m1 BLK + PLACED ( 0 0 ) N ;"))
+    with caplog.at_level(logging.INFO, logger="vlsi_viewer.metal"):
+        with contextlib.redirect_stdout(io.StringIO()):
+            data = build_metal([str(path)], [str(lef)], [str(tech)], grid_size=10.0,
+                               min_layer=2)
+    assert data.blockage["unknown_layers"] == {}
+    assert data.blockage["obs_layers"] == []         # its only OBS layer is out of range
+    assert data.blocked_layers == []
+    assert data.blockage["ignored_cells"] == ["BLK"]

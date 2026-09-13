@@ -290,6 +290,105 @@ END metal{n}
     assert [layer.name for layer in _tech(tmp_path, body)] == ["metal1", "metal2", "metal10"]
 
 
+# -- a range of the stack ----------------------------------------------------------
+
+def test_trimmed_keeps_the_range_and_re_indexes_it(tmp_path):
+    """The kept layers are numbered from zero again, and no gaps.
+
+    Every grid is keyed by `layer.index` and the panel's rows are built in that order, so the
+    numbers have to stay a list position - a slice would leave the kept layers numbered from
+    `lo`, which is self-consistent for the grids and wrong for everything that reads a layer
+    back by index.
+    """
+    tech = _tech(tmp_path).trimmed(2, 3)
+    assert [layer.name for layer in tech] == ["metal2", "metal3"]
+    for index, layer in enumerate(tech):
+        assert layer.index == index
+        assert tech.layers[layer.index] is layer
+    assert tech["metal2"].direction == "VERTICAL"      # the layer's own rules came along
+    assert tech["metal2"].pitch == pytest.approx(0.19)
+
+
+def test_a_trimmed_stack_keeps_the_derived_views_in_step(tmp_path):
+    tech = _tech(tmp_path).trimmed(1, 2)
+    assert [layer.name for layer in tech.usable] == ["metal1", "metal2"]
+    assert [layer.name for layer in tech.horizontal] == ["metal1"]
+    assert [layer.name for layer in tech.vertical] == ["metal2"]
+    assert len(tech) == 2
+
+
+def test_a_trimmed_away_layer_is_no_longer_resolvable(tmp_path):
+    """A new object, not an edit: `_by_name` is what decides whether a layer exists.
+
+    Editing `layers` in place would leave the dropped names resolving, so the panel and the
+    wiring would be measuring two different stacks - and only the picture would show it.
+    """
+    full = _tech(tmp_path)
+    tech = full.trimmed(2, 3)
+    assert tech.get("metal1") is None
+    assert full.get("metal1") is not None              # the original is untouched
+    assert tech.filtered_layers == frozenset({"metal1"})
+
+
+def test_either_end_of_the_range_may_be_left_out(tmp_path):
+    tech = _tech(tmp_path)
+    assert [layer.name for layer in tech.trimmed(2)] == ["metal2", "metal3"]
+    assert [layer.name for layer in tech.trimmed(None, 2)] == ["metal1", "metal2"]
+    assert [layer.name for layer in tech.trimmed(1, 3)] == ["metal1", "metal2", "metal3"]
+    assert tech.trimmed().filtered_layers == frozenset()
+
+
+@pytest.mark.parametrize("lo, hi", [(0, None), (0, 3), (-1, 2), (2, 1), (1, 4), (None, 0),
+                                    (4, None), (1, 99)])
+def test_a_range_that_does_not_fit_the_stack_raises(tmp_path, lo, hi):
+    """Refused rather than clamped, because an empty stack does not fail where the mistake is.
+
+    `MetalData.kinds()` would come back with no maps at all and the window indexes the first
+    of them, a long way from the flag that caused it. `lo=0` is the same trap more quietly:
+    `layers[lo - 1:hi]` is `layers[-1:hi]` - empty on this stack, and silently *not* empty on
+    a one-layer one.
+    """
+    with pytest.raises(ValueError, match="layer range"):
+        _tech(tmp_path).trimmed(lo, hi)
+
+
+def test_the_macro_fallback_counts_from_the_untrimmed_stack(tmp_path):
+    """`--min-layer 2 --macro-block-layers 4` blocks metal1..metal4, not metal2..metal5.
+
+    A macro that declares no OBS is guessed to block the bottom of the stack the *tech LEF*
+    declares. If the guess moved with the range, a layer the caller asked to keep would lose
+    capacity for a reason they did not ask for - and a trimmed run would no longer be the
+    untrimmed run restricted to its layers.
+    """
+    tech = _tech(tmp_path)                             # metal1, metal2, metal3
+    assert [layer.name for layer in tech.fallback_layers(2)] == ["metal1", "metal2"]
+    trimmed = tech.trimmed(2, 3)
+    assert [layer.name for layer in trimmed.fallback_layers(2)] == ["metal2"]
+    assert [layer.name for layer in trimmed.fallback_layers(1)] == []
+    # A depth that stops exactly above the range blocks nothing inside it.
+    assert [layer.name for layer in tech.trimmed(3).fallback_layers(2)] == []
+    assert [layer.name for layer in tech.trimmed(3).fallback_layers(3)] == ["metal3"]
+
+
+def test_a_shape_on_a_trimmed_away_layer_is_not_an_unknown_layer(tmp_path):
+    """Two absences told apart: the caller left the layer out, or the LEF never had it.
+
+    Only one of them is worth a warning - an out-of-range layer is a choice, and a caller who
+    reads `assert not data.warnings` as "this run is clean" would otherwise lose that check
+    on every trimmed build.
+    """
+    tech = _tech(tmp_path).trimmed(2, 3)
+    body = ("NETS 1 ;\n- n1 ( u1 A )\n"
+            "  + ROUTED metal1 ( 0 0 ) ( 0 100 )\n"
+            "  NEW metal2 ( 0 0 ) ( 0 100 )\n"
+            "  NEW metal9 ( 0 0 ) ( 0 100 ) ;\n"
+            "END NETS\nEND DESIGN\n")
+    _routing, stream = _run(tmp_path, body, stream=ShapeStream(tech, Collect()))
+    assert stream.n_filtered == 1                      # metal1, outside the range
+    assert stream.n_unknown_layer == 1                 # metal9, never in the LEF at all
+    assert [(r[0], r[1]) for r in stream.sink.rects] == [(0, 0)]   # metal2, now the bottom layer
+
+
 # -- what a wire becomes -----------------------------------------------------------
 
 def test_axis_aligned_wire_becomes_its_keepout_rectangle(tmp_path):

@@ -29,7 +29,9 @@ part of its own outline. Only the obstructions that cover a meaningful part of t
 count (``OBS_MIN_FOOTPRINT_FRACTION``); a scattered pin-access bite is not a keep-out region.
 A macro whose LEF declares no ``OBS`` cannot be judged from data at all, and falls back to
 ``macro_block_layers`` (default 4): the bottom N layers, over the whole outline. That fallback
-is a guess, so it is reported when it engages.
+is a guess, so it is reported when it engages. It counts from the bottom of the stack the *tech
+LEF* declares, not of the part being measured, so ``--min-layer`` cannot move the guess onto a
+layer the caller asked to keep.
 
 **Groups are capacity-weighted.** Layers are parallel resources, so a group's utilisation is
 ``sum(D_L) / sum(C_L)`` - not a sum, which would drive every cell to 1.0, and not a plain
@@ -179,7 +181,8 @@ class MetalData:
                  layers: Sequence[RouteLayer], capacity_base,
                  blocked: Dict[int, np.ndarray], macro_block_layers: int,
                  grids: Dict[Tuple[int, str], np.ndarray], warnings: List[AnyStr],
-                 blockage: Dict = None, totals: Dict = None, stats: Dict = None):
+                 blockage: Dict = None, totals: Dict = None, stats: Dict = None,
+                 filtered_layers: Sequence = ()):
         self.top_name = top_name
         self.boundary_polys = boundary_polys
         self.grid_size = float(grid_size)
@@ -187,6 +190,10 @@ class MetalData:
         self.rows = int(rows)
         self.cols = int(cols)
         self.layers = list(layers)
+        # The layers of the tech LEF's stack that the requested range left out. Kept so the
+        # status bar can say the map is a *range* rather than a short stack, and so a caller
+        # can tell the two apart without the tech object.
+        self.filtered_layers = tuple(filtered_layers)
         self.macro_block_layers = int(macro_block_layers)
         self.warnings = list(warnings)
         # How the blockage was decided - which macros declared OBS, which fell back to the
@@ -222,6 +229,20 @@ class MetalData:
     def blocked_layers(self) -> List[int]:
         """Layer indices some macro blocks. Empty when no macro blocks anything."""
         return sorted(self._routable)
+
+    @property
+    def stack_note(self) -> str:
+        """How to describe the measured stack: the range when it is one, else the count.
+
+        Without the ends, `9 layers` reads as a short stack rather than a filtered one - and
+        the number is the only place a user can check that the range they typed landed where
+        they meant, short of counting rows in the panel.
+        """
+        total = len(self.layers) + len(self.filtered_layers)
+        if not self.filtered_layers:
+            return f"{total} layers"
+        return (f"layers {self.layers[0].name}..{self.layers[-1].name} "
+                f"({len(self.layers)} of {total})")
 
     @property
     def horizontal(self) -> List[RouteLayer]:
@@ -465,7 +486,7 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
                 tech_paths: Sequence[AnyStr], grid_size: float = None,
                 macro_block_layers: int = None, min_segment=None,
                 top: AnyStr = None, on_progress=None, cancel=None,
-                jobs: int = 1) -> MetalData:
+                jobs: int = 1, min_layer: int = None, max_layer: int = None) -> MetalData:
     """Build the per-layer utilisation grids for a DEF hierarchy.
 
     The DEFs are read twice, deliberately. The first pass takes only the components and the
@@ -474,6 +495,13 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     frame and can therefore stream its wiring straight into the accumulating grids without
     ever holding the geometry. Reading once would mean buffering every segment, which at 10^8
     segments is gigabytes.
+
+    ``min_layer`` and ``max_layer`` restrict the measurement to a range of the tech LEF's
+    routing layers - 1-based stack positions, the numbers the layer panel labels its rows
+    with. A real design routes M2..B2 while its stack also holds M1 and the thick top metals,
+    which measure nothing but add rows, grids and noise. Wiring on the excluded layers is
+    counted as ``filtered`` rather than silently dropped, and the range is logged by *name*,
+    because the numbers are only meaningful against the stack they were counted in.
 
     ``cancel`` is an optional callable consulted during the wiring pass; when it returns True
     the build stops and returns what it has measured, with a warning saying so. A chip-level
@@ -499,6 +527,16 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     if not tech.layers:
         raise ValueError("the tech LEF declares no TYPE ROUTING layers; there is nothing "
                          "to measure")
+    if min_layer is not None or max_layer is not None:
+        # `trimmed` rejects a range that does not fit, which is the only way an empty stack -
+        # and with it a window that indexes its first map - could be reached from here.
+        declared = tech
+        tech = declared.trimmed(min_layer, max_layer)
+        logger.info("metal: layers %s..%s (%d of %d), ignoring %s",
+                    tech.layers[0].name, tech.layers[-1].name, len(tech.layers),
+                    len(declared.layers),
+                    ", ".join(layer.name for layer in declared.layers
+                              if layer.name in tech.filtered_layers) or "none")
 
     # Pass 1: block table, so every block's frame is known before any wiring is streamed.
     stages.mark("components")
@@ -550,8 +588,12 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     warnings: List[AnyStr] = []
     stages.mark("blockage", f"{rows} x {cols} grid @ {grid_size:g} um, die "
                             f"{extent[2] - extent[0]:.1f} x {extent[3] - extent[1]:.1f} um")
+    # The fallback counts from the bottom of the stack the LEF declares, not from the bottom of
+    # what is being measured: `--min-layer 2` must not move the guess onto a layer the caller
+    # asked to keep. See `TechRouting.fallback_layers`.
     blocked, blockage = _macro_blockage(assembler, blocks, cells, obstructions, tech, extent,
-                                        grid_size, root, macro_block_layers, warnings)
+                                        grid_size, root, macro_block_layers,
+                                        tech.fallback_layers(macro_block_layers), warnings)
 
     if rows * cols > config.DEFAULT_METAL_MAX_BINS:
         warnings.append(
@@ -576,8 +618,8 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
 
     stages.mark("routing", f"{len(blockage)} macro type(s) with obstruction data")
     sink = _GridSink(extent, grid_size)
-    totals = {"emitted": 0, "vias": 0, "jogs": 0, "unknown": 0, "unusable": 0,
-              "degenerate": 0, "polygon_edges": 0}
+    totals = {"emitted": 0, "vias": 0, "jogs": 0, "unknown": 0, "filtered": 0,
+              "unusable": 0, "degenerate": 0, "polygon_edges": 0}
     # Summed over blocks: what the DEFs were like, as opposed to what came out of them.
     text_stats: Dict[AnyStr, object] = {"forms": 0, "points": 0, "lines": 0,
                                         "statement_lines_max": 0, "statement_chars_max": 0,
@@ -697,15 +739,20 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
         "grid_size_um": grid_size,
         "die_um": [round(extent[2] - extent[0], 3), round(extent[3] - extent[1], 3)],
         "params": {"min_segment": min_segment, "macro_block_layers": macro_block_layers,
-                   "top": top},
+                   "min_layer": min_layer, "max_layer": max_layer, "top": top},
         "inputs": {"defs": [_file_note(path) for path in def_paths],
                    "lefs": len(lef_paths),
                    "tech_lefs": [_file_note(path) for path in tech_paths]},
         "stages_s": {name: round(seconds, 2) for name, seconds in stage_seconds.items()},
         "shapes": dict(totals, total=shapes),
         "input_text": dict(text_stats, layers_used=len(text_stats["layers_used"])),
+        # The filtered names are subtracted: a layer the caller chose not to measure is not a
+        # layer the LEF failed to declare, and saying so would be a false statement about
+        # their own input.
         "layers_not_in_tech": sorted(set(text_stats["layers_used"]) -
-                                     {layer.name for layer in tech.layers}),
+                                     {layer.name for layer in tech.layers} -
+                                     set(tech.filtered_layers)),
+        "filtered_layers": sorted(tech.filtered_layers),
         "layers": [{"name": layer.name, "direction": layer.direction,
                     "width_um": layer.width, "pitch_um": layer.pitch,
                     "usable": layer.usable} for layer in tech.layers],
@@ -718,7 +765,8 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     }, sort_keys=True, default=str))
     return MetalData(root, _boundary_polys(assembler, blocks, root), grid_size, extent, rows,
                      cols, tech.layers, capacity_base, blocked, macro_block_layers,
-                     grids, warnings, blockage, totals, text_stats)
+                     grids, warnings, blockage, totals, text_stats,
+                     filtered_layers=tech.filtered_layers)
 
 
 def _file_note(path) -> Dict:
@@ -800,13 +848,15 @@ def _obs_blockage(rects, size, warnings, name) -> list:
 
 
 def _macro_blockage(assembler, blocks, cells, obstructions, tech, extent, grid_size, root,
-                    macro_block_layers, warnings) -> Dict[int, np.ndarray]:
+                    macro_block_layers, fallback, warnings) -> Dict[int, np.ndarray]:
     """Blocked area per cell, per layer, in global coordinates.
 
     Two sources, deliberately distinguishable. A macro that declares ``OBS`` blocks what its
     obstructions cover, on the layers they name - which may be any set of layers, contiguous
     or not. A macro that declares none cannot be judged from data at all, so it falls back to
-    ``macro_block_layers`` whole-die-footprint layers from the bottom, and says so.
+    ``macro_block_layers`` whole-die-footprint layers from the bottom, and says so. Those
+    layers arrive resolved in ``fallback`` rather than being sliced here, because the count is
+    a position in the tech LEF's whole stack rather than in the part being measured.
 
     The instance's own orientation is composed with its block's frame, so the blockage lands
     where the cell's geometry actually is. That is the same transform the *wiring* goes
@@ -838,6 +888,9 @@ def _macro_blockage(assembler, blocks, cells, obstructions, tech, extent, grid_s
         size = (float(macros.at[name, "size_x"]), float(macros.at[name, "size_y"]))
         layers = {}
         for layer_name, rects in declared.items():
+            if layer_name in tech.filtered_layers:
+                # Outside the range being measured, so not a layer the LEF is missing.
+                continue
             index = index_of.get(layer_name)
             if index is None or layer_name not in usable:
                 unknown[layer_name] = unknown.get(layer_name, 0) + 1
@@ -860,23 +913,31 @@ def _macro_blockage(assembler, blocks, cells, obstructions, tech, extent, grid_s
     summary = {"obs_cells": len(plan), "obs_layers": sorted({index for layers in plan.values()
                                                              for index in layers}),
                "fallback_cells": no_obs, "fallback_layers": macro_block_layers,
+               "fallback_layer_names": [layer.name for layer in fallback],
                "ignored_cells": sorted(nothing_left), "ignored_layers": dict(ignored),
                "unknown_layers": dict(unknown)}
     if ignored:
         logger.info("metal: obstruction geometry on %d layer(s) was too small a part of its "
                     "macro to count as blockage: %s", len(ignored),
                     ", ".join(sorted(ignored)))
+    # The fallback counts from the bottom of the stack the LEF declares, so a requested range
+    # can leave it naming fewer layers than its depth - or none. Named, because a capacity
+    # missing for a different reason than the flag's own text reads is worth knowing about.
+    outside = ""
+    if len(fallback) != macro_block_layers:
+        outside = (f" ({', '.join(layer.name for layer in fallback) or 'none'} inside the "
+                   f"measured range)")
     logger.info("metal: blockage from %d macro(s) declaring OBS over %d layer(s); %d fall "
-                "back to the bottom %d layer(s); %d declare nothing significant",
+                "back to the bottom %d layer(s)%s; %d declare nothing significant",
                 summary["obs_cells"], len(summary["obs_layers"]), no_obs, macro_block_layers,
-                len(nothing_left))
+                outside, len(nothing_left))
     if unknown:
         logger.info("metal: %d obstruction layer(s) are not in the tech LEF and are not "
                     "counted: %s", len(unknown), ", ".join(sorted(unknown)))
 
     bins: Dict[int, Bins] = {}
-    if no_obs and macro_block_layers > 0:
-        for layer in tech.layers[:macro_block_layers]:
+    if no_obs and fallback:
+        for layer in fallback:
             bins[layer.index] = Bins(extent, grid_size)
 
     def bin_for(layer_index):
@@ -916,10 +977,10 @@ def _macro_blockage(assembler, blocks, cells, obstructions, tech, extent, grid_s
                 ty = ec * x[picked] + ed * y[picked] + frame.origin[1]
                 if by_layer is None:
                     # Nothing declared, so nothing to trust: the cell's whole footprint, on
-                    # the bottom `macro_block_layers` layers.
-                    if macro_block_layers <= 0:
-                        continue
-                    for layer in tech.layers[:macro_block_layers]:
+                    # the bottom `macro_block_layers` layers of the stack the LEF declares.
+                    # Empty when the flag is off, or when the requested range sits above
+                    # them, and then the cell blocks nothing at all.
+                    for layer in fallback:
                         _emit(bin_for(layer.index), a, b, c, d, tx, ty,
                               0.0, 0.0, size[0], size[1])
                     continue
@@ -1012,6 +1073,12 @@ def _describe(totals, warnings):
     if totals["jogs"]:
         logger.info("metal: %d non-preferred jog(s) shorter than a track pitch dropped",
                     totals["jogs"])
+    if totals["filtered"]:
+        # `info`, not a warning: an out-of-range layer is a choice the caller made, while an
+        # unknown one is data that surprised us. A trimmed build with a warning here would
+        # also make `assert not data.warnings` meaningless for every caller that uses it.
+        logger.info("metal: %d shape(s) on layers outside the requested range were skipped",
+                    totals["filtered"])
     if totals["unknown"]:
         warnings.append(f"{totals['unknown']} shape(s) on layers the tech LEF does not "
                         f"define were skipped")

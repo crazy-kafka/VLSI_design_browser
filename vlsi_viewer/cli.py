@@ -145,8 +145,24 @@ def parse_args(argv=None):
                    help="heat-map grid cell size in um (default: %(default)s)")
     p.add_argument("--macro-block-layers", type=int,
                    default=config.DEFAULT_MACRO_BLOCK_LAYERS, metavar="N",
-                   help="fallback only: how many bottom layers a macro that declares no OBS "
-                        "takes capacity from (default: %(default)s)")
+                   help="fallback only: how many bottom layers of the whole stack a macro "
+                        "that declares no OBS takes capacity from, counted from the bottom "
+                        "before any --min-layer/--max-layer takes effect (default: "
+                        "%(default)s)")
+    # The underscore spellings are aliases: the metal group is hyphenated (`--grid-size`,
+    # `--min-segment-length`), but these two name parameters of `build_metal`, and a caller
+    # reading the source should not have to guess which spelling the CLI chose.
+    p.add_argument("--min-layer", "--min_layer", dest="min_layer", type=int, default=None,
+                   metavar="N",
+                   help="lowest routing layer to measure, as a 1-based position in the stack: "
+                        "the layer panel numbers its rows from 1 at the bottom, so 2 is the "
+                        "second routing layer your tech LEF declares (default: the bottom "
+                        "layer)")
+    p.add_argument("--max-layer", "--max_layer", dest="max_layer", type=int, default=None,
+                   metavar="N",
+                   help="highest routing layer to measure, in the same 1-based positions "
+                        "(default: the top layer). Wiring on the layers left out is reported "
+                        "as filtered, not as a layer your LEF is missing")
     p.add_argument("--min-segment-length", type=float, default=None, metavar="N",
                    help="drop non-preferred-direction jogs shorter than N um; default is "
                         "each layer's track pitch, 0 keeps every jog")
@@ -283,7 +299,8 @@ def _run_metal(args):
                            macro_block_layers=args.macro_block_layers,
                            min_segment=args.min_segment_length, top=args.top,
                            on_progress=lambda message: logger.info("metal: %s", message),
-                           cancel=stop.is_set, jobs=args.jobs)
+                           cancel=stop.is_set, jobs=args.jobs,
+                           min_layer=args.min_layer, max_layer=args.max_layer)
     except Exception as exc:  # surface load errors on the CLI, no window needed
         print(f"error: {exc}", file=sys.stderr)
         return 1

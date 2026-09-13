@@ -49,11 +49,11 @@ def test_generator_verify_passes(generator, capsys):
 # below were measured, and the two fixtures differ in shape: `sub.def` is signal wiring with
 # jogs, `top.def` is a power grid with a filled ring.
 SAMPLE_SHAPES = {
-    "sub.def": {"vias": 0, "jogs": 135, "degenerate": 0, "unknown": 0, "unusable": 0,
-                "polygon_edges": 0, "emitted": 19817, "rects": 19817, "polygons": 0,
-                "area_um2": 84491.294890},
-    "top.def": {"vias": 0, "jogs": 0, "degenerate": 0, "unknown": 0, "unusable": 0,
-                "polygon_edges": 3, "emitted": 9, "rects": 8, "polygons": 1,
+    "sub.def": {"vias": 0, "jogs": 135, "degenerate": 0, "unknown": 0, "filtered": 0,
+                "unusable": 0, "polygon_edges": 0, "emitted": 19817, "rects": 19817,
+                "polygons": 0, "area_um2": 84491.294890},
+    "top.def": {"vias": 0, "jogs": 0, "degenerate": 0, "unknown": 0, "filtered": 0,
+                "unusable": 0, "polygon_edges": 3, "emitted": 9, "rects": 8, "polygons": 1,
                 "area_um2": 15242.880000},
 }
 
@@ -179,3 +179,19 @@ def test_quickstart_check_reports_the_map(quickstart, capsys):
     assert "layer" in printed and "pitch" in printed
     assert "horizontal layers" in printed and "vertical layers" in printed
     assert "cell(s) carry wire" not in printed      # the sample must have no warnings
+
+
+def test_quickstart_check_forwards_the_layer_range(quickstart, capsys):
+    """`--check` used to discard the flags the wrapper did not know.
+
+    `parse_known_args` collected them and the non-GUI path then ignored the lot, so
+    `--check --min-layer 4` would print full-stack numbers - the same shape of silent
+    difference the wrapper exists to avoid in GUI mode.
+    """
+    assert quickstart.main(["--check", "--min-layer", "4", "--max-layer", "6"]) == 0
+    # The rule table's rows are `<name padded to 6><space><H|V>...`; nothing else in the
+    # output has that shape, and the range should have left exactly three of them.
+    printed = capsys.readouterr().out
+    listed = [line.split()[0] for line in printed.splitlines()
+              if len(line) > 7 and line[6] == " " and line[7] in "HV"]
+    assert listed == ["M4", "M5", "M6"]
