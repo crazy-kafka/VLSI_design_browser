@@ -290,6 +290,38 @@ def test_a_quoted_spacing_property_does_not_contribute_conditionals(tmp_path):
     assert layers["B1"].spacing != pytest.approx(0.064)
 
 
+def test_an_unterminated_property_warns_rather_than_raising(tmp_path, caplog):
+    """A payload whose closing quote never comes: stop there, say so, and keep the next layer.
+
+    That is what the guard is for, and no test had ever reached it - the fixtures all terminate
+    their properties, and only a real file needed the branch. It reported through this module's
+    logger, which did not exist: the first LEF that reached it died with
+    `NameError: name 'logger' is not defined` instead of parsing the rest of the stack.
+    """
+    text = """\
+LAYER V1
+  TYPE ROUTING ;
+  WIDTH 0.1 ;
+  SPACING 0.1 ;
+  PROPERTY LEF58_SPACING "
+  SPACING 0.09 ENDINLINE 0.08 ;
+LAYER V2
+  TYPE ROUTING ;
+  WIDTH 0.2 ;
+  SPACING 0.2 ;
+END V2
+"""
+    with caplog.at_level("WARNING", logger="vlsi_viewer.parsers.LEF.lefParser"):
+        layers = _layers(tmp_path, text)
+    warnings = [record.getMessage() for record in caplog.records]
+    assert [message for message in warnings
+            if "unterminated PROPERTY" in message and "V1" in message]
+    # The point of stopping on that line rather than swallowing to the end of the file: the
+    # layer after it is still read, at full width.
+    assert layers["V2"].width == pytest.approx(0.2)
+    assert layers["V1"].width == pytest.approx(0.1)
+
+
 def test_an_unquoted_property_does_not_swallow_the_stanza(tmp_path):
     """LEF also allows `PROPERTY name value ;` with no quotes.
 

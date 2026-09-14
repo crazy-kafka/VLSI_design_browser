@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import time
 from typing import List, Tuple, Dict, Union, Iterable, TYPE_CHECKING, AnyStr
@@ -12,6 +13,11 @@ from .lefMacro import LefMacro
 from .leflayer import LefLayer
 from .compiledRe import CompiledRe
 from .._util import Print, readFile
+
+# This module's own logger, as the rest of the package has: the diagnostics it raises about
+# malformed input - an unterminated PROPERTY, a region layer - are warnings about the *file*, and
+# they belong in the stream a user reads, not on stdout beside the parser's progress lines.
+logger = logging.getLogger(__name__)
 
 
 class TlefParser:
@@ -90,6 +96,13 @@ class TlefParser:
             cursor += 1
             line = lines[cursor]
             if re.search(rf'^\s*END\s+{re.escape(name)}\b', line):
+                break
+            if CompiledRe.re_layer_name.search(line):
+                # Only reachable when the stanza never ended - no `END <name>` - and the line
+                # that opened the next one is not this stanza's to read. Without this the scan
+                # would take the next layer's statements as this layer's: its width, its
+                # spacing, and a row count that quietly includes both.
+                cursor -= 1
                 break
 
             if in_table:
@@ -170,13 +183,15 @@ class TlefParser:
             cursor += 1
             line = lines[cursor]
             # A statement that never terminates must not swallow the rest of the layer. The
-            # guard stops *on* this line, so the caller's next iteration sees it - the END
-            # ends the stanza, a LAYER opens the next - and reports, because otherwise a
-            # missing terminator just empties the layer with no explanation.
+            # guard stops *before* this line - one short of it, because callers advance before
+            # they look - so their next iteration sees it: the END ends the stanza, a LAYER
+            # opens the next. It reports, because otherwise a missing terminator just empties
+            # the layer with no explanation.
             if re.search(rf'^\s*END\s+{re.escape(layer.name)}\b', line) or \
                     CompiledRe.re_layer_name.search(line):
                 logger.warning("tech LEF: unterminated PROPERTY in layer %s before %r",
                                layer.name, line.strip()[:40])
+                cursor -= 1
                 break
             text += line
         self.__applyProperty(layer, text)
