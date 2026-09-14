@@ -88,6 +88,12 @@ never uses it today - `_worker` builds its `Reader` without one - so `--jobs > 1
 interrupted at all, contradicting the CLI's promise. Wire it through; the README's "scales nearly
 linearly with cores" needs rewording once N is a cap.
 
+**"Wire it through" was the right intent and the wrong mechanism** - passing the callable into the
+task tuple made every `--jobs` run from the CLI die on the first worker, because a bound method of
+the parent's `threading.Event` cannot be pickled, and a copy in another address space could never
+have seen the parent set it anyway. [`pooled_cancel.md`](pooled_cancel.md) replaces this section:
+the stop signal is a byte the workers read, not a callable they are given.
+
 ## D. Read each macro LEF once
 
 `LefParser.__init__` already reads `OBS` in the pass that builds the cell table; only

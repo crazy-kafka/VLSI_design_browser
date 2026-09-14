@@ -169,7 +169,10 @@ def parse_args(argv=None):
     p.add_argument("--jobs", type=int, default=1, metavar="N",
                    help="processes to use for the wiring pass (default: %(default)s). The pass "
                         "is per-net work with no dependency between nets, so it scales nearly "
-                        "linearly with cores; 1 keeps everything in one process")
+                        "linearly with cores; 1 keeps everything in one process. It is a cap "
+                        "rather than an instruction - a small DEF is parsed in one process "
+                        "whatever you ask for - and every worker re-reads the whole file, so "
+                        "match it to the cores you were allocated rather than to your host")
     p.add_argument("--profile", nargs="?", const="", metavar="PSTATS",
                    help="time the build with cProfile and print the top 15 by self time; "
                         "optionally write a .pstats file. The wall clock it reports is "
@@ -284,7 +287,7 @@ def _run_metal(args):
         if stop.is_set():
             raise KeyboardInterrupt                   # a second ^C means it
         stop.set()
-        logger.warning("metal: interrupt received; stopping after the current block")
+        logger.warning("metal: interrupt received; stopping after what has been read")
 
     previous = signal.signal(signal.SIGINT, on_interrupt)
     profiler = None

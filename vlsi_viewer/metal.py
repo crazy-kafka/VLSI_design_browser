@@ -52,7 +52,7 @@ from typing import AnyStr, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-from . import config
+from . import __version__, config
 from .assembly import Frame, HierarchyAssembler, find_single_top
 from .loader import load_block, load_cell_info
 from .parsers import Cancelled
@@ -506,7 +506,10 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     ``cancel`` is an optional callable consulted during the wiring pass; when it returns True
     the build stops and returns what it has measured, with a warning saying so. A chip-level
     build runs for hours, and the useful answer to "this input was wrong" is a partial map in
-    seconds rather than a killed job.
+    seconds rather than a killed job. It may be called from another thread as well as this one -
+    with ``jobs > 1`` the workers cannot hold the callable at all, so a watcher thread polls it
+    and raises the flag they read - so it has to be safe to call from anywhere, as a
+    `threading.Event`'s own `is_set` is.
 
     ``jobs`` above 1 runs the wiring pass across that many processes (see :mod:`parallel`). The
     default is 1, so the flow the tests pin is the one that runs unless a caller asks otherwise.
@@ -606,20 +609,24 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     # Pass 2: stream each block's wiring through its frame. Imported here rather than at module
     # scope because `parallel` takes `_GridSink` from this module, and a worker needs the same
     # sink the caller uses.
-    from .parallel import effective_workers, parse_parallel
+    from .parallel import effective_workers, ignore_interrupts, input_size, parse_parallel
 
     # `--jobs` is a cap: a pool costs a second or two of interpreter startup and a full scan of
     # the file per worker, so a small DEF is parsed in one process whatever the caller asked for.
     workers = effective_workers(def_paths, jobs)
-    if workers != jobs:
-        logger.info("metal: %d MB of DEF: %d worker(s) of %d requested",
-                    sum(os.path.getsize(path) for path in def_paths) / 1e6, workers, jobs)
+    # Always reported, not only when the count is reduced: it is the number the cap was applied
+    # to, and the only place a log says how big the DEF really is. The uncompressed size,
+    # because that is the work - a `.gz`'s own size is its compressed one, and gzip's trailer is
+    # modulo 2^32 (see `input_size`).
+    logger.info("metal: %d MB of DEF (uncompressed); %d worker(s)%s",
+                sum(input_size(path) for path in def_paths) / 1e6, workers,
+                "" if workers == jobs else f" of {jobs} requested")
     jobs = workers
 
     stages.mark("routing", f"{len(blockage)} macro type(s) with obstruction data")
     sink = _GridSink(extent, grid_size)
-    totals = {"emitted": 0, "vias": 0, "jogs": 0, "unknown": 0, "filtered": 0,
-              "unusable": 0, "degenerate": 0, "polygon_edges": 0}
+    totals = {"emitted": 0, "vias": 0, "jogs": 0, "diagonals": 0, "unknown": 0,
+              "filtered": 0, "unusable": 0, "degenerate": 0, "polygon_edges": 0}
     # Summed over blocks: what the DEFs were like, as opposed to what came out of them.
     text_stats: Dict[AnyStr, object] = {"forms": 0, "points": 0, "lines": 0,
                                         "statement_lines_max": 0, "statement_chars_max": 0,
@@ -654,9 +661,15 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
             counters, _stats, note = parse_parallel(
                 path, name, tech, frames, min_segment, extent, grid_size, sink, jobs,
                 text_stats=text_stats, cancel=cancel, pool=pool)
+            # Folded before the stop is raised, and in that order: the counters and the grids
+            # have to tell the same story, or the run reports having measured nothing on top of
+            # the partial map it did measure.
             fold(counters)
             if note.get("ndrs"):
                 logger.info("%s: %d non-default rule(s)", name, note["ndrs"])
+            if note.get("interrupted"):
+                raise Cancelled(
+                    f"interrupted; {note['stopped']} of {jobs} worker(s) stopped early")
             return
         stream = ShapeStream(tech, sink, frames=frames, min_segment=min_segment)
         # The components were read in pass 1; this pass wants the wiring, and re-building
@@ -682,7 +695,9 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     if jobs > 1:
         from concurrent.futures import ProcessPoolExecutor
 
-        pool = ProcessPoolExecutor(max_workers=jobs)
+        # `initializer` runs in each worker before any task: it takes ^C out of the workers'
+        # hands, so the interrupt stays the parent's decision and the map survives it.
+        pool = ProcessPoolExecutor(max_workers=jobs, initializer=ignore_interrupts)
     try:
         # The walk stays per placement - `_macro_blockage` and `_boundary_polys` need one visit
         # per instance - and only the wiring pass defers, so that a block placed K times is
@@ -709,8 +724,11 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     if not tech.usable:
         warnings.append("no routing layer in the tech LEF has a usable width")
 
+    # Diagonals are a *class* of the emitted shapes, not another drop: the stream counts one
+    # when it queues it and hands it to the sink at flush, so adding them here would double
+    # them. They are reported separately because they rasterise through shapely.
     shapes = totals["emitted"] + sum(value for key, value in totals.items()
-                                     if key != "emitted")
+                                     if key not in ("emitted", "diagonals"))
     stages.mark("grids", f"{shapes:,} shape(s), {text_stats['points']:,} point(s)")
 
     # Metal where there is said to be no room. Either the DEF routes over a macro - which a
@@ -735,6 +753,7 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     resident, peak = resident_mb()
     logger.info("metal-summary: %s", json.dumps({
         "design": root,
+        "version": __version__,
         "grid": [rows, cols],
         "grid_size_um": grid_size,
         "die_um": [round(extent[2] - extent[0], 3), round(extent[3] - extent[1], 3)],
@@ -924,7 +943,7 @@ def _macro_blockage(assembler, blocks, cells, obstructions, tech, extent, grid_s
     # can leave it naming fewer layers than its depth - or none. Named, because a capacity
     # missing for a different reason than the flag's own text reads is worth knowing about.
     outside = ""
-    if len(fallback) != macro_block_layers:
+    if no_obs and len(fallback) != macro_block_layers:
         outside = (f" ({', '.join(layer.name for layer in fallback) or 'none'} inside the "
                    f"measured range)")
     logger.info("metal: blockage from %d macro(s) declaring OBS over %d layer(s); %d fall "
@@ -1073,6 +1092,15 @@ def _describe(totals, warnings):
     if totals["jogs"]:
         logger.info("metal: %d non-preferred jog(s) shorter than a track pitch dropped",
                     totals["jogs"])
+    if totals["diagonals"]:
+        # Reported because they are the one shape class that does not rasterise as a
+        # rectangle: each one goes through a shapely buffer and a per-bin intersection, which
+        # is far slower per shape. A design whose 45-degree geometry is all on a layer it is
+        # not measuring should read zero here, and a run that reads millions is the one worth
+        # looking at.
+        logger.info("metal: %d of the measured shape(s) are 45-degree segments, which "
+                    "rasterise through shapely rather than as rectangles",
+                    totals["diagonals"])
     if totals["filtered"]:
         # `info`, not a warning: an out-of-range layer is a choice the caller made, while an
         # unknown one is data that surprised us. A trimmed build with a warning here would

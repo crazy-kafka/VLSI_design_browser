@@ -13,12 +13,15 @@ in exactly one block.
 import contextlib
 import io
 import os
+import signal
+import threading
 
 import numpy as np
 import pytest
 
 from vlsi_viewer import parallel
 from vlsi_viewer.metal import SCOPE_ALL, build_metal
+from vlsi_viewer.parsers import DefParser
 
 SAMPLE = "sample_data/metal"
 
@@ -161,7 +164,7 @@ EXTENT = (0.0, 0.0, 520.0, 400.0)
 
 def _reader(path, **kwargs):
     from vlsi_viewer.parallel import Reader
-    return Reader(path)
+    return Reader(path, **kwargs)
 
 
 def test_every_statement_is_read_once_and_stays_whole():
@@ -197,9 +200,107 @@ def test_two_workers_cover_the_statements_between_them():
     total = sum(len(lines) for _section, lines in _reader(path).statements())
     held = 0
     for index in (0, 1):
-        for chunk in _chunks(_reader(path), 10 ** 6, index, 2, None, None, None, EXTENT, 10.0):
+        for chunk in _chunks(_reader(path, stride=2, index=index), 10 ** 6, None, None, None,
+                             EXTENT, 10.0):
             held += sum(len(lines) for _section, _nets, lines in chunk.sections)
     assert held == total
+
+
+def test_a_worker_reads_only_its_own_share(tmp_path):
+    """The partition, as an equivalence rather than as "still works".
+
+    A worker used to keep every statement's lines and hand fifteen sixteenths of them back
+    unread; the stride moved into the reader, so the share each one *sees* has to be the share
+    it used to *use* - same positions, same order, and every statement read exactly once across
+    the workers.
+    """
+    path = tmp_path / "many.def"
+    path.write_text("""\
+DESIGN many ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 1 ;
+- u1 INV + PLACED ( 0 0 ) N ;
+END COMPONENTS
+NETS 6 ;
+- n0 ( u1 A ) + ROUTED M1 ( 0 0 ) ( 100 0 ) ;
+- n1 ( u1 A ) + ROUTED M1 ( 0 100 ) ( 100 100 ) ;
+- n2 ( u1 A ) + ROUTED M1 ( 0 200 ) ( 100 200 ) ;
+- n3 ( u1 A ) + ROUTED M1 ( 0 300 ) ( 100 300 ) ;
+- n4 ( u1 A ) + ROUTED M1 ( 0 400 ) ( 100 400 ) ;
+- n5 ( u1 A ) + ROUTED M1 ( 0 500 ) ( 100 500 ) ;
+END NETS
+END DESIGN
+""")
+    whole = [lines[0].split()[1] for _section, lines in _reader(str(path)).statements()]
+    assert whole == ["n0", "n1", "n2", "n3", "n4", "n5"]
+    for stride in (2, 3):
+        shares = [[lines[0].split()[1]
+                   for _section, lines in _reader(str(path), stride=stride, index=index)
+                   .statements()]
+                  for index in range(stride)]
+        assert shares == [[name for position, name in enumerate(whole)
+                           if position % stride == index] for index in range(stride)]
+        assert sorted(name for share in shares for name in share) == sorted(whole)
+
+
+def test_a_statement_no_one_keeps_is_still_counted(tmp_path, caplog):
+    """`check_counts` compares declared against read, and it must not depend on the stride.
+
+    The counter is what catches a parser that stops early - the failure that reads part of a
+    design and says nothing - so a worker that is skipping statements still has to count them.
+    """
+    path = tmp_path / "short.def"
+    path.write_text("""\
+DESIGN short ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 1000 1000 ) ;
+NETS 9 ;
+- n1 ( u1 A ) + ROUTED M1 ( 100 200 ) ( 400 200 ) ;
+- n2 ( u1 A ) + ROUTED M1 ( 100 300 ) ( 400 300 ) ;
+END NETS
+END DESIGN
+""")
+    reader = _reader(str(path), stride=2, index=1)      # keeps the *second* of two statements
+    with caplog.at_level("WARNING", logger="vlsi_viewer.parallel"):
+        assert len(list(reader.statements())) == 1
+        reader.check_counts()
+    assert any("declares 9 net(s) but 2 were read" in record.getMessage()
+               for record in caplog.records)
+
+
+def test_a_worker_that_skips_a_giant_statement_does_not_hold_it(tmp_path):
+    """The statement the real design has exactly one of, and what a wide pool was going to cost.
+
+    A power net of 200,000 lines is one statement, so it belongs to exactly one worker - but
+    every worker used to build the list of it before the stride was consulted, and then
+    fifteen of sixteen threw it away. The measurement has to be of a *giant* statement: with
+    short ones the whole list is a few kilobytes and the difference is invisible, which is what
+    the first version of this test showed.
+    """
+    import tracemalloc
+
+    form = "  NEW M1 0 + SHAPE STRIPE ( 1000 2000 ) via1_2\n"
+    path = tmp_path / "giant.def"
+    path.write_text("DESIGN giant ;\nUNITS DISTANCE MICRONS 1000 ;\n"
+                    "DIEAREA ( 0 0 ) ( 10000 10000 ) ;\nCOMPONENTS 1 ;\n"
+                    "- u1 INV + PLACED ( 0 0 ) N ;\nEND COMPONENTS\nSPECIALNETS 1 ;\n"
+                    "- VDD + USE POWER\n" + form * 200_000
+                    + "  ;\nEND SPECIALNETS\nEND DESIGN\n")
+
+    def read(index):
+        tracemalloc.start()
+        held = sum(len(lines)
+                   for _section, lines in _reader(str(path), stride=2, index=index).statements())
+        _current, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        return held, peak
+
+    kept_lines, kept_peak = read(0)              # this worker owns the giant statement
+    skipped_lines, skipped_peak = read(1)        # this one is told to skip it
+    assert kept_lines == 200_002       # the net's own line, its 200,000 forms, its ';'
+    assert skipped_lines == 0
+    assert skipped_peak < kept_peak / 10         # it never builds the list at all
 
 
 def test_a_chunk_holds_one_section_at_a_time(tmp_path):
@@ -230,7 +331,7 @@ END DESIGN
     with contextlib.redirect_stdout(io.StringIO()):
         tech = TechRouting.read([str(tech_path)])
     # One statement per chunk, so each chunk shows exactly what it holds.
-    chunks = list(_chunks(_reader(str(path)), 1, 0, 1, tech, None, None,
+    chunks = list(_chunks(_reader(str(path)), 1, tech, None, None,
                           (0.0, 0.0, 1000.0, 1000.0), 10.0))
     assert [(section, nets) for chunk in chunks
             for section, nets, _lines in chunk.sections] == [("SPECIALNETS", 1),
@@ -257,3 +358,150 @@ END DESIGN
         reader.check_counts()
     assert any("declares 9 net(s) but 1 were read" in record.getMessage()
                for record in caplog.records)
+
+
+# -- stopping the workers ------------------------------------------------------------
+
+def test_the_cli_configuration_builds_a_pooled_run(monkeypatch):
+    """`--jobs N` with the cancel the CLI really passes: `stop.is_set`.
+
+    That bound method of a `threading.Event` cannot be pickled, and the task tuple carried it, so
+    every `--jobs` run from the CLI died at the first worker with
+    `error: cannot pickle '_thread.lock' object`. This is that configuration, inverted.
+    """
+    _force_pool(monkeypatch)
+    stop = threading.Event()
+    sequential = _build(1)
+    pooled = _build(3, monkeypatch, cancel=stop.is_set)
+    assert pooled.totals == sequential.totals
+    assert not [warning for warning in pooled.warnings if "stopped early" in warning]
+
+
+def test_a_cancel_means_the_same_thing_on_both_paths(monkeypatch):
+    """Same input, an already-set cancel, one process against three.
+
+    The sequential path cancels at the parser's heartbeat and the pooled one in each worker's
+    reader; both have to leave a map that still exists and a warning that says why it is empty.
+    """
+    monkeypatch.setattr(DefParser, "HEARTBEAT_SECONDS", 0)
+    _force_pool(monkeypatch)
+    sequential = _build(1, cancel=lambda: True)
+    pooled = _build(3, monkeypatch, cancel=lambda: True)
+    for data in (sequential, pooled):
+        assert any("stopped early" in warning for warning in data.warnings)
+        assert data.totals["emitted"] == 0          # nothing was measured...
+        assert data.rows > 0 and data.cols > 0      # ...but there is still a map to look at
+    layers = [layer.name for layer in sequential.layers]
+    assert np.allclose(_heat(pooled, layers), _heat(sequential, layers))
+
+
+class _CountingFlag:
+    """A stop signal that flips on the k-th read, so a partial run is deterministic.
+
+    A clock-based cancel would make the assertions depend on how far a worker happened to get,
+    which is the flakiness a salvage test cannot afford. This object stands in for the shared
+    byte: it is callable like the real one, and it counts the reads the reader makes of it.
+    """
+
+    def __init__(self, after):
+        self.after = after
+        self.reads = 0
+
+    def _read(self):
+        self.reads += 1
+        return self.reads > self.after
+
+    __call__ = _read
+    is_set = _read
+
+    def set(self):
+        self.after = -1                 # what the parent does when the flag is already up
+
+    def close(self):
+        pass
+
+    def destroy(self):
+        pass
+
+
+def test_a_stopped_worker_keeps_what_it_measured(monkeypatch, caplog):
+    """The salvage, at the level it lives: workers stopped in the middle of the file.
+
+    What a partial run reports has to be a *prefix* of the full run's. Every shape adds
+    positively, so the returned grid must be a cellwise minorant of the complete one and must not
+    be empty - and that is the invariant no counter can show, because folding a chunk's grids
+    without its counters, or twice, still counts coherently and still looks plausible.
+    """
+    lines = sum(1 for _ in open(os.path.join(SAMPLE, "sub.def")))
+    flag = _CountingFlag(after=lines // 2)
+    monkeypatch.setattr(parallel._Flag, "create", classmethod(lambda cls: flag))
+    _force_pool(monkeypatch, chunk=200)
+    full = _build(1)
+    with caplog.at_level("WARNING", logger="vlsi_viewer.parallel"):
+        partial = _build(3, monkeypatch, cancel=lambda: False)
+    layers = [layer.name for layer in full.layers]
+    kept, whole = _heat(partial, layers), _heat(full, layers)
+    assert 0 < partial.totals["emitted"] < full.totals["emitted"]
+    assert (kept > 0).any()
+    assert (kept <= whole + 1e-9).all()
+    assert any("stopped early" in warning for warning in partial.warnings)
+    # A partial read makes the declared and found counts disagree; that is not a defect in the
+    # design, so it must not be reported as one.
+    assert not [record for record in caplog.records if "declares" in record.getMessage()]
+
+
+def test_a_cancel_between_blocks_keeps_the_block_already_read(monkeypatch):
+    """Two blocks, driven by progress rather than by a clock.
+
+    The first block is complete before the flag can go up - the predicate only becomes true once
+    the second block has announced itself - so TOP's 9 shapes must survive a cancel that stops SUB
+    dead. Both come out of the same pool, which is what the block loop is for.
+    """
+    _force_pool(monkeypatch)
+    seen = []
+
+    def cancel():
+        # "reading routing in SUB" - not the bare "reading routing", which is announced once
+        # before the block loop and would cancel the first block instead of the second.
+        return sum("reading routing in" in message for message in seen) >= 2
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        data = build_metal([os.path.join(SAMPLE, "top.def"), os.path.join(SAMPLE, "sub.def")],
+                           [os.path.join(SAMPLE, "cells.lef")],
+                           [os.path.join(SAMPLE, "tech.lef")], grid_size=10.0, jobs=3,
+                           cancel=cancel, on_progress=seen.append)
+    assert any("stopped early" in warning for warning in data.warnings)
+    assert data.totals["emitted"] == 9              # TOP's ring, and none of SUB's wiring
+
+
+def test_the_workers_are_told_not_to_hear_the_interrupt():
+    """^C belongs to the parent, the only process that can decide what to keep.
+
+    A worker that takes the interrupt either dies - a broken pool, and the map is discarded - or
+    re-raises KeyboardInterrupt in the parent past the `except Cancelled` this path exists for.
+    The pool's initializer installs the ignore, as the stdlib does for its own helpers.
+    """
+    previous = signal.getsignal(signal.SIGINT)
+    try:
+        parallel.ignore_interrupts()
+        assert signal.getsignal(signal.SIGINT) is signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def test_the_pool_is_built_with_that_initializer(monkeypatch):
+    """The wiring, not just the function: an initializer that is never passed protects nothing."""
+    import concurrent.futures
+
+    seen = {}
+    real = concurrent.futures.ProcessPoolExecutor
+
+    class Recorder(real):
+        def __init__(self, *args, **kwargs):
+            seen.update(kwargs)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor", Recorder)
+    _force_pool(monkeypatch)
+    _build(3, monkeypatch)
+    assert seen.get("initializer") is parallel.ignore_interrupts

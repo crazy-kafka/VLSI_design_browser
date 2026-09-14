@@ -142,7 +142,9 @@ resolution is different. `metal --jobs N` spreads the wiring pass over N process
 per-net work has no dependency between nets, so it scales nearly linearly with cores; `1` (the
 default) keeps it all in one process, and `--profile` prints where a build's time went. `N` is a
 cap rather than an instruction — a worker costs a spawned interpreter and a full scan of the DEF,
-so an input only a few megabytes across is parsed in one process whatever you ask for.
+so an input only a few megabytes across is parsed in one process whatever you ask for. Every worker
+also re-reads and re-decompresses the whole file, so match `--jobs` to the cores you were allocated
+rather than to the machine: `--jobs 8` inside a four-core allocation just runs two per core.
 `metal --min-layer N --max-layer N` measures a range of the stack instead of all of it, in the
 1-based positions the layer panel numbers its rows with: a design that routes `M2`–`B2` can leave
 out `M1` and the thick top metals, which add rows and grids without measuring anything. Wiring on
