@@ -49,13 +49,19 @@ def test_generator_verify_passes(generator, capsys):
 # below were measured, and the two fixtures differ in shape: `sub.def` is signal wiring with
 # jogs, `top.def` is a power grid with a filled ring.
 SAMPLE_SHAPES = {
-    "sub.def": {"vias": 0, "jogs": 135, "degenerate": 0, "unknown": 0, "filtered": 0,
-                "unusable": 0, "polygon_edges": 0, "emitted": 19817, "rects": 19817,
-                "polygons": 0, "area_um2": 84491.294890},
-    "top.def": {"vias": 0, "jogs": 0, "degenerate": 0, "unknown": 0, "filtered": 0,
-                "unusable": 0, "polygon_edges": 3, "emitted": 9, "rects": 8, "polygons": 1,
-                "area_um2": 15242.880000},
+    "sub.def": {"vias": 0, "jogs": 135, "diagonals": 0, "degenerate": 0, "unknown": 0,
+                "filtered": 0, "unusable": 0, "polygon_edges": 0, "emitted": 19817,
+                "rects": 19817, "polygons": 0, "area_um2": 84491.294890},
+    "top.def": {"vias": 0, "jogs": 0, "diagonals": 0, "degenerate": 0, "unknown": 0,
+                "filtered": 0, "unusable": 0, "polygon_edges": 3, "emitted": 9, "rects": 8,
+                "polygons": 1, "area_um2": 15242.880000},
 }
+
+# The sample writes 45-degree tails (2 % of nets) and every one of them is dropped as a
+# non-preferred jog before it reaches the sink, so the diagonal rasteriser - the one shape
+# path that goes through shapely rather than the rectangle fast path - is exercised only in
+# `tests/test_raster.py`, never end to end. A design whose diagonal count is not zero is the
+# one to look at, which is why `metal-summary` now reports it.
 
 
 @pytest.mark.parametrize("name", sorted(SAMPLE_SHAPES))

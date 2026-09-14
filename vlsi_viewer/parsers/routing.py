@@ -254,6 +254,7 @@ class TechRouting:
 # assert on them, and a single source is what keeps the log's names and the counters' names
 # from drifting apart.
 SHAPE_COUNTERS = (("emitted", "n_emitted"), ("vias", "n_via"), ("jogs", "n_jog"),
+                  ("diagonals", "n_diagonal"),
                   ("unknown", "n_unknown_layer"), ("filtered", "n_filtered"),
                   ("unusable", "n_usable_layer_missing"),
                   ("degenerate", "n_degenerate"), ("polygon_edges", "n_polygon_edge"))
@@ -263,8 +264,8 @@ SHAPE_COUNTERS = (("emitted", "n_emitted"), ("vias", "n_via"), ("jogs", "n_jog")
 # does contain K copies of that wiring, and a summary that disagreed with the grids would be
 # worse than no summary. `emitted` is the exception - the stream counts it per placement already,
 # so that its own count matches what its sink was handed.
-PER_PLACEMENT_COUNTERS = ("vias", "jogs", "unknown", "filtered", "unusable", "degenerate",
-                          "polygon_edges")
+PER_PLACEMENT_COUNTERS = ("vias", "jogs", "diagonals", "unknown", "filtered", "unusable",
+                          "degenerate", "polygon_edges")
 
 
 class ShapeStream:
@@ -324,6 +325,11 @@ class ShapeStream:
         # shapes and no emitted count leaves the rest of the work unaccounted for.
         self.n_via = 0
         self.n_jog = 0
+        # Diagonals are already counted in `n_emitted` when they are flushed, so this is a
+        # *class* of the emitted shapes rather than another drop - but it is the only way a
+        # run can say whether the 45-degree rasterisation (the `shapely` buffer path, far
+        # slower per shape than a rectangle) is being paid for at all.
+        self.n_diagonal = 0
         self.n_degenerate = 0
         self.n_polygon_edge = 0
         self.n_usable_layer_missing = 0
@@ -552,6 +558,7 @@ class ShapeStream:
         if x0 != x1 and y0 != y1:
             # A diagonal jog. The sink buffers the centre line exactly rather than taking a
             # bounding box, which for a 10 um diagonal would over-count by about 25x.
+            self.n_diagonal += 1
             self._diagonals.append((layer.index, scope, x0 / self.db_unit,
                                     y0 / self.db_unit, x1 / self.db_unit,
                                     y1 / self.db_unit,

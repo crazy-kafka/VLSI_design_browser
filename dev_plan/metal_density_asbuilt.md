@@ -914,6 +914,16 @@ own end - `END <layer>` or the next `LAYER` breaks the read with a warning, so a
 loses one property rather than the rest of the layer. The unquoted tables - Nangate45's, sky130's,
 the sample's - are base statements and keep working.
 
+**That guard shipped broken, and only a real file could show it.** It called `logger.warning` in a
+module that never bound a logger, so the first library to reach it - the 09-14 run's, which needs it
+seven times - would have died with `NameError: name 'logger' is not defined` had the deployed copy
+not already carried one. Two further defects sat behind it, both silent where the `NameError` was
+not: it returned the cursor *on* the line that ended the runaway payload, and every caller advances
+before it looks, so the layer named in the warning was skipped; and `__parseLayer` had no notion of
+a stanza that ends without its `END`, so even a corrected cursor would have read the next layer's
+`WIDTH` and `SPACING` as this one's. `tests/test_tech_lef.py` now parses an unterminated property
+and asserts both halves - the warning names the layer, and the layer after it comes out whole.
+
 **Region layers are dropped, keyed on the property name.** `M2_FB1`/`M3_FB1`/`M4_FB1` declare
 `TYPE ROUTING` and carry `PROPERTY LEF58_REGION`, and were listed as routing layers. The old
 pattern matched `BASEDLAYER M3` but not the file's `BASEDLAYE R M2`, so the fix keys the exclusion
@@ -1219,6 +1229,164 @@ the tail still tokenised - and it *must* still be tokenised, because `*` coordin
 filtered form is the next step, and whether it is worth the parser's hot path depends on the
 `filtered` share a real run reports.
 
+## Phase 19 — a cancel that survives the process boundary
+
+`--jobs 8` on `lx956c_ioe` died ~80 s in with `error: cannot pickle '_thread.lock' object`, reported
+in [`issue/thread_error.md`](issue/thread_error.md); the plan is [`pooled_cancel.md`](pooled_cancel.md).
+The worker task tuple carried the caller's `cancel`, and the CLI's is `stop.is_set` - a bound method
+of a `threading.Event`, whose `Condition` holds a `_thread.lock`. It is raised in the call queue's
+**feeder thread** and re-raised in the parent through `future.result()`, which is why the message
+names a stdlib file the project never appears in. Three controls isolated it: `cancel=None` builds,
+a picklable callable builds, only `stop.is_set` fails. It was a regression from `ea68fd3` - the
+commit that first forwarded the callable to the workers - reachable only above 8 MB of input
+(`--jobs 8` collapses to one worker on the sample), and no test paired `jobs > 1` with a cancel.
+
+**The fix is a byte, not a callable.** A deserialised copy in another address space can never
+observe the parent's `set()`, so the parent keeps the callable and raises one byte of shared memory
+the workers read; `parse_parallel` reads it once up front - which makes an already-set cancel
+deterministic instead of a race - and then from a watcher thread. Measured per read, since the
+reader consults it once per input line: `SharedMemory` 64-110 ns, `multiprocessing.Event` 2.7 us and
+**not usable as a task argument at all**, a manager proxy 29.5 us, a sentinel file 54.8 us. The pool
+also installs `ignore_interrupts` as its initializer: workers are in the parent's process group, so
+an unignored ^C either kills one (`BrokenProcessPool`, map discarded) or re-raises
+`KeyboardInterrupt` past the `except Cancelled` this path exists to serve.
+
+**Both levels of the pooled path were throwing work away**, which is the other half of the same
+defect: `_worker` returns its sink only at the end, and `parse_chunk` builds its own. A stopped
+worker now flushes, folds what it has once, breaks, and returns `stopped` in its note - and skips
+`check_counts`, which would otherwise report "NETS declares 2000 net(s) but 611 were read" on every
+cancel (the sequential path never reaches its equivalent either, so that is parity).
+
+**What building it turned up, which the plan had not foreseen:** the first version raised
+`Cancelled` from `parse_parallel` *after* `drain` had already folded the stopped workers' grids into
+the sink. The map kept that geometry and the counters described none of it - `emitted == 0` over a
+half-filled grid, exactly the "plausible-looking wrong map" this project keeps meeting. The new
+salvage test caught it in the act, and the fix is the shape the plan should have had: the parent
+*reports* (`note["interrupted"]`, `note["stopped"]`) and `build_metal` raises after folding, so
+counters and grids always tell the same story.
+
+Two smaller things the work turned up: the sample's reader spends its first ~13,500 lines inside
+`COMPONENTS`, so a cancel early in a file stops before any net is banked - which is why the salvage
+test derives its threshold from the file's own length rather than a round number. And the pooled
+path is now *more* responsive to ^C than the sequential one, which is gated by the parser's 30 s
+heartbeat: on the sample the sequential cancel never fires at all, which the equivalence test
+handles by setting `HEARTBEAT_SECONDS = 0`.
+
+Six tests, and one that was checked against a mutation: folding a chunk's grids twice - the silent
+corruption the salvage exists to prevent - makes `test_a_stopped_worker_keeps_what_it_measured` fail,
+because a partial run is asserted to be a **cellwise minorant** of the complete one. `python -m
+pytest -q` -> **574 passed** (568 before). The reported configuration, inverted:
+`build_metal(..., jobs=3, cancel=stop.is_set)` builds 19,817 (the golden) with no warning; with the
+flag already set it returns `emitted=0` over a 20x26 grid and
+`stopped early on request (interrupted; 3 of 3 worker(s) stopped early); the map covers only the
+wiring that had been read`.
+
+## Phase 20 — round 2: the single-core read, and one statement that was 20 % of the file
+
+The plan is [`metal_read_round2.md`](metal_read_round2.md), written from the two single-core runs in
+[`issue/real_design_log_0914.md`](issue/real_design_log_0914.md): `lx956c_ioe`, 2.1 GB gzipped,
+284.9 M lines, **5,940.63 s** of routing out of 6,006 s of compute. The user's priorities: single-core
+first, and **45° geometry is not a target** — this design's exists only on `ALPA`, which the run
+excluded, so the profile's 132.6 M shapely calls cannot be its data and no diagonal work was done.
+
+**Four things were built, and the measurements are the interesting part.**
+
+**The giant statement had four copies of itself alive at once.** One power net is one statement of
+58,549,358 lines and 4,979,560,694 characters. The parse held a list of that many `str`, their
+`' '.join`, a full-text wiring slice, and `list(finditer(...))` — a match object is 208 bytes, so
+~57 M of them is 11.8 GB. That is ~27 GB against the run's own `peak_rss_mb: 42123` on a `mem=20000`
+request; the process survived on luck. Three changes, none of which alter the shape sequence:
+one form of lookahead instead of the match list; scanning the statement *in place*
+(`finditer(text, pos, endpos)` and positions from `__split_statement`) instead of slicing it twice;
+and joining a statement's lines into blocks as they arrive instead of holding all of them.
+
+| measured, on a 200,000-form statement (6.0 MB of text) | before | after |
+|---|---|---|
+| peak traced memory | 53.7 MB = **8.94x** the statement | 12.3 MB = **2.05x** |
+| parse time | 675.3 ms | 675.9 ms (unchanged — the copies were memcpy-cheap; this is a memory fix) |
+| the same 200,000 forms as 200,000 statements | 2,360.4 ms | **2,167.2 ms (−8.2 %)** |
+| the committed sample `sub.def` (14,801 forms) | 254.6 ms | **243.8 ms (−4.2 %)** |
+
+**`ASK` was never a layer.** `+ MASK 1` after a form's points was read as a form on a layer called
+`ASK`: the guard that stops a keyword opening a form rejects the match at its first character, and
+the engine then advances one character and matches the rest of the word — the same failure the token
+pattern already handles with its keyword set. Measured on a fixture, before → after: the M4 wire
+loses its second segment and the mask's point appears as a zero-length shape on `ASK`; after,
+`layers_used == ["M4"]` and the wire has both segments. On the real run that is 4.5 M shapes moving
+off `unknown` and back onto their own layers. The guard is one lookbehind in `FORM_FIRST`, and it
+changes nothing over 15,246 statements of the sample and the vendored gcd DEF — no committed golden
+can move, and none did.
+
+**The tokeniser's group calls were worth less than the profile suggested, and that is worth
+recording.** `__scan_tokens` asked for one group per field — three or four `Match.group` calls per
+token — and `re.Match.group` is 4.9 % of the profiled run. Batching them into one call per token
+measured **2.702 → 2.653 us per real tail (−1.8 %)**, roughly 0.4 % of the read rather than the
+~5 % the share implied: that row is dominated by the strings the tokeniser has to build either way,
+not by the call overhead. It landed because it is smaller and no worse, not because it pays.
+
+**What was deliberately not built.** The filtered-layer fast path waits for the next run's numbers,
+as round 1's discipline requires — and the gate turned out to need no new instrumentation: the
+09-14 log's `points_max` of 2 says every form in that design has one or two points, and a 1-point or
+2-point form yields exactly one shape, so its 72 M `filtered` shapes are 72 M *forms* — about 26 % of
+the per-form work, which is the number the decision needs. The generator did gain `--min-layer`/
+`--max-layer`, without which `--real-shape` could not write a filtered class at all (4,777 of its
+7,510 shapes are filtered at `--min-layer 3 --max-layer 8`). The diagnostics gained the *diagonal*
+counter (`n_diagonals` was computed and never read), `__version__` in the summary, and an
+`input_size` that no longer reports a >4 GB DEF's size modulo 2^32.
+
+**And one wrong turn, caught by a test rather than by review.** The first version of the lookahead
+was `zip(forms, chain(forms, (None,)))` — which shares one iterator between the two arguments, so
+each round consumes two forms and the loop visits every other one. `via_points` came back 100,000 of
+200,000 and an existing test on `NEW` clauses failed immediately. It is a six-line generator now,
+and its docstring says why the clever version is wrong.
+
+`python -m pytest -q` -> **577 passed** (575 before), with the vendored numbers unmoved (gcd 2,504
+via / 5 jogs / 2,327 rects / `metal2` mean 0.2527) and `SAMPLE_SHAPES` extended with the new
+`diagonals` counter, measured 0 for both sample DEFs — the sample writes 45° tails and drops every
+one of them as a jog before the sink, so the diagonal rasteriser is exercised only in
+`tests/test_raster.py`.
+
+## Phase 21 — the pooled reader keeps only what its worker will parse
+
+The plan is [`pooled_reader_stride.md`](pooled_reader_stride.md), the last blocker on `--jobs` at
+scale. `Reader.statements()` accumulated **every** statement's lines and its consumer applied the
+stride afterwards, so a worker that would parse one statement in sixteen buffered the other fifteen
+first — including the one power net of 58,549,358 lines. The decision now happens on a statement's
+first line, where `_NET` says whether a position is even involved, and the lines of a statement this
+worker does not own are never accumulated.
+
+**Measured, on a 200,000-line statement with two workers:**
+
+| worker | lines it keeps | peak traced memory |
+|---|---|---|
+| `index=0`, `stride=2` — owns the statement | 200,002 | **20.8 MB** |
+| `index=1`, `stride=2` — told to skip it | 0 | **0.0 MB** |
+
+**And the estimate this was justified by was too pessimistic.** The plan said sixteen workers sit at
+~160 GB and would drop to ~15 GB. The reader's own cost for a giant statement is the list of its
+lines plus the line strings it is holding at once — about 5.5 GB, not the 45 GB of the *parser's*
+transient (which includes the match list and the text copies the reader never builds). So the honest
+figures are **~88 GB -> ~11 GB at sixteen workers**: still the difference between a run that needs
+most of a 300 GB host and one that fits in a corner of it, but the plan overstated it by about 2x.
+
+Three properties are pinned by tests rather than by argument, because each one would fail silently:
+
+- **the partition is the same one** — `position` counts only net statements, incremented where the
+  caller's `enumerate` used to count a yield, so each worker reads exactly the statements it used to
+  *use*: asserted for strides 2 and 3 against `[s for p, s in enumerate(all) if p % stride == index]`;
+- **a statement nobody keeps is still counted** — `_found` is incremented for every net statement,
+  kept or not, because that is what `check_counts()` compares against the section's declared count,
+  and it must not depend on the width of the pool;
+- **`open_statement` is not `pending`** — the unterminated-statement warning still fires for a
+  statement no worker buffered, which is why "am I inside a statement" cannot be read off the buffer.
+
+`Reader.__init__` took `index=0, stride=1` (the defaults are the old behaviour, so every existing
+caller and test was unaffected), `_chunks` lost the two parameters and its `continue`, and `_worker`
+moved them from one call to the other. Nothing outside `parallel.py` sees the stride, and the chunks
+— and therefore the float sums — are unchanged.
+
+`python -m pytest -q` -> **580 passed** (577 before).
+
 ## What each change bought
 
 Every number below is measured on a committed or reproducible fixture; the fixtures are named so
@@ -1243,9 +1411,18 @@ lines.
 | 12 | `--jobs` sized from the input, one pool per build, and the `cancel` it never passed to its workers | 8 workers -> 1 for a 2 MB DEF, and the 6.45 s of lock contention that was 87 % of that run's profile is gone | the same sample; the parallel tests pass an explicit override so they still exercise the pool | a heuristic constant, and a test override that must not be forgotten or the pool's equivalence coverage quietly stops testing |
 | 13 | the macro LEF parsed once: the obstructions come out of the same pass that builds the cell table | one LEF pass instead of two; ~10 s of the recorded 7051 s run | the sample, and the vendored Nangate45 library | an opt-in on `cell_info_from_lef`; the "could not read the obstructions" warning goes with the second read |
 
+| 14 | a statement's wiring is scanned where it sits, one form ahead, and its lines are joined in blocks as they are read | **8.94x -> 2.05x** of the statement's own text in peak memory (53.7 -> 12.3 MB on a 6 MB statement); the real run's 42 GB peak on a 20 GB request is this statement held four times over. Time: 2,360 -> 2,167 ms on 200,000 statements (-8.2 %), 254.6 -> 243.8 ms on `sub.def` (-4.2 %), and *unchanged* on one giant statement - the copies were memcpy-cheap, so this is a memory fix | a 200,000-form statement, `tests/test_def_nets.py`; the sample | one generator and three signatures; `finditer(pos, endpos)` and the `'+' in text` guard were verified equivalent over 15,246 real statements |
+| 15 | `FORM_FIRST` refuses a match that begins inside a word | `+ MASK 1` stops being read as a form on a layer named `ASK`: on the real design ~4.5 M shapes move off `unknown` and back onto their own layers, and a swallowed ROUTED form gets its segments back (measured 0 -> 2 emitted on a fixture) | a new `+ MASK` fixture, both spellings | one lookbehind, and no committed fixture contains `MASK` in wiring - so no golden can move, and none did |
+| 16 | one `Match.group(...)` per token instead of three or four, and `groupdict()` out of the form loops | **2.702 -> 2.653 us** per real tail (-1.8 %), about 0.4 % of the read - *not* the ~5 % the profile's `re.Match.group` share implied, because that row counts the strings the tokeniser must build anyway | 14,801 real tails from `sub.def` | smaller and no worse; landed for that, not for the speed |
+| 17 | diagnostics (no speed claim) | the summary now carries `n_diagonals` (computed since the start, never reported), `__version__`, and an `input_size` that no longer reports a >4 GB DEF modulo 2^32; `--real-shape` gained `--min-layer`/`--max-layer`, without which a filtered class cannot be written at all | `sample_data/metal/generate_metal.py --real-shape --min-layer 3 --max-layer 8` (4,777 of 7,510 shapes filtered) | four small fields and two flags |
+| 18 | the pooled reader decides the stride on a statement's first line, so a worker never buffers what it will not parse | a worker that skips a 200,000-line statement peaks at **0.0 MB** against **20.8 MB** for the one that owns it; at sixteen workers the pool's floor goes from ~88 GB to ~11 GB, which is what makes `--jobs 16` a comfortable run rather than a gamble | the giant-statement reader test, `tests/test_metal_parallel.py` | the stride moved from `_chunks` into the `Reader`; three tests pin the partition, the declared-vs-read count and the warning |
+
 Equivalence throughout: the suite went from 500 to **526 tests**, and the pinned real-file numbers
 never moved (gcd 2504 via / 5 jogs / 2327 rects / `metal2` mean 0.2527). Three proposed fast paths
-were dropped before landing because a counterexample showed they changed the map.
+were dropped before landing because a counterexample showed they changed the map. Round 2 took it to
+**577**: one wrong turn - a lookahead built as `zip(forms, chain(forms, (None,)))`, which visits
+every other form - was caught by an existing test within a minute, which is the argument for having
+them.
 
 ### Estimated on the real design
 

@@ -19,6 +19,22 @@ from .defNdr import DefNdrLayer, DefNdrRule
 from .defSPolygon import DefSPolygon
 from .._util import Cancelled, Print
 
+
+def _with_lookahead(forms: Iterable) -> Iterable:
+    """Yield ``(match, next_match)`` for every match, ``None`` for the one after the last.
+
+    The wiring loops need each form's end, which is where the next form starts - and they
+    need it without materialising every match first, because one statement can carry tens of
+    millions of them. A generator rather than ``zip(forms, chain(forms, ...))``: that shares
+    one iterator between the two arguments, so each round consumes two forms and visits every
+    other one - which a test caught, and this shape cannot get wrong.
+    """
+    match = next(forms, None)
+    while match is not None:
+        following = next(forms, None)
+        yield match, following
+        match = following
+
 # Parsed-versus-declared counters per section, for the heartbeat's estimate. Only the sections
 # a DEF declares a size for are listed - a DEF's line count is not declared anywhere, and its
 # net counts are.
@@ -342,27 +358,49 @@ class DefParser:
         marker, which keeps a malformed statement from swallowing the rest of the file.
         The ';' split is not quote-aware, so a property string containing ';' would
         still truncate the statement - a known limit, unchanged from before.
+
+        The lines are joined into blocks as they arrive rather than all being kept and joined
+        at the end. A chip-level power net is one statement of 58,549,358 lines (measured:
+        4,979,560,694 characters), and the list of them plus the single join at the end was
+        the largest allocation in a real read - about twice the text, on top of the text.
         """
-        parts = [first_line]
-        while ';' not in parts[-1]:
+        chunk = [first_line]
+        chunks: List[AnyStr] = []
+        lines = 1
+        last = first_line
+        while ';' not in last:
             line = self.fetchLine_method()
             if not line or line.lstrip().startswith('END '):
-                return self.__size(parts), line
-            parts.append(line)
-        parts[-1] = parts[-1].split(';', 1)[0]
-        return self.__size(parts), self.fetchLine_method()
+                return self.__size(chunks, chunk, lines), line
+            last = line
+            chunk.append(line)
+            lines += 1
+            if len(chunk) >= self.STATEMENT_CHUNK_LINES and ';' not in line:
+                chunks.append(' '.join(chunk))
+                chunk = []
+        chunk[-1] = chunk[-1].split(';', 1)[0]
+        return self.__size(chunks, chunk, lines), self.fetchLine_method()
 
-    def __size(self, parts: List) -> AnyStr:
+    # How many lines are joined in one go while a statement is read. Big enough that the
+    # join is still one operation over a real statement, small enough that the line strings
+    # of a giant one are released as it is read instead of at the end.
+    STATEMENT_CHUNK_LINES = 4096
+
+    def __size(self, chunks: List, tail: List, lines: int) -> AnyStr:
         """Join a statement and record how big it was.
+
+        ``chunks`` holds the text of every block of lines already joined and ``tail`` the
+        lines not yet joined, so the result is the same string one ``' '.join`` of all the
+        lines would give, assembled without ever holding all of them.
 
         A statement's size is not reported anywhere else, and it is the first thing to check
         when a benchmark is supposed to stand in for a real file: a power net written as one
         statement of a million points is not the same input as a million statements of one
         point, and the two cost differently.
         """
-        statement = ' '.join(parts)
-        if len(parts) > self.statement_lines_max:
-            self.statement_lines_max = len(parts)
+        statement = ' '.join(chunks + [' '.join(tail)])
+        if lines > self.statement_lines_max:
+            self.statement_lines_max = lines
         if len(statement) > self.statement_chars_max:
             self.statement_chars_max = len(statement)
         return statement
@@ -418,22 +456,26 @@ class DefParser:
         if '*' in tail:
             tail = CompiledRe.re_glued_star.sub(' ', tail)
         for token in CompiledRe.re_wire_token.finditer(tail):
-            x, y = token.group('x'), token.group('y')
+            # One `group` call per token rather than one per field: `group` is a C method with
+            # an argument parse and a return-tuple build, and a real design's read makes
+            # billions of these calls - measured as `re.Match.group`, 4.9 % of the profile.
+            # Asking for several groups at once returns the same strings in one call, and an
+            # unparticipated group still answers `None`.
+            x, y, ext = token.group('x', 'y', 'ext')
             if x is not None:
                 x = self.__resolve_coord(x, last, 0)
                 y = self.__resolve_coord(y, last, 1)
                 last[0], last[1] = x, y
-                ext = token.group('ext')
                 out.append(('pt', x, y, int(ext) if ext is not None else None))
             else:
-                name = token.group('via')
+                name, orientation = token.group('via', 'via_orient')
                 if name in CompiledRe.WIRE_KEYWORDS:
                     # A clause keyword where a via name would sit ('+ SHAPE STRIPE'). The
                     # token pattern no longer rejects these with a lookahead, because that
                     # test was retried at every character of the tail; here it is paid once
                     # per matched word. No metric path reads a via name.
                     continue
-                out.append(('via', name, token.group('via_orient')))
+                out.append(('via', name, orientation))
         return out
 
     @staticmethod
@@ -457,8 +499,14 @@ class DefParser:
         return points, vias
 
     @staticmethod
-    def __split_statement(statement: AnyStr, form_re) -> Tuple[AnyStr, AnyStr]:
-        """Split a statement into its pre-wiring header and its wiring text.
+    def __split_statement(statement: AnyStr, form_re) -> Tuple[AnyStr, int, int]:
+        """Split a statement into its pre-wiring header and the span of its wiring.
+
+        Returns ``(header, start, end)`` - positions into ``statement`` rather than a copy of
+        the wiring, because that copy is one of the largest allocations a real read makes: a
+        power net's statement is gigabytes, and its wiring is nearly all of it. Callers scan
+        ``statement[start:end]`` in place, and ``finditer(text, pos, endpos)`` searches exactly
+        what the slice held - checked against the real files in the tests.
 
         The header (net name, connections, ``+ NONDEFAULTRULE`` …) comes first in both
         grammars; the wiring runs from the first form up to the next non-wiring clause.
@@ -467,13 +515,14 @@ class DefParser:
         """
         first = form_re.search(statement)
         if first is None:
-            return statement, ''
-        text = statement[first.start():]
+            return statement, len(statement), len(statement)
         # Every clause keyword needs a '+', so a text without one cannot hold a clause and
-        # the scan is skipped. Both branches are the same statement text that the form scan
-        # then walks, so an avoidable scan here costs as much as the one that matters.
-        cut = CompiledRe.re_non_wiring_clause.search(text) if '+' in text else None
-        return statement[:first.start()], (text[:cut.start()] if cut else text)
+        # the scan is skipped. The scan then walks the same text the form scan walks, so an
+        # avoidable scan here costs as much as the one that matters.
+        cut = (CompiledRe.re_non_wiring_clause.search(statement, first.start())
+               if statement.find('+', first.start()) >= 0 else None)
+        return (statement[:first.start()], first.start(),
+                cut.start() if cut else len(statement))
 
     def __extractNdrRules(self, line: AnyStr):
         """Read the NONDEFAULTRULES section.
@@ -518,24 +567,31 @@ class DefParser:
                       f'layer; nets using it fall back to the layer defaults')
         self.__ndrs[rule.rule_name] = rule
 
-    def __add_special_wiring(self, net: DefNet, text: AnyStr):
-        """Emit ``DefSWire`` segments for every special-wiring form in the text."""
-        forms = list(CompiledRe.re_special_wiring_form.finditer(text))
-        self.n_forms += len(forms)
+    def __add_special_wiring(self, net: DefNet, statement: AnyStr, start: int, end: int):
+        """Emit ``DefSWire`` segments for every special-wiring form in the statement.
+
+        Scanned in place and one form ahead, as the regular path is - and this is the one
+        that matters most, because a power net is exactly the statement that is enormous.
+        """
+        forms = CompiledRe.re_special_wiring_form.finditer(statement, start, end)
         last = [None, None]
-        for i, match in enumerate(forms):
-            end = forms[i + 1].start() if i + 1 < len(forms) else len(text)
-            fields = match.groupdict()
+        for match, nxt in _with_lookahead(forms):
+            form_end = end if nxt is None else nxt.start()
+            self.n_forms += 1
+            # One `group` call for the five fields this loop uses, rather than a `groupdict`
+            # (a dict, then a lookup and a `get` per field) - see `__scan_tokens`.
+            via_name, form_width, rect_layer, poly_layer, layer = match.group(
+                'via_name', 'width', 'rect_layer', 'poly_layer', 'layer')
             points, vias = self.__split_points(
-                self.__scan_tokens(text[match.end():end], last))
+                self.__scan_tokens(statement[match.end():form_end], last))
             self.n_points += len(points)
             if len(points) > self.points_max:
                 self.points_max = len(points)
-            for key in ('poly_layer', 'rect_layer', 'layer'):
-                if fields.get(key):
-                    self.layers_used.add(fields[key])
+            for name in (poly_layer, rect_layer, layer):
+                if name:
+                    self.layers_used.add(name)
 
-            if fields['via_name']:
+            if via_name:
                 # '+ VIA via [orient] pt ...': each point carries the via, so there is no
                 # segment. The points are *scanned* (so '*' keeps resolving across the
                 # statement) but not turned into shapes: the stream counts a via point and
@@ -544,11 +600,11 @@ class DefParser:
                 net.via_points += len(points)
                 continue
 
-            width = int(fields['width']) if fields['width'] else None
-            if fields['rect_layer']:
-                layer, shape = fields['rect_layer'], 'RECT'
-            elif fields['poly_layer']:
-                layer, shape = fields['poly_layer'], 'POLYGON'
+            width = int(form_width) if form_width else None
+            if rect_layer:
+                layer, shape = rect_layer, 'RECT'
+            elif poly_layer:
+                layer, shape = poly_layer, 'POLYGON'
                 # This is the only point at which the whole vertex list exists. The
                 # per-edge DefSWires emitted below cannot be reassembled into the ring -
                 # they carry no polygon id and the closing edge is never emitted - so the
@@ -557,7 +613,7 @@ class DefParser:
                     net.polygons.append(
                         DefSPolygon(layer, [(point[1], point[2]) for point in points]))
             else:
-                layer, shape = fields['layer'], 'PATH'
+                shape = 'PATH'
             self.__emit_special(net, layer, width, shape, points, vias)
 
     @staticmethod
@@ -575,33 +631,40 @@ class DefParser:
             net.swiring.append(DefSWire(layer, width, x0, y0, e0 or 0, x1, y1, e1 or 0,
                                         via=via, via_orient=via_orient, shape=shape))
 
-    def __add_regular_wiring(self, net: DefNet, text: AnyStr, rule: AnyStr):
-        """Emit ``DefWire`` segments for every regular-wiring form in the text."""
-        forms = list(CompiledRe.re_regular_wiring_form.finditer(text))
-        self.n_forms += len(forms)
+    def __add_regular_wiring(self, net: DefNet, statement: AnyStr, start: int, end: int,
+                             rule: AnyStr):
+        """Emit ``DefWire`` segments for every regular-wiring form in the statement.
+
+        The wiring is scanned where it sits - ``statement[start:end]`` - rather than through a
+        copy of itself, and one form ahead of the current one rather than through a list of
+        every match: a statement can carry tens of millions of forms, and a match object is
+        208 bytes, so the list alone was several gigabytes on a real power net.
+        """
+        forms = CompiledRe.re_regular_wiring_form.finditer(statement, start, end)
         last = [None, None]
-        for i, match in enumerate(forms):
-            end = forms[i + 1].start() if i + 1 < len(forms) else len(text)
-            fields = match.groupdict()
+        for match, nxt in _with_lookahead(forms):
+            form_end = end if nxt is None else nxt.start()
+            self.n_forms += 1
+            layer_name, taper_rule = match.group('layer', 'taper_rule')
             # A per-wire TAPERRULE wins over the net-level + NONDEFAULTRULE.
-            wire_rule = fields['taper_rule'] or rule
-            self.layers_used.add(fields['layer'])
+            wire_rule = taper_rule or rule
+            self.layers_used.add(layer_name)
             points, vias = self.__split_points(
-                self.__scan_tokens(text[match.end():end], last))
+                self.__scan_tokens(statement[match.end():form_end], last))
             self.n_points += len(points)
             if len(points) > self.points_max:
                 self.points_max = len(points)
             if len(points) == 1:
                 _, x, y, _ext = points[0]
                 via, via_orient = vias.get(0, (None, None))
-                net.wiring.append(DefWire(fields['layer'], wire_rule, (x, y), (x, y),
+                net.wiring.append(DefWire(layer_name, wire_rule, (x, y), (x, y),
                                           via=via, via_orient=via_orient))
                 continue
             for j in range(len(points) - 1):
                 _, x0, y0, _e0 = points[j]
                 _, x1, y1, _e1 = points[j + 1]
                 via, via_orient = vias.get(j, (None, None))
-                net.wiring.append(DefWire(fields['layer'], wire_rule, (x0, y0), (x1, y1),
+                net.wiring.append(DefWire(layer_name, wire_rule, (x0, y0), (x1, y1),
                                           via=via, via_orient=via_orient))
 
     @staticmethod
@@ -616,13 +679,13 @@ class DefParser:
             if CompiledRe.re_net.search(line):
                 self.n_special_nets += 1
                 statement, line = self.__read_statement(line)
-                header, text = self.__split_statement(
+                header, start, end = self.__split_statement(
                     statement, CompiledRe.re_special_wiring_form)
                 net = self.__statement_net(header)
                 net.is_special = True
                 self.__record_use(net, statement)
-                if text:
-                    self.__add_special_wiring(net, text)
+                if start < end:
+                    self.__add_special_wiring(net, statement, start, end)
                 self.__release(net)
             else:
                 line = self.fetchLine_method()
@@ -633,7 +696,7 @@ class DefParser:
             if CompiledRe.re_net.search(line):
                 self.n_nets += 1
                 statement, line = self.__read_statement(line)
-                header, text = self.__split_statement(
+                header, start, end = self.__split_statement(
                     statement, CompiledRe.re_regular_wiring_form)
                 net = self.__statement_net(header)
                 self.__record_use(net, statement)
@@ -645,8 +708,8 @@ class DefParser:
                 ndr_match = (CompiledRe.re_ndr.search(statement)
                              if 'NONDEFAULTRULE' in statement else None)
                 rule = ndr_match['ndr'] if ndr_match else 'default'
-                if text:
-                    self.__add_regular_wiring(net, text, rule)
+                if start < end:
+                    self.__add_regular_wiring(net, statement, start, end, rule)
                 self.__release(net)
             else:
                 line = self.fetchLine_method()

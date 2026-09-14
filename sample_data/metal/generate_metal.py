@@ -673,7 +673,7 @@ class _Writer:
 
 
 def real_shape(out_dir, nets, instances, via_forms, via_points, lines_per_form, via_nets,
-               gzip_out, gc_mode, profile, jobs=1) -> int:
+               gzip_out, gc_mode, profile, jobs=1, min_layer=None, max_layer=None) -> int:
     """Write the real design's shape mix and time the routing read on it.
 
     The via points are what the real file is mostly made of, and they are written in both
@@ -823,8 +823,11 @@ def real_shape(out_dir, nets, instances, via_forms, via_points, lines_per_form, 
         profiler.enable()
     started = time.perf_counter()
     with _quiet():
+        # The layer range is what makes the *filtered* class reachable at all: the real run
+        # measured 28.4 % of its shapes on layers outside 2..12, and without these flags a
+        # synthetic run cannot reproduce the mix it is supposed to stand in for.
         data = build_metal([path], [], [os.path.join(HERE, "tech.lef")], grid_size=REAL_GRID,
-                           jobs=jobs)
+                           jobs=jobs, min_layer=min_layer, max_layer=max_layer)
     build_seconds = time.perf_counter() - started
     if profile:
         profiler.disable()
@@ -916,6 +919,11 @@ def main(argv=None) -> int:
                              "measurement of the live-set hypothesis and of its fix")
     parser.add_argument("--jobs", type=int, default=1,
                         help="--real-shape: processes for the wiring pass (default 1)")
+    parser.add_argument("--min-layer", "--min_layer", dest="min_layer", type=int, default=None,
+                        help="--real-shape: lowest routing layer to measure, as the CLI takes "
+                             "it (the default measures the whole stack)")
+    parser.add_argument("--max-layer", "--max_layer", dest="max_layer", type=int, default=None,
+                        help="--real-shape: highest routing layer to measure")
     parser.add_argument("--profile", action="store_true",
                         help="--real-shape: profile the build and print the top 15 by self "
                              "time (the only way to split parser-self from sink-self)")
@@ -930,7 +938,8 @@ def main(argv=None) -> int:
         if args.real_shape:
             return real_shape(out, args.nets, args.instances, args.via_forms,
                               args.via_points, args.lines_per_form, args.via_nets,
-                              args.gzip, args.gc, args.profile, args.jobs)
+                              args.gzip, args.gc, args.profile, args.jobs,
+                              args.min_layer, args.max_layer)
         return stress(args.stress, out)
 
     rng = random.Random(0)

@@ -386,3 +386,73 @@ def test_negative_coordinates_are_accepted(tmp_path):
     shape = parser.getNet("GND").swiring[0]
     assert (shape.x0, shape.y0, shape.x1, shape.y1) == (-200, -200, 200, -200)
     assert shape.layer_name == "m1"                          # lowercase layer name
+
+
+def test_a_mask_clause_does_not_become_a_form_on_a_layer_called_ask(tmp_path):
+    """`+ MASK 1` after a form's points is a clause, not a form on a layer named `ASK`.
+
+    The guard that stops a keyword opening a form rejects the match at its first character -
+    and the engine then advances one character and matches the rest of the word, so `MASK 1`
+    was read as `layer=ASK, width=1`. The real run is a three-mask process, and this is where
+    its 4.5 M `unknown` shapes and its `layers_not_into_tech: ["ASK"]` came from. The form that
+    owned those points also ends early, which is how the geometry below is lost: the two-point
+    M4 wire becomes one point, and the mask's own points are counted on a phantom layer.
+    """
+    import re
+
+    from vlsi_viewer.parsers.DEF.compiledRe import CompiledRe
+
+    body = ("- VDD + USE POWER\n"
+            "  + ROUTED M4 40 ( 1000 1000 ) ( 2000 1000 ) + MASK 1 ( 3000 1000 ) ;\n")
+    previous = CompiledRe.re_special_wiring_form
+    without_guard = re.compile(r'(?=[+A-Za-z_])'
+                               + previous.pattern[len(CompiledRe.FORM_FIRST):])
+    seen = []
+    for pattern in (without_guard, previous):      # before the fix, then after it
+        CompiledRe.re_special_wiring_form = pattern
+        parser = _specialnets(tmp_path, [body])
+        seen.append((sorted(parser.layers_used),
+                     [(wire.layer_name, (wire.x0, wire.y0), (wire.x1, wire.y1))
+                      for wire in parser.getNet("VDD").swiring]))
+    CompiledRe.re_special_wiring_form = previous
+
+    # Before: the artifact form takes `ASK` as its layer, ends the M4 form early so the wire
+    # between the second and third points is never built, and emits the mask's own point as a
+    # zero-length shape on a layer no tech LEF defines.
+    assert seen[0][0] == ["ASK", "M4"]
+    assert seen[0][1] == [("M4", (1000, 1000), (2000, 1000)),
+                          ("ASK", (3000, 1000), (3000, 1000))]
+
+    # After: one M4 form, all three points, and no layer named after the rest of a keyword.
+    assert seen[1][0] == ["M4"]
+    assert seen[1][1] == [("M4", (1000, 1000), (2000, 1000)),
+                          ("M4", (2000, 1000), (3000, 1000))]
+
+
+def test_a_giant_statement_is_not_held_several_times_over(tmp_path):
+    """One power net written as one statement: the text must not cost several copies of itself.
+
+    A real chip-level DEF is 20 % one statement - 58,549,358 lines, 4,979,560,694 characters,
+    measured - and reading it used to hold, at once, a list of that many line strings, their
+    join, a wiring slice, and a list of one match object per form (208 bytes each): ~27 GB for
+    a job that asked for 20. The bound is deliberately loose, because the point is the order of
+    magnitude rather than a byte count - it fails above ~6x the statement and passes below ~3x.
+    """
+    import tracemalloc
+
+    form = "  + VIA via1_2 ( 1000 2000 )\n"
+    body = ("SPECIALNETS 1 ;\n- VDD + USE POWER\n" + form * 200_000
+            + "  ;\nEND SPECIALNETS\nEND DESIGN\n")
+    path = tmp_path / "giant.def"
+    path.write_text(HEADER + body)
+
+    tracemalloc.start()
+    parser = DefParser(str(path), parse_net=True, parse_specialnet=True)
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    stats = parser.getStats()
+    assert stats["statement_lines_max"] == 200_002        # the net's line, its forms, its ';'
+    assert parser.getNet("VDD").via_points == 200_000     # every point counted, none lost
+    assert peak < 3.5 * stats["statement_chars_max"]
+

@@ -89,16 +89,24 @@ class CompiledRe:
     WIRE_LAYER = r'[A-Za-z_][\w\[\]\/.]*'
     SHAPE_OR_MASK = r'(?:\+\s*SHAPE\s+\S+\s*|\+\s*MASK\s+\d+\s*)*'
     STYLE = r'(?:\+\s*STYLE\s+\d+\s*)?'
-    # Two cheap refusals in front of the form grammar. Both are *implied* by it rather than
+    # Three cheap refusals in front of the form grammar. All are *implied* by it rather than
     # added to it, which is what makes them safe: every branch below starts with '+', a
-    # letter or '_', so that class cannot reject a match the grammar would have taken; and
-    # the layer/width branch requires a digit after its name, so asserting that first keeps
-    # the keyword lookahead from being retried at every letter of every tail.
+    # letter or '_', so that class cannot reject a match the grammar would have taken; the
+    # layer/width branch requires a digit after its name, so asserting that first keeps the
+    # keyword lookahead from being retried at every letter of every tail; and forms are
+    # whitespace-separated, so one can never begin inside a word.
+    #
+    # That last one is not decoration. Rejecting `MASK` at its first character lets the engine
+    # advance one character and match `ASK 1` as a layer named ASK with width 1 - the same
+    # failure the token pattern had, where it is handled by the keyword set in `__scan_tokens`.
+    # Here it costs geometry: the form that owned those points ends early, and the mask's own
+    # points land on a layer no tech LEF defines. A three-mask process writes `+ MASK 1` after
+    # a form's points, so the class is millions of shapes in a real file.
     #
     # This scan sees every character of a DEF's wiring, so it is the one worth making
     # cheap: measured on routing-shaped text, 182 -> 37 ns per character, with the match
     # stream identical - same positions, same groups - over 16,000 forms.
-    FORM_FIRST = r'(?=[+A-Za-z_])'
+    FORM_FIRST = r'(?=[+A-Za-z_])(?<![A-Za-z0-9_])'
     LAYER_WITH_WIDTH = (rf'(?P<layer>(?={WIRE_LAYER}\s+\d){NOT_KEYWORD}{WIRE_LAYER})'
                         rf'\s+(?P<width>\d+)')
     # Special wiring: one form per match. The reference brackets the
