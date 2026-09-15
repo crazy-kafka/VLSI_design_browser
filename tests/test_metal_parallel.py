@@ -12,6 +12,7 @@ in exactly one block.
 """
 import contextlib
 import io
+import logging
 import os
 import signal
 import threading
@@ -505,3 +506,247 @@ def test_the_pool_is_built_with_that_initializer(monkeypatch):
     _force_pool(monkeypatch)
     _build(3, monkeypatch)
     assert seen.get("initializer") is parallel.ignore_interrupts
+
+
+# -- the log a worker writes ---------------------------------------------------------
+
+def _beat_record():
+    return logging.LogRecord("vlsi_viewer.parallel", logging.WARNING, __file__, 1,
+                             "parallel: %s declares %d net(s)", ("f.def", 3), None)
+
+
+def test_a_worker_tags_every_line_it_prints():
+    """Eight workers share one stdout: a line has to say which worker wrote it.
+
+    The pool's output is mostly the parser's own heartbeat, and without a tag the only thing
+    telling two workers apart was the numbers inside the text itself.
+    """
+    puts = parallel._tagged_puts(3)
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        puts("Read DEF 1,308,204 lines")
+        puts("End DEF parsing in 69.0185s", flush=True)      # the heartbeat passes flush
+    assert captured.getvalue().splitlines() == ["[w3] Read DEF 1,308,204 lines",
+                                                "[w3] End DEF parsing in 69.0185s"]
+
+
+def test_a_worker_tags_the_records_it_logs():
+    """The same tag on records that go through `logging`, or the two styles disagree."""
+    formatted = parallel._worker_formatter(3).format(_beat_record())
+    assert formatted.startswith("[w3] WARNING vlsi_viewer.parallel: ")
+    assert formatted.endswith("declares 3 net(s)")
+
+
+def test_a_worker_tags_what_it_writes(tmp_path):
+    """The whole path in one process: `_worker` down to the parser's own line.
+
+    The pool cannot be asked this - its workers are separate processes, and on a spawned platform
+    their output is not the test's stdout at all. Running one worker here is what makes the tag
+    observable, and it is the only test that would notice `_worker` forgetting to install it.
+    Four nets read at stride four, index three, leave this worker exactly one statement - so the
+    line it writes is the whole of its output and can be asserted exactly.
+    """
+    from vlsi_viewer.parallel import _Flag, _worker
+    from vlsi_viewer.parsers.routing import TechRouting
+
+    path = tmp_path / "one.def"
+    path.write_text("""\
+VERSION 5.8 ;
+DESIGN one ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 1000 1000 ) ;
+NETS 4 ;
+- n1 ( u1 A ) + ROUTED M1 ( 100 200 ) ( 400 200 ) ;
+- n2 ( u1 A ) + ROUTED M1 ( 100 300 ) ( 400 300 ) ;
+- n3 ( u1 A ) + ROUTED M1 ( 100 400 ) ( 400 400 ) ;
+- n4 ( u1 A ) + ROUTED M1 ( 100 500 ) ( 400 500 ) ;
+END NETS
+END DESIGN
+""")
+    tech_path = tmp_path / "tech.lef"
+    tech_path.write_text(open(os.path.join(SAMPLE, "tech.lef")).read())
+    with contextlib.redirect_stdout(io.StringIO()):
+        tech = TechRouting.read([str(tech_path)])
+    # (path, design, tech, frames, min_segment, extent, grid_size, index, stride,
+    #  chunk_statements, flag, ranges, header) - the last two are `None` without byte ranges.
+    flag = _Flag.create()
+    task = (str(path), "one", tech, None, None, EXTENT, 10.0, 3, 4, 1, flag, None, None)
+    root = logging.getLogger()
+    handlers = root.handlers[:]          # `_worker` installs its own, as it must in a child
+    try:
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            _worker(task)
+    finally:
+        root.handlers[:] = handlers
+        flag.destroy()
+    lines = captured.getvalue().splitlines()
+    assert lines[0] == "[w3] Load DEF file one"
+    assert lines[1].startswith("[w3] End DEF parsing in ")
+    # Nothing this worker writes escapes the tag, whichever of the two paths it came from.
+    assert all(line.startswith("[w3] ") for line in lines)
+
+
+# -- byte-range work units (the prototype, off by default) ----------------------------
+
+GCD = "sample_data/real/nangate45/gcd_nangate45.def"
+
+
+def _first_lines(path):
+    return [lines[0] for _section, lines in _reader(path).statements()]
+
+
+def test_the_scan_finds_the_same_statements_the_reader_does(tmp_path):
+    """The scan's offsets are only useful if they agree with the reader, statement for statement.
+
+    Compared on a DEF of each shape the repository has: the generated block, a routed netlist
+    whose statements run over several lines, and deliberately awkward text - blank lines, indented
+    statements, a record whose coordinates wrap.
+    """
+    from vlsi_viewer.parallel import scan_work_units
+
+    awkward = tmp_path / "awkward.def"
+    awkward.write_text("""\
+VERSION 5.8 ;
+DESIGN awk ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+NONDEFAULTRULES 1 ;
+- WIDE
+  + LAYER M1 WIDTH 200 SPACING 200
+  ;
+END NONDEFAULTRULES
+COMPONENTS 1 ;
+- u1 BUF + PLACED ( 0 0 ) N ;
+END COMPONENTS
+NETS 3 ;
+
+    - n1 ( u1 A )
+      + ROUTED M1 ( 100 100 ) ( 900 100 ) ;
+- n2 ( u1 A ) + ROUTED M1 ( 100 200 ) ( 900 200 )
+  ( 900 300 )
+  ;
+- n3 ( u1 A ) WIDE
+  + ROUTED M1 ( 100 400 ) ( 900 400 ) ;
+END NETS
+END DESIGN
+""")
+    for path in (os.path.join(SAMPLE, "sub.def"), os.path.join(SAMPLE, "top.def"), GCD,
+                 str(awkward)):
+        units = scan_work_units(path)
+        with open(path, "rb") as handle:
+            firsts = []
+            for offset in units.starts:
+                handle.seek(offset)
+                # Normalised the way the readers normalise it: they read text, and a fixture
+                # written on Windows carries CRLF that neither of them hands on.
+                firsts.append(handle.readline().decode().replace("\r\n", "\n"))
+        assert firsts == _first_lines(path), path
+
+
+def test_the_scan_reads_the_header_the_reader_would_have_read():
+    """The three things that fail silently when a reader starts mid-file."""
+    from vlsi_viewer.parallel import Reader, scan_work_units
+
+    for path in (os.path.join(SAMPLE, "sub.def"), GCD):
+        whole = _reader(path)
+        list(whole.statements())
+        units = scan_work_units(path)
+        assert units.preamble == whole.preamble
+        assert units.rules == whole.rules
+        assert units.design == whole.design
+        assert units.declared == whole._declared
+        assert units.found == whole._found
+        assert units.lines == whole.lines
+        # And that a reader handed them has no reason to read the head of the file at all.
+        ranged = Reader(path, ranges=[(0, units.size, None)], header=units)
+        list(ranged.statements())
+        assert ranged.preamble == whole.preamble and ranged.rules == whole.rules
+        assert ranged._declared == whole._declared
+
+
+def test_the_ranges_partition_the_file_at_statement_starts():
+    """Whole statements, in order, with nothing left over - the property the whole idea rests on."""
+    from vlsi_viewer.parallel import pack_ranges, scan_work_units
+
+    path = os.path.join(SAMPLE, "sub.def")
+    units = scan_work_units(path)
+    for jobs in (1, 2, 3, 8):
+        shares = pack_ranges(units, jobs)
+        assert len(shares) == jobs
+        pairs = [piece for share in shares for piece in share]
+        assert pairs[0][0] == 0 and pairs[-1][1] == units.size
+        assert all(pairs[i][1] == pairs[i + 1][0] for i in range(len(pairs) - 1))
+        # A cut is a statement start, never a byte inside one - which is what protects a
+        # statement's `*` state and keeps the giant statement whole.
+        assert all(start in set(units.starts) or start == 0 for start, _end, _s in pairs)
+        assert all(end == units.size or end in set(units.starts) for _start, end, _s in pairs)
+
+
+def test_every_statement_lands_in_exactly_one_share():
+    """The partition is disjoint and complete, and each share reads in file order."""
+    from vlsi_viewer.parallel import Reader, pack_ranges, scan_work_units
+
+    path = os.path.join(SAMPLE, "sub.def")
+    units = scan_work_units(path)
+    seen = []
+    for share in pack_ranges(units, 3):
+        seen += [lines[0] for _section, lines in
+                 Reader(path, ranges=share, header=units).statements()]
+    assert seen == _first_lines(path)          # same statements, same order, each exactly once
+
+
+def test_a_byte_range_pool_produces_the_same_map_as_one_process(monkeypatch):
+    """The claim the whole change rests on, at a chunk size that exercises several chunks."""
+    _force_pool(monkeypatch, chunk=250)
+    sequential = _build(1)
+    strided = _build(3, monkeypatch)
+    monkeypatch.setattr(parallel, "RANGE_WORK_UNITS", True)
+    ranged = _build(3, monkeypatch)
+    assert ranged.totals == sequential.totals == strided.totals
+    assert ranged.stats["forms"] == sequential.stats["forms"]
+    assert ranged.stats["points"] == sequential.stats["points"]
+    assert ranged.stats["lines"] == sequential.stats["lines"]
+    assert ranged.stats["layers_used"] == sequential.stats["layers_used"]
+    layers = [layer.name for layer in sequential.layers]
+    assert np.allclose(_heat(ranged, layers), _heat(sequential, layers), rtol=1e-6, atol=1e-6)
+
+
+def test_a_scan_that_miscounts_is_caught_rather_than_measured(monkeypatch):
+    """The safety net, and the only test that can show it is a net at all.
+
+    A boundary in the wrong place would measure fewer statements and report that as a smaller
+    number - so what the readers actually parsed is compared against what the scan counted, and
+    a scan that disagrees must fail the run rather than quietly under-report it. The corruption
+    here stands in for the whole family: any divergence ends in the same comparison.
+    """
+    _force_pool(monkeypatch, chunk=250)
+    monkeypatch.setattr(parallel, "RANGE_WORK_UNITS", True)
+    real = parallel.scan_work_units
+
+    def lossy(path):
+        units = real(path)
+        section = next(iter(units.found))
+        return units._replace(found=dict(units.found, **{section: units.found[section] - 1}))
+
+    monkeypatch.setattr(parallel, "scan_work_units", lossy)
+    with pytest.raises(ValueError, match="disagree"):
+        _build(2, monkeypatch)
+
+
+def test_a_gzipped_def_is_unpacked_once_and_removed_again(tmp_path, monkeypatch):
+    """The `.gz` path: seekable after one decompression, and the copy does not outlive the run."""
+    import gzip
+
+    _force_pool(monkeypatch, chunk=250)
+    monkeypatch.setattr(parallel, "RANGE_WORK_UNITS", True)
+    body = open(os.path.join(SAMPLE, "sub.def")).read()
+    packed = tmp_path / "sub.def.gz"
+    with gzip.open(str(packed), "wt", newline="\n") as handle:
+        handle.write(body)
+    with contextlib.redirect_stdout(io.StringIO()):
+        data = build_metal([str(packed)], [os.path.join(SAMPLE, "cells.lef")],
+                           [os.path.join(SAMPLE, "tech.lef")], grid_size=10.0, jobs=2,
+                           work_dir=str(tmp_path))
+    assert data.totals["emitted"] > 0
+    assert not (tmp_path / "sub.def.unpacked").exists()

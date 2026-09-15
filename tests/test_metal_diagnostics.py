@@ -11,9 +11,10 @@ import io
 import json
 import logging
 
-from vlsi_viewer.metal import build_metal
+from vlsi_viewer.metal import SUMMARY_SECTIONS, build_metal
 from vlsi_viewer.parsers import DefParser
-from vlsi_viewer.parsers.routing import ShapeStream, TechRouting, parse_def
+from vlsi_viewer.parsers.routing import (LAYER_COLUMNS, ShapeStream, TechRouting,
+                                         parse_def)
 
 TECH = """\
 LAYER M1
@@ -179,16 +180,26 @@ SUMMARY_FIELDS = {"design", "grid", "stages_s", "shapes", "input_text", "layers"
                   "gc_counts", "gc_s", "warnings", "params", "inputs"}
 
 
-def test_the_summary_line_is_one_line_of_json_with_the_evidence_in_it(tmp_path, caplog):
-    """The artefact a run hands back: one line, parseable, with the fields that matter."""
+def test_the_summary_is_one_labelled_line_per_section(tmp_path, caplog):
+    """The artefact a run hands back: short lines, each parseable on its own.
+
+    This replaced a single 4,000-character record. The fields were all there and none of them
+    could be read - or grepped for by name - among the progress lines around them. The label
+    list is pinned deliberately: the sections are the summary's contract, so growing it should
+    take a decision rather than happening by accident.
+    """
     path, tech = _files(tmp_path)
     with caplog.at_level(logging.INFO, logger="vlsi_viewer.metal"):
         with contextlib.redirect_stdout(io.StringIO()):
             data = build_metal([path], [], [tech], grid_size=10.0)
-    summaries = [record.getMessage() for record in caplog.records
-                 if record.getMessage().startswith("metal-summary: ")]
-    assert len(summaries) == 1
-    summary = json.loads(summaries[0].split("metal-summary: ", 1)[1])
+    assert [label for label, _payload in _last_run(caplog)] == [
+        "run", "params", "inputs", "stages_s", "shapes", "input_text", "layer M1", "layer M2",
+        "blockage", "filtered_layers", "memory", "warnings"]
+    # No line is a wall of JSON. Loose enough for a temporary directory's path to appear in
+    # `inputs`, and far below the 4,000-character record this replaced.
+    assert all(len(record.getMessage()) < 1000 for record in caplog.records
+               if record.getMessage().startswith("metal-summary: "))
+    summary = _summary(caplog)
     assert SUMMARY_FIELDS <= set(summary)
     assert summary["design"] == "diag"
     assert summary["grid"] == [data.rows, data.cols]
@@ -206,20 +217,60 @@ def test_every_stage_of_a_build_is_announced_and_timed(tmp_path, caplog):
                  if record.getMessage().startswith("metal: stage ")}
     assert {"components", "cell-index", "capacity", "blockage", "routing",
             "grids"} <= announced
-    summary = json.loads([record.getMessage() for record in caplog.records
-                          if record.getMessage().startswith("metal-summary: ")][0]
-                         .split("metal-summary: ", 1)[1])
+    summary = _summary(caplog)
     # Announced, timed, and in the summary: the three places a stage has to appear.
     assert announced == set(summary["stages_s"])
 
 
 # -- a range of the stack ------------------------------------------------------------
 
-def _summaries(caplog):
-    """Every `metal-summary:` line in a recorded run, parsed."""
-    return [json.loads(record.getMessage().split("metal-summary: ", 1)[1])
-            for record in caplog.records
-            if record.getMessage().startswith("metal-summary: ")]
+def _sections(caplog):
+    """Every `metal-summary:` line in a recorded run, as ``(label, payload)``.
+
+    The label is what precedes the payload, found by the payload's own opening brace rather
+    than by splitting on a space: a layer's label is two words, and the JSON is full of single
+    spaces of its own.
+    """
+    out = []
+    for record in caplog.records:
+        message = record.getMessage()
+        if not message.startswith("metal-summary: "):
+            continue
+        rest = message[len("metal-summary: "):]
+        start = min(index for index in (rest.find("{"), rest.find("[")) if index >= 0)
+        out.append((rest[:start].strip(), json.loads(rest[start:])))
+    return out
+
+
+def _last_run(caplog):
+    """The sections of the last build in a recorded log.
+
+    A recorded log can hold more than one - a test comparing a full run against a filtered one
+    records both - and every summary opens with `run`, so that is where the last one starts.
+    """
+    sections = _sections(caplog)
+    starts = [index for index, (label, _payload) in enumerate(sections) if label == "run"]
+    return sections[starts[-1]:] if starts else []
+
+
+def _summary(caplog):
+    """The whole summary, reassembled from its sections - the dict the run itself built.
+
+    Reading it back through ``SUMMARY_SECTIONS`` is the point: a key the sections do not carry
+    shows up here as a missing one, which is what stops "one line per section" from quietly
+    becoming "one line per section, minus the part that was awkward to place".
+    """
+    merged = {}
+    for label, payload in _last_run(caplog):
+        if label.startswith("layer "):
+            merged.setdefault("layers", []).append(payload)
+            continue
+        keys = dict(SUMMARY_SECTIONS).get(label)
+        if keys is None or len(keys) != 1:
+            merged.update(payload)
+        else:
+            merged[keys[0]] = payload
+    return merged
 
 
 def _messages(caplog):
@@ -243,7 +294,7 @@ def test_a_filtered_layer_is_counted_as_a_choice_not_as_missing_data(tmp_path, c
     assert data.totals["filtered"] > 0
     assert data.totals["unknown"] == known
     assert data.totals["emitted"] < full.totals["emitted"]   # M1's wire is not measured
-    summary = _summaries(caplog)[-1]
+    summary = _summary(caplog)
     assert summary["params"]["min_layer"] == 2 and summary["params"]["max_layer"] is None
     assert summary["filtered_layers"] == ["M1"]
     assert [layer["name"] for layer in summary["layers"]] == ["M2"]
@@ -297,3 +348,58 @@ def test_a_macro_obstructing_only_a_filtered_layer_is_not_reported_as_a_missing_
     assert data.blockage["obs_layers"] == []         # its only OBS layer is out of range
     assert data.blocked_layers == []
     assert data.blockage["ignored_cells"] == ["BLK"]
+
+
+# -- per-layer shape statistics ------------------------------------------------------
+
+def test_the_per_layer_counts_add_up_to_the_global_ones(tmp_path):
+    """The invariant the table rests on: an increment missed on one layer shows here and nowhere
+    else, because every other test compares totals that the missing shape is still counted in."""
+    path, tech = _files(tmp_path)
+    with contextlib.redirect_stdout(io.StringIO()):
+        data = build_metal([path], [], [tech], grid_size=10.0)
+    rows = data.layer_stats["rows"]
+    assert rows and len(rows) == len(data.layers)
+    per_layer = {name: sum(row[index] for row in rows)
+                 for index, name in enumerate(LAYER_COLUMNS)}
+    for column, counter in (("shapes", "emitted"), ("jogs", "jogs"),
+                            ("diagonals", "diagonals"), ("degenerate", "degenerate"),
+                            ("unusable", "unusable")):
+        assert per_layer[column] == data.totals[counter], column
+    # Vias are the one class that can arrive without a layer: a `+ VIA` form states none, so those
+    # points are counted separately rather than guessed onto a layer - and the two together have
+    # to be every via the run counted, or the table would be quietly losing some.
+    assert per_layer["vias"] + data.layer_stats["via_unattributed"] == data.totals["vias"]
+    assert data.layer_stats["via_unattributed"] > 0      # this fixture's '+ VIA' form
+    # Every measured shape is signal or power, so those two columns have to add up to the shapes.
+    assert per_layer["signal"] + per_layer["power"] == per_layer["shapes"]
+
+
+def test_the_shapes_a_layer_range_skipped_are_counted_by_the_layer_they_were_on(tmp_path):
+    """An excluded layer has no index in the trimmed stack, so those shapes are keyed by name.
+
+    The name is the informative part: the real run skipped 72 M shapes and this is what says which
+    excluded layer they were on rather than only how many there were.
+    """
+    path, tech = _files(tmp_path)
+    with contextlib.redirect_stdout(io.StringIO()):
+        data = build_metal([path], [], [tech], grid_size=10.0, min_layer=2)
+    filtered = data.layer_stats["filtered_by_layer"]
+    assert sum(filtered.values()) == data.totals["filtered"] > 0
+    assert "M1" in filtered                       # the excluded layer of this fixture
+
+
+def test_the_summary_carries_the_same_per_layer_numbers_the_table_prints(tmp_path, caplog):
+    """One set of numbers in two places, which is the only way they cannot drift apart."""
+    path, tech = _files(tmp_path)
+    with caplog.at_level(logging.INFO, logger="vlsi_viewer.metal"):
+        with contextlib.redirect_stdout(io.StringIO()):
+            data = build_metal([path], [], [tech], grid_size=10.0)
+    by_name = {entry["name"]: entry for entry in _summary(caplog)["layers"]}
+    assert by_name["M2"]["shapes"] == data.layer_stats["rows"][0][0] > 0
+    assert by_name["M2"]["area_um2"] > 0
+    assert by_name["M2"]["util"] > 0
+    assert by_name["M2"]["signal"] + by_name["M2"]["power"] == by_name["M2"]["shapes"]
+    # And one row per measured layer, the empty ones included.
+    rows = [line for line in _messages(caplog) if line.startswith("  M")]
+    assert len(rows) >= 2 * len(data.layers)

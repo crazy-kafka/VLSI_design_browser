@@ -53,11 +53,11 @@ class DefParser:
     IGNORE_FILLER = False
     IGNORE_COVER = False
 
-    def __init__(self, def_file: AnyStr, skip_comp=False, parse_pin=False, batch_mode=False, parse_net=False, parse_blockage=False, parse_specialnet=False, parse_ndr=True, sink=None, cancel=None, lines=None):
-        if batch_mode is True:
-            self.puts = print
-        else:
-            self.puts = Print
+    def __init__(self, def_file: AnyStr, skip_comp=False, parse_pin=False, batch_mode=False, parse_net=False, parse_blockage=False, parse_specialnet=False, parse_ndr=True, sink=None, cancel=None, lines=None, puts=None):
+        # Every progress line the parser writes goes through `puts`, so a caller that has to tell
+        # its lines apart from another process's - the pooled metal path, where eight workers
+        # share one stdout - supplies its own. Without one this is what it has always been.
+        self.puts = puts if puts is not None else (print if batch_mode is True else Print)
         self.puts(f'Load DEF file {def_file}')
         self.def_file = def_file
 
@@ -87,6 +87,11 @@ class DefParser:
         self.statement_lines_max = 0
         self.statement_chars_max = 0
         self.points_max = 0
+        # `VIRTUAL` connections (not metal), inline `RECT`s (metal, and once dropped), and how
+        # many non-orthogonal segments were seen at all - the last one bounded, see below.
+        self.n_virtual = 0
+        self.n_rects = 0
+        self.n_non_orthogonal = 0
         self.layers_used: Set[AnyStr] = set()
 
         # Heartbeat state; see `__count_line`.
@@ -438,10 +443,11 @@ class DefParser:
         return last[index]
 
     def __scan_tokens(self, tail: AnyStr, last: List) -> List[Tuple]:
-        """Ordered points and vias from a routing-points tail.
+        """Ordered points, vias, virtual points and rectangles from a routing-points tail.
 
         ``last`` is shared across the statement so ``*`` reuses the last coordinate per
-        the reference. Returns ``('pt', x, y, ext)`` and ``('via', name, orient)``.
+        the reference. Returns ``('pt', x, y, ext)``, ``('vpt', x, y, ext)`` for a
+        ``VIRTUAL`` point, ``('rect', x0, y0, x1, y1)`` and ``('via', name, orient)``.
         """
         out = []
         # '(*703600)' and '(1760*)' are handled defensively, not because they were seen: a
@@ -461,8 +467,27 @@ class DefParser:
             # billions of these calls - measured as `re.Match.group`, 4.9 % of the profile.
             # Asking for several groups at once returns the same strings in one call, and an
             # unparticipated group still answers `None`.
-            x, y, ext = token.group('x', 'y', 'ext')
-            if x is not None:
+            x, y, ext, vx, vy, rx, ry, rx2, ry2 = token.group(
+                'x', 'y', 'ext', 'vx', 'vy', 'rx0', 'ry0', 'rx1', 'ry1')
+            if vx is not None:
+                # `VIRTUAL ( x y )`: a non-physical zero-width connection, whose point is where
+                # the path continues from (reference 874). Kept as its own kind rather than
+                # resolved away - the caller drops the segment *into* it and keeps the one out.
+                vx = self.__resolve_coord(vx, last, 0)
+                vy = self.__resolve_coord(vy, last, 1)
+                last[0], last[1] = vx, vy
+                out.append(('vpt', vx, vy, None))
+            elif rx is not None:
+                # `RECT ( deltax1 deltay1 deltax2 deltay2 )`: real metal, a rectangle placed
+                # from the previous point by those deltas. Resolved here because that is the
+                # only moment the point it is relative to is known - and it does *not* become
+                # the current point, which the reference states explicitly.
+                if last[0] is None:
+                    raise ValueError("a RECT placed before any routing point, so there is "
+                                     "nothing for its deltas to be relative to")
+                out.append(('rect', last[0] + int(rx), last[1] + int(ry),
+                            last[0] + int(rx2), last[1] + int(ry2)))
+            elif x is not None:
                 x = self.__resolve_coord(x, last, 0)
                 y = self.__resolve_coord(y, last, 1)
                 last[0], last[1] = x, y
@@ -479,24 +504,61 @@ class DefParser:
         return out
 
     @staticmethod
-    def __split_points(tokens: List[Tuple]) -> Tuple[List[Tuple], dict]:
-        """Points in order, plus the via anchored to each point's index.
+    def __split_points(tokens: List[Tuple]) -> Tuple[List[Tuple], dict, List[Tuple]]:
+        """Points in order, the via anchored to each point's index, and the rectangles.
 
         A via sits *at* a routing point, so it rides the segment that starts there; a
-        via appearing before the first point rides the first segment instead.
+        via appearing before the first point rides the first segment instead. A ``VIRTUAL``
+        point is a point here - the path does run through it - and whether the segment leading
+        to it is metal is the emit loops' decision rather than this one's.
         """
-        points, vias, leading = [], {}, None
+        points, vias, rects, leading = [], {}, [], None
         for token in tokens:
-            if token[0] == 'pt':
+            if token[0] == 'pt' or token[0] == 'vpt':
                 points.append(token)
                 if leading is not None:
                     vias[len(points) - 1] = leading
                     leading = None
+            elif token[0] == 'rect':
+                rects.append(token)
             elif points:
                 vias.setdefault(len(points) - 1, (token[1], token[2]))
             else:
                 leading = (token[1], token[2])
-        return points, vias
+        return points, vias, rects
+
+    def __segments(self, points, vias, net):
+        """The wire segments a form's points describe, and the virtual ones it does not.
+
+        A connection *into* a ``VIRTUAL`` point is not metal (reference 874), so it yields no
+        segment; the connection out of that point is an ordinary one. Yields
+        ``(index, from_point, to_point, (via, orientation))``, counting each virtual connection
+        it skips on the net - which is where the stream picks the number up - and in the run's
+        own statistics.
+        """
+        for i in range(len(points) - 1):
+            if points[i + 1][0] == 'vpt':
+                self.n_virtual += 1
+                net.virtual_points += 1
+                continue
+            yield i, points[i], points[i + 1], vias.get(i, (None, None))
+
+    def __note_non_orthogonal(self, net, layer, a, b, text) -> None:
+        """Report the first few non-orthogonal segments, with the form text behind each one.
+
+        A real run counted 8,777,752 of these on layers whose design rules forbid 45 degrees -
+        and a counter cannot say whether that is geometry the tool wrote or a construct this
+        parser reads wrongly, which `VIRTUAL` turned out to be. The form's own text settles it:
+        it can be grepped for in the DEF, and the points are in database units, which is what
+        the file itself uses. Bounded to five per worker, and only ever for a segment that is
+        about to be measured as metal.
+        """
+        if self.n_non_orthogonal >= 5 or a[1] == b[1] or a[2] == b[2]:
+            return
+        self.n_non_orthogonal += 1
+        self.puts(f"NOTE: non-orthogonal segment on {layer} in net {net.net_name}: "
+                  f"({a[1]} {a[2]}) -> ({b[1]} {b[2]})"
+                  f"{' [form uses *]' if '*' in text else ''} from: {text[:200]}")
 
     @staticmethod
     def __split_statement(statement: AnyStr, form_re) -> Tuple[AnyStr, int, int]:
@@ -582,7 +644,7 @@ class DefParser:
             # (a dict, then a lookup and a `get` per field) - see `__scan_tokens`.
             via_name, form_width, rect_layer, poly_layer, layer = match.group(
                 'via_name', 'width', 'rect_layer', 'poly_layer', 'layer')
-            points, vias = self.__split_points(
+            points, vias, rects = self.__split_points(
                 self.__scan_tokens(statement[match.end():form_end], last))
             self.n_points += len(points)
             if len(points) > self.points_max:
@@ -590,6 +652,9 @@ class DefParser:
             for name in (poly_layer, rect_layer, layer):
                 if name:
                     self.layers_used.add(name)
+            for _, x0, y0, x1, y1 in rects:
+                net.rects.append((layer, x0, y0, x1, y1))
+                self.n_rects += 1
 
             if via_name:
                 # '+ VIA via [orient] pt ...': each point carries the via, so there is no
@@ -598,6 +663,9 @@ class DefParser:
                 # reads nothing else about it, so building one zero-length object per point
                 # buys exactly the same counter at the price of the allocation.
                 net.via_points += len(points)
+                if layer:
+                    net.via_points_by_layer[layer] = \
+                        net.via_points_by_layer.get(layer, 0) + len(points)
                 continue
 
             width = int(form_width) if form_width else None
@@ -616,18 +684,19 @@ class DefParser:
                 shape = 'PATH'
             self.__emit_special(net, layer, width, shape, points, vias)
 
-    @staticmethod
-    def __emit_special(net: DefNet, layer, width, shape, points, vias):
+    def __emit_special(self, net: DefNet, layer, width, shape, points, vias):
         if len(points) == 1:
+            if points[0][0] == 'vpt':
+                # A lone virtual point is a connection to nowhere, and it is not a via either.
+                return
             _, x, y, ext = points[0]
             via, via_orient = vias.get(0, (None, None))
             net.swiring.append(DefSWire(layer, width, x, y, ext or 0, x, y, ext or 0,
                                         via=via, via_orient=via_orient, shape=shape))
             return
-        for i in range(len(points) - 1):
-            _, x0, y0, e0 = points[i]
-            _, x1, y1, e1 = points[i + 1]
-            via, via_orient = vias.get(i, (None, None))
+        for _i, a, b, (via, via_orient) in self.__segments(points, vias, net):
+            _, x0, y0, e0 = a
+            _, x1, y1, e1 = b
             net.swiring.append(DefSWire(layer, width, x0, y0, e0 or 0, x1, y1, e1 or 0,
                                         via=via, via_orient=via_orient, shape=shape))
 
@@ -649,22 +718,26 @@ class DefParser:
             # A per-wire TAPERRULE wins over the net-level + NONDEFAULTRULE.
             wire_rule = taper_rule or rule
             self.layers_used.add(layer_name)
-            points, vias = self.__split_points(
+            points, vias, rects = self.__split_points(
                 self.__scan_tokens(statement[match.end():form_end], last))
             self.n_points += len(points)
             if len(points) > self.points_max:
                 self.points_max = len(points)
+            for _, x0, y0, x1, y1 in rects:
+                net.rects.append((layer_name, x0, y0, x1, y1))
+                self.n_rects += 1
             if len(points) == 1:
+                if points[0][0] == 'vpt':
+                    continue
                 _, x, y, _ext = points[0]
                 via, via_orient = vias.get(0, (None, None))
                 net.wiring.append(DefWire(layer_name, wire_rule, (x, y), (x, y),
                                           via=via, via_orient=via_orient))
                 continue
-            for j in range(len(points) - 1):
-                _, x0, y0, _e0 = points[j]
-                _, x1, y1, _e1 = points[j + 1]
-                via, via_orient = vias.get(j, (None, None))
-                net.wiring.append(DefWire(layer_name, wire_rule, (x0, y0), (x1, y1),
+            for _j, a, b, (via, via_orient) in self.__segments(points, vias, net):
+                self.__note_non_orthogonal(net, layer_name, a, b,
+                                           statement[match.end():form_end])
+                net.wiring.append(DefWire(layer_name, wire_rule, (a[1], a[2]), (b[1], b[2]),
                                           via=via, via_orient=via_orient))
 
     @staticmethod
@@ -849,6 +922,8 @@ class DefParser:
                 "statement_lines_max": self.statement_lines_max,
                 "statement_chars_max": self.statement_chars_max,
                 "points_max": self.points_max,
+                "virtual": self.n_virtual,
+                "rects": self.n_rects,
                 "layers_used": sorted(self.layers_used)}
 
     def getComponent(self, comp_name: AnyStr) -> DefComponent:

@@ -202,6 +202,75 @@ def test_star_without_a_previous_coordinate_is_an_error(tmp_path, kind):
         parse(tmp_path, body)
 
 
+# -- VIRTUAL and the inline RECT: routingPoints' other two elements (reference 872-876) ----
+
+def test_virtual_and_rect_together_the_way_the_reference_writes_them(tmp_path):
+    """Example 7-12 verbatim, which is what makes it worth pinning:
+
+        + ROUTED M1 ( 0 0 ) ( 5 0 ) VIRTUAL ( 7 1 ) RECT ( -3 0 -1 2 ) ( 7 7 ) ;
+
+    Three properties, all from page 874. `VIRTUAL ( x y )` is "a virtual (non-physical
+    zero-width) connection between the previous point and the new ( x y ) point", so the pair
+    (5,0)-(7,1) is not a wire - but the new point *is* where the path continues from, so the
+    last pair is (7,1)-(7,7). The rectangle is the previous point plus the deltas, (7-3, 1+0)
+    to (7-1, 1+2), and leaves that point and the layer alone.
+
+    Read as a via *name*, which is what the tokeniser did, VIRTUAL's point became a wire corner
+    and the connection was measured as a full-width wire. A graph edge is not metal, and on a
+    Manhattan design it need not be orthogonal either - which is where a real run's millions of
+    "45-degree shapes" came from.
+    """
+    parser = _nets(tmp_path, ["- n1 ( u1 A ) + ROUTED M1 ( 0 0 ) ( 5 0 ) VIRTUAL ( 7 1 ) "
+                              "RECT ( -3 0 -1 2 ) ( 7 7 ) ;\n"])
+    net = parser.getNet("n1")
+    assert [(w.from_pt, w.to_pt) for w in net.wiring] == [((0, 0), (5, 0)), ((7, 1), (7, 7))]
+    assert net.rects == [("M1", 4, 1, 6, 3)]
+    stats = parser.getStats()
+    assert stats["virtual"] == 1 and stats["rects"] == 1
+
+
+def test_an_inline_rect_does_not_move_the_current_point(tmp_path):
+    """The last clause of that sentence: the RECT "leave[s] the current point unchanged"."""
+    parser = _nets(tmp_path, ["- n1 + ROUTED M1 ( 0 0 ) ( 5 0 ) RECT ( 10 10 20 20 ) ( 5 7 ) ;\n"])
+    net = parser.getNet("n1")
+    assert [(w.from_pt, w.to_pt) for w in net.wiring] == [((0, 0), (5, 0)), ((5, 0), (5, 7))]
+    assert net.rects == [("M1", 15, 10, 25, 20)]
+
+
+def test_a_virtual_point_is_not_metal_in_special_wiring_either(tmp_path):
+    """The special path emits its own segments, so the rule has to hold there too."""
+    parser = _specialnets(tmp_path, ["- VDD + ROUTED M1 100 ( 0 0 ) ( 5 0 ) VIRTUAL ( 7 1 ) "
+                                     "( 7 7 ) ;\n"])
+    net = parser.getNet("VDD")
+    assert [(s.x0, s.y0, s.x1, s.y1) for s in net.swiring] == [(0, 0, 5, 0), (7, 1, 7, 7)]
+    assert parser.getStats()["virtual"] == 1
+
+
+def test_virtual_takes_star_coordinates_like_any_other_point(tmp_path):
+    """Page 874 gives VIRTUAL the same rule a point gets: reuse the previous value."""
+    parser = _nets(tmp_path, ["- n1 + ROUTED M1 ( 0 0 ) ( 5 0 ) VIRTUAL ( * 7 ) ( 5 9 ) ;\n"])
+    net = parser.getNet("n1")
+    # The virtual point resolved to (5, 7) - the last x, and its own y - and the segment out of
+    # it is real metal, so the path is (0,0)-(5,0) then (5,7)-(5,9).
+    assert [(w.from_pt, w.to_pt) for w in net.wiring] == [((0, 0), (5, 0)), ((5, 7), (5, 9))]
+
+
+def test_mask_clauses_are_not_read_as_virtual_points_or_rects(tmp_path):
+    """Example 7-11's `MASK 3 (10 20)` and `MASK 031 VIA1_2` stay mask clauses.
+
+    Both new elements collide with the mask grammar by sight: `MASK 031` is a bare integer
+    where a point could start, and the reference notes it may be written with or without the
+    leading zero.
+    """
+    parser = _nets(tmp_path, ["- n1 + ROUTED M1 ( 10 0 ) MASK 3 ( 10 20 ) VIA1_1 "
+                              "NEW M2 ( 10 10 ) ( 20 10 ) MASK 1 ( 20 20 ) MASK 031 VIA1_2 ;\n"])
+    net = parser.getNet("n1")
+    assert [(w.layer_name, w.from_pt, w.to_pt) for w in net.wiring] == [
+        ("M1", (10, 0), (10, 20)), ("M2", (10, 10), (20, 10)), ("M2", (20, 10), (20, 20))]
+    stats = parser.getStats()
+    assert stats["virtual"] == 0 and stats["rects"] == 0
+
+
 # -- findings 8 / 12: connections are independent of the other clauses -------------
 
 def test_special_net_connections_are_parsed(tmp_path):
@@ -408,13 +477,17 @@ def test_a_mask_clause_does_not_become_a_form_on_a_layer_called_ask(tmp_path):
     without_guard = re.compile(r'(?=[+A-Za-z_])'
                                + previous.pattern[len(CompiledRe.FORM_FIRST):])
     seen = []
-    for pattern in (without_guard, previous):      # before the fix, then after it
-        CompiledRe.re_special_wiring_form = pattern
-        parser = _specialnets(tmp_path, [body])
-        seen.append((sorted(parser.layers_used),
-                     [(wire.layer_name, (wire.x0, wire.y0), (wire.x1, wire.y1))
-                      for wire in parser.getNet("VDD").swiring]))
-    CompiledRe.re_special_wiring_form = previous
+    try:
+        for pattern in (without_guard, previous):  # before the fix, then after it
+            CompiledRe.re_special_wiring_form = pattern
+            parser = _specialnets(tmp_path, [body])
+            seen.append((sorted(parser.layers_used),
+                         [(wire.layer_name, (wire.x0, wire.y0), (wire.x1, wire.y1))
+                          for wire in parser.getNet("VDD").swiring]))
+    finally:
+        # Restored on the way out, for the same reason the other swapped-pattern test does it:
+        # a module-level pattern left swapped parses every later test with the wrong one.
+        CompiledRe.re_special_wiring_form = previous
 
     # Before: the artifact form takes `ASK` as its layer, ends the M4 form early so the wire
     # between the second and third points is never built, and emits the mask's own point as a

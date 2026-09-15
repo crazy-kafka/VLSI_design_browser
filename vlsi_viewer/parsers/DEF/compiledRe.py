@@ -70,6 +70,13 @@ class CompiledRe:
     # coordinate" - so the caller has to carry state between points.
     WIRE_NUM = r'\*|-?\d+'
     WIRE_POINT = rf'\(\s*(?P<x>{WIRE_NUM})\s+(?P<y>{WIRE_NUM})(?:\s+(?P<ext>-?\d+))?\s*\)'
+    # Two more elements of `routingPoints`, both sitting between the points (reference 872-874).
+    # They have to be recognised *ahead of* the generic via-name alternative: read as a via name,
+    # `VIRTUAL` turns its point into a wire corner - which measures a non-physical connection as
+    # full-width metal - and `RECT` leaves its four deltas to match nothing and be dropped.
+    WIRE_VIRTUAL = rf'VIRTUAL\s*\(\s*(?P<vx>{WIRE_NUM})\s+(?P<vy>{WIRE_NUM})\s*\)'
+    WIRE_RECT = (rf'RECT\s*\(\s*(?P<rx0>-?\d+)\s+(?P<ry0>-?\d+)\s+'
+                 rf'(?P<rx1>-?\d+)\s+(?P<ry1>-?\d+)\s*\)')
     ORIENT_CODE = r'N|S|W|E|FN|FS|FW|FE'
     # No keyword lookahead here: it was retried at every character of every tail to reject
     # a word that is a clause keyword (`+ SHAPE STRIPE` would otherwise read as a via), and
@@ -81,7 +88,7 @@ class CompiledRe:
     # produced was a truncation rather than nothing. Points, the only tokens the metric
     # reads, are identical either way - measured over 19,646 tails of the vendored files.
     re_wire_token = re.compile(
-        rf'{WIRE_POINT}|(?P<via>{NAME})'
+        rf'{WIRE_VIRTUAL}|{WIRE_RECT}|{WIRE_POINT}|(?P<via>{NAME})'
         rf'(?:\s+(?P<via_orient>{ORIENT_CODE}))?')
 
     # A wiring form starts at its keyword and runs to the next form (or the next

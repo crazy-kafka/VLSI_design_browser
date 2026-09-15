@@ -660,3 +660,34 @@ def test_a_tech_lef_with_no_routing_layers_is_rejected(tmp_path):
 def test_grid_size_must_be_positive(tmp_path):
     with pytest.raises(ValueError, match="grid size"):
         _build(tmp_path, _nets([]), grid_size=0.0)
+
+
+# -- a virtual connection is not metal, an inline rectangle is -----------------------
+
+def test_a_virtual_connection_costs_nothing_and_an_inline_rect_costs_its_area(tmp_path):
+    """The reference's Example 7-12, measured, with the arithmetic done by hand.
+
+    On M3 (width 0.1, spacing 0.1, so the keep-out adds 0.05 on every side), and placed away
+    from the die edge - which clips, and would leave a shape that straddles it contributing
+    only its inner half:
+
+        wire (1,3)-(6,3)   (5 + 0.05 + 0.05 + 0.05 + 0.05) x 0.2 = 5.2 x 0.2 = 1.04 um^2
+        RECT (5,4)-(7,6)   2.1 x 2.1                             =           4.41
+        wire (8,4)-(8,9)   (5 + 0.05 + 0.05 + 0.05 + 0.05) x 0.2 = 5.2 x 0.2 = 1.04
+                                                                  total        6.49
+
+    The virtual connection (6,3)-(8,4) appears in none of those terms: it is a graph edge with
+    no area, and it is not a diagonal because it is not a shape at all. That pair of points is
+    exactly what the parser used to measure as a full-width wire, and a real design's millions
+    of them are the "45-degree shapes" a run reported on layers whose design rules forbid 45
+    degrees.
+    """
+    data = _build(tmp_path, _nets(["- n1 ( PIN A ) + ROUTED M3 ( 1000 3000 ) ( 6000 3000 ) "
+                                   "VIRTUAL ( 8000 4000 ) RECT ( -3000 0 -1000 2000 ) "
+                                   "( 8000 9000 ) ;\n"]), grid_size=10.0)
+    detail = data.cell_detail(0, 0, "L:M3")
+    assert detail["consumed"] == pytest.approx(1.04 + 4.41 + 1.04)
+    assert detail["util"] == pytest.approx(0.0649)
+    assert data.totals["virtual"] == 1
+    assert data.totals["diagonals"] == 0
+    assert data.totals["emitted"] == 3          # the two wires and the rectangle

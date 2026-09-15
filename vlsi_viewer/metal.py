@@ -57,8 +57,10 @@ from .assembly import Frame, HierarchyAssembler, find_single_top
 from .loader import load_block, load_cell_info
 from .parsers import Cancelled
 from .parsers.convert import cell_info_from_lef, instance_info_from_def
-from .parsers.routing import (PER_PLACEMENT_COUNTERS, POWER, SHAPE_COUNTERS, SIGNAL,
-                              RouteLayer, ShapeStream, TechRouting, parse_def)
+from .parsers.routing import (LAYER_COLUMNS, L_DEGENERATE, L_DIAGONALS, L_JOGS, L_POWER,
+                              L_SHAPES, L_SIGNAL, L_UNUSABLE, L_VIAS, PER_PLACEMENT_COUNTERS,
+                              POWER, SHAPE_COUNTERS, SIGNAL, RouteLayer, ShapeStream,
+                              TechRouting, parse_def)
 from .raster import Bins
 
 logger = logging.getLogger(__name__)
@@ -182,7 +184,7 @@ class MetalData:
                  blocked: Dict[int, np.ndarray], macro_block_layers: int,
                  grids: Dict[Tuple[int, str], np.ndarray], warnings: List[AnyStr],
                  blockage: Dict = None, totals: Dict = None, stats: Dict = None,
-                 filtered_layers: Sequence = ()):
+                 filtered_layers: Sequence = (), layer_stats: Dict = None):
         self.top_name = top_name
         self.boundary_polys = boundary_polys
         self.grid_size = float(grid_size)
@@ -206,6 +208,11 @@ class MetalData:
         # What the input text was like, as opposed to what came out of it - forms, points,
         # statement sizes, the layer names it uses. See `DefParser.getStats`.
         self.stats = dict(stats or {})
+        # The same counters as `totals`, split by layer: one row per measured layer plus the
+        # shapes skipped by name. `totals` answers "how many"; this answers "on which layer",
+        # which is the question a map answers and a log did not.
+        self.layer_stats = layer_stats or {"rows": [], "filtered_by_layer": {},
+                                           "via_points_by_layer": {}, "via_unattributed": 0}
         self._capacity_base = np.asarray(capacity_base, dtype=np.float64)
         self._grids = grids                    # (layer index, scope) -> inflated area
         self._scope = SCOPE_ALL
@@ -482,11 +489,117 @@ class _GridSink:
         return named
 
 
+# The summary, as the lines it is logged in. Each label names the keys it carries; `layers` is
+# expanded to one line per layer rather than one line holding them all. The dict itself is still
+# built as a whole, so a key added without a home here is caught rather than dropped: the tests
+# read the summary back through this mapping and would come up short a field.
+SUMMARY_SECTIONS = (
+    ("run", ("design", "version", "grid", "grid_size_um", "die_um")),
+    ("params", ("params",)),
+    ("inputs", ("inputs",)),
+    ("stages_s", ("stages_s",)),
+    ("shapes", ("shapes",)),
+    ("input_text", ("input_text",)),
+    ("layers", ()),                    # expanded, one line each
+    ("blockage", ("blockage",)),
+    ("filtered_layers", ("filtered_layers", "layers_not_in_tech")),
+    ("memory", ("rss_mb", "peak_rss_mb", "gc_s", "gc_counts")),
+    ("warnings", ("warnings",)),
+)
+
+
+def _layer_summary_fields(stats: Dict, layer: RouteLayer, data: "MetalData") -> Dict:
+    """One layer's per-shape numbers, for the summary's `layer <name>` line.
+
+    The same numbers the table prints: counts from the stream's per-layer rows, area and
+    utilisation read back from the built map, which is where the map gets them.
+    """
+    row = _layer_row(stats, layer)
+    consumed = data._consumed(layer, SCOPE_ALL)
+    return {"shapes": row[L_SHAPES],
+            "vias": row[L_VIAS] + stats.get("via_points_by_layer", {}).get(layer.name, 0),
+            "jogs": row[L_JOGS], "diagonals": row[L_DIAGONALS],
+            "degenerate": row[L_DEGENERATE], "unusable": row[L_UNUSABLE],
+            "signal": row[L_SIGNAL], "power": row[L_POWER],
+            "area_um2": 0.0 if consumed is None else round(float(consumed.sum()), 3),
+            "util": round(float(data.layer_util(layer)), 5)}
+
+
+def _layer_row(stats: Dict, layer: RouteLayer) -> List[int]:
+    """One layer's row of counts, zeroes when the layer carried nothing."""
+    rows = stats.get("rows") or []
+    return rows[layer.index] if layer.index < len(rows) else [0] * len(LAYER_COLUMNS)
+
+
+def _log_layer_table(data: MetalData) -> None:
+    """Report each measured layer's shapes, area and utilisation, and what was skipped.
+
+    The describe lines are global: a run can say that 108 M vias were omitted and not which layer
+    they were on, and a layer's utilisation was only ever readable off the map. This is the
+    per-layer half of the same numbers - read back rather than recomputed, so the table and the map
+    cannot disagree - and the skipped line answers the other half of what a layer range asks: how
+    much of the design it left out, and where.
+    """
+    stats = data.layer_stats
+    rows = [_layer_row(stats, layer) for layer in data.layers]
+    if any(row[L_SHAPES] for row in rows):
+        logger.info("metal: shapes per layer")
+        logger.info("  %-6s %-10s %-4s %13s %12s %8s", "layer", "dir", "usable", "shapes",
+                    "area um2", "util")
+        for layer, row in zip(data.layers, rows):
+            # A layer nothing was measured on has no grid at all, which is not the same as a
+            # layer that measured zero - and is exactly the row a reader wants to see.
+            consumed = data._consumed(layer, SCOPE_ALL)
+            area = 0.0 if consumed is None else float(consumed.sum())
+            logger.info("  %-6s %-10s %-4s %13s %12.1f %7.1f %%", layer.name,
+                        layer.direction or "-", "yes" if layer.usable else "no",
+                        f"{row[L_SHAPES]:,}", area, 100.0 * data.layer_util(layer))
+        logger.info("  %-6s %11s %11s %11s %11s", "layer", "vias", "jogs", "diagonals", "signal")
+        for layer, row in zip(data.layers, rows):
+            vias = row[L_VIAS] + stats.get("via_points_by_layer", {}).get(layer.name, 0)
+            logger.info("  %-6s %11s %11s %11s %11s", layer.name, f"{vias:,}",
+                        f"{row[L_JOGS]:,}", f"{row[L_DIAGONALS]:,}", f"{row[L_SIGNAL]:,}")
+    if stats.get("filtered_by_layer"):
+        skipped = ", ".join(
+            f"{name} {count / 1e6:.1f} M" for name, count in
+            sorted(stats["filtered_by_layer"].items(), key=lambda item: -item[1]))
+        logger.info("metal: skipped outside the layer range: %s", skipped)
+    if stats.get("via_unattributed"):
+        # Said out loud rather than dropped: these are vias whose form states no layer, and a
+        # column that quietly omitted them would be worse than one that says it cannot place them.
+        logger.info("metal: %s via point(s) could not be placed on a layer - their form names no "
+                    "layer of its own", f"{stats['via_unattributed']:,}")
+
+
+def _log_summary(summary: Dict) -> None:
+    """Log the run's evidence as one short line per section.
+
+    This was a single record - the whole dict, sorted, on one line of about 4,000 characters.
+    Every field was there and none of them could be found: a line that long among a run's
+    progress is not something a reader searches, and the fields a log is *for* are the ones
+    looked up by name.
+    """
+    for label, keys in SUMMARY_SECTIONS:
+        if label == "layers":
+            for layer in summary["layers"]:
+                logger.info("metal-summary: %-15s %s", f"layer {layer['name']}",
+                            json.dumps(layer, sort_keys=True, default=str))
+            continue
+        present = [key for key in keys if key in summary]
+        if not present:
+            continue
+        payload = (summary[present[0]] if len(present) == 1
+                   else {key: summary[key] for key in present})
+        logger.info("metal-summary: %-15s %s", label,
+                    json.dumps(payload, sort_keys=True, default=str))
+
+
 def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
                 tech_paths: Sequence[AnyStr], grid_size: float = None,
                 macro_block_layers: int = None, min_segment=None,
                 top: AnyStr = None, on_progress=None, cancel=None,
-                jobs: int = 1, min_layer: int = None, max_layer: int = None) -> MetalData:
+                jobs: int = 1, min_layer: int = None, max_layer: int = None,
+                work_dir: AnyStr = None) -> MetalData:
     """Build the per-layer utilisation grids for a DEF hierarchy.
 
     The DEFs are read twice, deliberately. The first pass takes only the components and the
@@ -609,7 +722,8 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     # Pass 2: stream each block's wiring through its frame. Imported here rather than at module
     # scope because `parallel` takes `_GridSink` from this module, and a worker needs the same
     # sink the caller uses.
-    from .parallel import effective_workers, ignore_interrupts, input_size, parse_parallel
+    from .parallel import (effective_workers, ignore_interrupts, input_size, layer_stats_of,
+                           merge_layer_stats, new_layer_stats, parse_parallel)
 
     # `--jobs` is a cap: a pool costs a second or two of interpreter startup and a full scan of
     # the file per worker, so a small DEF is parsed in one process whatever the caller asked for.
@@ -625,12 +739,17 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
 
     stages.mark("routing", f"{len(blockage)} macro type(s) with obstruction data")
     sink = _GridSink(extent, grid_size)
-    totals = {"emitted": 0, "vias": 0, "jogs": 0, "diagonals": 0, "unknown": 0,
-              "filtered": 0, "unusable": 0, "degenerate": 0, "polygon_edges": 0}
+    # From SHAPE_COUNTERS rather than typed out: a counter added to the stream has to appear
+    # here and in the summary, and the way it goes missing is by being written down twice.
+    totals = {name: 0 for name, _attribute in SHAPE_COUNTERS}
+    # The same counters split by layer, summed over blocks the way `totals` is. Kept beside
+    # `totals` rather than inside it: `SHAPE_COUNTERS` is what the tests' goldens compare against,
+    # and a per-layer structure does not belong in a flat dict of scalars.
+    layer_stats = new_layer_stats()
     # Summed over blocks: what the DEFs were like, as opposed to what came out of them.
     text_stats: Dict[AnyStr, object] = {"forms": 0, "points": 0, "lines": 0,
                                         "statement_lines_max": 0, "statement_chars_max": 0,
-                                        "points_max": 0, "layers_used": set()}
+                                        "points_max": 0, "rects": 0, "layers_used": set()}
 
     def on_block(name, frame: Frame) -> None:
         """Collect a block's placements. The wiring is parsed once per block, below."""
@@ -660,11 +779,12 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
             # grids come back per layer and are summed here. See `parallel`.
             counters, _stats, note = parse_parallel(
                 path, name, tech, frames, min_segment, extent, grid_size, sink, jobs,
-                text_stats=text_stats, cancel=cancel, pool=pool)
+                text_stats=text_stats, cancel=cancel, pool=pool, work_dir=work_dir)
             # Folded before the stop is raised, and in that order: the counters and the grids
             # have to tell the same story, or the run reports having measured nothing on top of
             # the partial map it did measure.
             fold(counters)
+            merge_layer_stats(layer_stats, note["layers"])
             if note.get("ndrs"):
                 logger.info("%s: %d non-default rule(s)", name, note["ndrs"])
             if note.get("interrupted"):
@@ -677,10 +797,15 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
         routing = parse_def(path, stream=stream, skip_components=True, cancel=cancel)
         stream.flush()
         fold({key: getattr(stream, attribute) for key, attribute in SHAPE_COUNTERS})
+        merge_layer_stats(layer_stats, layer_stats_of(stream))
         stats = routing.stats
         text_stats["forms"] += stats.get("forms", 0)
         text_stats["points"] += stats.get("points", 0)
         text_stats["lines"] += stats.get("lines", 0)
+        # Inline `RECT ( dx1 dy1 dx2 dy2 )` elements, which the DEF may not use at all. The
+        # `virtual` count is deliberately not carried here as well: the stream counts it, and
+        # one number in two places is how the two places come to disagree.
+        text_stats["rects"] += stats.get("rects", 0)
         for key in ("statement_lines_max", "statement_chars_max", "points_max"):
             text_stats[key] = max(text_stats[key], stats.get(key, 0))
         text_stats["layers_used"] |= set(stats.get("layers_used", ()))
@@ -745,13 +870,20 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     stage_seconds = stages.close()
     _describe(totals, warnings)
 
-    # One machine-readable line for the whole run. Its point is that the evidence can be
-    # carried back without the design: what was measured, how the time split, what the input
-    # was like, and where the memory went. The fields a synthetic benchmark has to be checked
-    # against - statement sizes, points per form, the layer names - are the ones a DEF's own
-    # header does not carry.
+    # The run's evidence, one line per section: what was measured, how the time split, what the
+    # input was like, and where the memory went. Its point is that the evidence can be carried
+    # back without the design. The fields a synthetic benchmark has to be checked against -
+    # statement sizes, points per form, the layer names - are the ones a DEF's own header does
+    # not carry.
     resident, peak = resident_mb()
-    logger.info("metal-summary: %s", json.dumps({
+    # Built before the summary is logged, and not only in the return: the summary's per-layer
+    # lines report the same area and utilisation the map does, and the map is this object.
+    built = MetalData(root, _boundary_polys(assembler, blocks, root), grid_size, extent, rows,
+                      cols, tech.layers, capacity_base, blocked, macro_block_layers,
+                      grids, warnings, blockage, totals, text_stats,
+                      filtered_layers=tech.filtered_layers, layer_stats=layer_stats)
+    _log_layer_table(built)
+    _log_summary({
         "design": root,
         "version": __version__,
         "grid": [rows, cols],
@@ -772,20 +904,19 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
                                      {layer.name for layer in tech.layers} -
                                      set(tech.filtered_layers)),
         "filtered_layers": sorted(tech.filtered_layers),
-        "layers": [{"name": layer.name, "direction": layer.direction,
-                    "width_um": layer.width, "pitch_um": layer.pitch,
-                    "usable": layer.usable} for layer in tech.layers],
+        "layers": [dict({"name": layer.name, "direction": layer.direction,
+                         "width_um": layer.width, "pitch_um": layer.pitch,
+                         "usable": layer.usable}, **_layer_summary_fields(layer_stats, layer,
+                                                                         built))
+                   for layer in tech.layers],
         "blockage": blockage,
         "gc_s": round(stages.gc.seconds, 2),
         "gc_counts": stages.gc.counts,
         "rss_mb": None if resident is None else round(resident),
         "peak_rss_mb": None if peak is None else round(peak),
         "warnings": warnings,
-    }, sort_keys=True, default=str))
-    return MetalData(root, _boundary_polys(assembler, blocks, root), grid_size, extent, rows,
-                     cols, tech.layers, capacity_base, blocked, macro_block_layers,
-                     grids, warnings, blockage, totals, text_stats,
-                     filtered_layers=tech.filtered_layers)
+    })
+    return built
 
 
 def _file_note(path) -> Dict:
@@ -1092,13 +1223,21 @@ def _describe(totals, warnings):
     if totals["jogs"]:
         logger.info("metal: %d non-preferred jog(s) shorter than a track pitch dropped",
                     totals["jogs"])
+    if totals["virtual"]:
+        # The class a real run's unexplained "45-degree shapes" turned out to belong to. A
+        # `VIRTUAL` connection is non-physical metal-free graph, so it is measured as nothing -
+        # and a design rule that forbids 45-degree routing says nothing about it.
+        logger.info("metal: %d VIRTUAL connection(s) kept as connections (not metal, no area)",
+                    totals["virtual"])
     if totals["diagonals"]:
         # Reported because they are the one shape class that does not rasterise as a
         # rectangle: each one goes through a shapely buffer and a per-bin intersection, which
-        # is far slower per shape. A design whose 45-degree geometry is all on a layer it is
-        # not measuring should read zero here, and a run that reads millions is the one worth
-        # looking at.
-        logger.info("metal: %d of the measured shape(s) are 45-degree segments, which "
+        # is far slower per shape. Not "45 degrees" - any non-axis-aligned segment counts, and
+        # a run whose number here is large should look at what wrote them: a design whose
+        # 45-degree geometry is all on a layer it is not measuring reads zero, and so does one
+        # whose diagonals were really `VIRTUAL` connections until the parser learned to tell
+        # them apart.
+        logger.info("metal: %d of the measured shape(s) are non-axis-aligned segments, which "
                     "rasterise through shapely rather than as rectangles",
                     totals["diagonals"])
     if totals["filtered"]:

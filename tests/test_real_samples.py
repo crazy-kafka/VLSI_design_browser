@@ -352,22 +352,28 @@ def test_the_real_file_yields_the_same_shapes_with_the_keyword_lookahead_restore
 
     previous = CompiledRe.re_wire_token
     restored = re.compile(
-        rf'{CompiledRe.WIRE_POINT}|(?P<via>{CompiledRe.NOT_KEYWORD}{CompiledRe.NAME})'
+        rf'{CompiledRe.WIRE_VIRTUAL}|{CompiledRe.WIRE_RECT}|{CompiledRe.WIRE_POINT}'
+        rf'|(?P<via>{CompiledRe.NOT_KEYWORD}{CompiledRe.NAME})'
         rf'(?:\s+(?P<via_orient>{CompiledRe.ORIENT_CODE}))?')
     shape = []
-    for pattern in (previous, restored):
-        CompiledRe.re_wire_token = pattern
-        tech = _quiet(TechRouting.read, [TECH])
-        sink = _GridSink((0.0, 0.0, DIE, DIE), GRID)
-        stream = ShapeStream(tech, sink)
-        _quiet(parse_def, GCD, stream=stream)
-        with contextlib.redirect_stdout(io.StringIO()):
-            stream.flush()
-        shape.append((stream.n_via, stream.n_jog, stream.n_degenerate,
-                      stream.n_unknown_layer, stream.n_usable_layer_missing,
-                      stream.n_polygon_edge, stream.n_emitted,
-                      sum(float(grid.sum()) for grid in sink.grids().values())))
-    CompiledRe.re_wire_token = previous
+    try:
+        for pattern in (previous, restored):
+            CompiledRe.re_wire_token = pattern
+            tech = _quiet(TechRouting.read, [TECH])
+            sink = _GridSink((0.0, 0.0, DIE, DIE), GRID)
+            stream = ShapeStream(tech, sink)
+            _quiet(parse_def, GCD, stream=stream)
+            with contextlib.redirect_stdout(io.StringIO()):
+                stream.flush()
+            shape.append((stream.n_via, stream.n_jog, stream.n_degenerate,
+                          stream.n_unknown_layer, stream.n_usable_layer_missing,
+                          stream.n_polygon_edge, stream.n_emitted,
+                          sum(float(grid.sum()) for grid in sink.grids().values())))
+    finally:
+        # Restoring on the way out rather than after the loop: a tokeniser pattern swapped into
+        # a module-level name and left there parses every later test with the wrong pattern, and
+        # the failures land thirty files away from the cause.
+        CompiledRe.re_wire_token = previous
     assert shape[0] == shape[1]
 
 

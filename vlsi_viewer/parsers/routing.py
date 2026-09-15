@@ -254,7 +254,7 @@ class TechRouting:
 # assert on them, and a single source is what keeps the log's names and the counters' names
 # from drifting apart.
 SHAPE_COUNTERS = (("emitted", "n_emitted"), ("vias", "n_via"), ("jogs", "n_jog"),
-                  ("diagonals", "n_diagonal"),
+                  ("diagonals", "n_diagonal"), ("virtual", "n_virtual"),
                   ("unknown", "n_unknown_layer"), ("filtered", "n_filtered"),
                   ("unusable", "n_usable_layer_missing"),
                   ("degenerate", "n_degenerate"), ("polygon_edges", "n_polygon_edge"))
@@ -264,8 +264,20 @@ SHAPE_COUNTERS = (("emitted", "n_emitted"), ("vias", "n_via"), ("jogs", "n_jog")
 # does contain K copies of that wiring, and a summary that disagreed with the grids would be
 # worse than no summary. `emitted` is the exception - the stream counts it per placement already,
 # so that its own count matches what its sink was handed.
-PER_PLACEMENT_COUNTERS = ("vias", "jogs", "diagonals", "unknown", "filtered", "unusable",
-                          "degenerate", "polygon_edges")
+PER_PLACEMENT_COUNTERS = ("vias", "jogs", "diagonals", "virtual", "unknown", "filtered",
+                          "unusable", "degenerate", "polygon_edges")
+
+# One row per measured layer, indexed by `layer.index` and filled wherever the layer is in scope -
+# which most shape paths are. A list of lists rather than a dict of dicts because this is the
+# per-shape path: an index bump costs about half what a dictionary one does, and a real design
+# makes a quarter of a billion of them.
+#
+# `filtered` is deliberately absent. An excluded layer has no index in the trimmed stack, so those
+# shapes are counted by *name* in `filtered_by_layer` - and the name is the informative half: it
+# says which excluded layer the caller's range left out.
+L_SHAPES, L_VIAS, L_JOGS, L_DIAGONALS, L_DEGENERATE, L_UNUSABLE, L_SIGNAL, L_POWER = range(8)
+LAYER_COLUMNS = ("shapes", "vias", "jogs", "diagonals", "degenerate", "unusable",
+                 "signal", "power")
 
 
 class ShapeStream:
@@ -330,12 +342,26 @@ class ShapeStream:
         # run can say whether the 45-degree rasterisation (the `shapely` buffer path, far
         # slower per shape than a rectangle) is being paid for at all.
         self.n_diagonal = 0
+        # `VIRTUAL` connections: like `vias`, a class of what the parser read rather than a
+        # shape. They are counted here because they never become a shape to count later - and
+        # because a run that reported 8.8 M unexplained non-orthogonal "shapes" needs to be
+        # able to say how many of the connections in its DEF were never shapes at all.
+        self.n_virtual = 0
         self.n_degenerate = 0
         self.n_polygon_edge = 0
         self.n_usable_layer_missing = 0
         self.n_unknown_layer = 0
         self.n_filtered = 0
         self.n_emitted = 0
+        # The same counters, split by layer - see `LAYER_COLUMNS`. Every list here is one row per
+        # layer of the *trimmed* stack, which is what `layer.index` indexes.
+        self.by_layer = [[0] * len(LAYER_COLUMNS) for _ in tech.layers]
+        # Layers are only resolvable by name here: a shape on an excluded layer has no index, and
+        # the bulk of the vias arrive per net with only a layer name to their name.
+        self.filtered_by_layer: Dict[str, int] = {}
+        self.via_points_by_layer: Dict[str, int] = {}
+        self.n_via_unattributed = 0
+        self._layer_index_by_name = {layer.name: layer.index for layer in tech.layers}
 
     def configure(self, db_unit, ndrs) -> None:
         """Adopt the database unit and rule table of the DEF being parsed."""
@@ -358,10 +384,12 @@ class ShapeStream:
             # choice, the second is data that surprised us.
             if name in self.filtered_layers:
                 self.n_filtered += 1
+                self.filtered_by_layer[name] = self.filtered_by_layer.get(name, 0) + 1
             else:
                 self.n_unknown_layer += 1
         elif not layer.usable:
             self.n_usable_layer_missing += 1
+            self.by_layer[layer.index][L_UNUSABLE] += 1
         return layer
 
     def _rules(self, layer: RouteLayer, rule) -> Tuple[float, float]:
@@ -403,7 +431,11 @@ class ShapeStream:
         self._count += 1
         # Counted per placement, because the sink is handed one shape per placement: the
         # stream's own "what I emitted" has to match what its sink received.
-        self.n_emitted += len(self.frames) or 1
+        placed = len(self.frames) or 1
+        row = self.by_layer[layer.index]
+        row[L_SHAPES] += placed
+        row[L_SIGNAL if scope == SIGNAL else L_POWER] += placed
+        self.n_emitted += placed
         if self._count >= self.batch:
             self.flush()
 
@@ -460,10 +492,37 @@ class ShapeStream:
             self._add_special(swire, scope)
         for polygon in net.polygons:
             self._add_polygon(polygon, scope)
+        # Inline `RECT ( dx1 dy1 dx2 dy2 )` elements: real metal, whose corners the parser
+        # resolved from the previous point, and which used to be dropped on the floor.
+        for rect_layer, x0, y0, x1, y1 in net.rects:
+            layer = self._layer(rect_layer)
+            if layer is not None:
+                self._add_box(layer, scope, x0, y0, x1, y1, layer.spacing)
         # '+ VIA' points the parser counted instead of building. Each would have taken the
         # `shape == 'VIA'` branch above and done nothing but increment this counter, so the
         # total is the same number by a shorter route.
         self.n_via += net.via_points
+        # The same points, split by layer. They arrive per net with a layer *name* and no index,
+        # because a '+ VIA' form carries no layer of its own - the statement it belongs to does -
+        # so the parser keys them by name and the mapping happens once per net here.
+        placed = 0
+        for layer_name, count in getattr(net, "via_points_by_layer", {}).items():
+            index = self._layer_index_by_name.get(layer_name)
+            if index is None:
+                self.n_via_unattributed += count
+            else:
+                self.by_layer[index][L_VIAS] += count
+            placed += count
+            self.via_points_by_layer[layer_name] = \
+                self.via_points_by_layer.get(layer_name, 0) + count
+        # Whatever is left had no layer to be counted on - a '+ VIA' form states none of its own.
+        # Counted here rather than dropped, so the table's vias plus this are every via the run
+        # counted, and a reader can see the difference rather than having to trust it.
+        self.n_via_unattributed += net.via_points - placed
+        # `VIRTUAL` connections are connections and not shapes (reference 874), so there is
+        # nothing to add geometry for - but they are a class of what the file contains, and the
+        # count is what says how much of a map used to be made of them.
+        self.n_virtual += net.virtual_points
 
     @staticmethod
     def _scope(net) -> int:
@@ -513,6 +572,7 @@ class ShapeStream:
         if x0 == x1 and y0 == y1:
             # A via point: no extent, so no wire area. Half of a real DEF's segments.
             self.n_via += 1
+            self.by_layer[layer.index][L_VIAS] += 1
             return
         width, spacing = self._rules(layer, wire.rule)
         # Regular wiring defaults to half the wire width of extension at each end.
@@ -521,6 +581,14 @@ class ShapeStream:
     def _add_special(self, swire, scope: int) -> None:
         if swire.shape == "VIA":
             self.n_via += 1
+            # Attributed by name, and this branch is the one place a via's layer is not already
+            # resolved: it counts before the lookup, because a via on a layer outside the range is
+            # still a via and moving the counter would move the totals with it.
+            index = self._layer_index_by_name.get(swire.layer_name)
+            if index is None:
+                self.n_via_unattributed += 1
+            else:
+                self.by_layer[index][L_VIAS] += 1
             return
         if swire.shape == "POLYGON":
             # One edge of a ring whose filled area is handled from net.polygons, where the
@@ -541,6 +609,7 @@ class ShapeStream:
         if not swire.width:
             # 'routeWidth 0' on a routed form marks a via placement, not a zero-width wire.
             self.n_via += 1
+            self.by_layer[layer.index][L_VIAS] += 1
             return
         extension = max(swire.e0 or 0, swire.e1 or 0) / self.db_unit
         self._add_wire(layer, scope, swire.x0, swire.y0, swire.x1, swire.y1,
@@ -550,15 +619,20 @@ class ShapeStream:
         """One wire segment, as its keep-out rectangle (or as a diagonal centre line)."""
         if width <= 0:
             self.n_usable_layer_missing += 1
+            self.by_layer[layer.index][L_UNUSABLE] += 1
             return
         span = max(abs(x1 - x0), abs(y1 - y0)) / self.db_unit
         if self._is_jog(layer, x0, y0, x1, y1, span):
             self.n_jog += 1
+            self.by_layer[layer.index][L_JOGS] += 1
             return
         if x0 != x1 and y0 != y1:
             # A diagonal jog. The sink buffers the centre line exactly rather than taking a
             # bounding box, which for a 10 um diagonal would over-count by about 25x.
             self.n_diagonal += 1
+            row = self.by_layer[layer.index]
+            row[L_DIAGONALS] += 1
+            row[L_SIGNAL if scope == SIGNAL else L_POWER] += 1
             self._diagonals.append((layer.index, scope, x0 / self.db_unit,
                                     y0 / self.db_unit, x1 / self.db_unit,
                                     y1 / self.db_unit,
@@ -589,6 +663,7 @@ class ShapeStream:
                 hi_x += extension
         if hi_x - lo_x <= 0 or hi_y - lo_y <= 0:
             self.n_degenerate += 1
+            self.by_layer[layer.index][L_DEGENERATE] += 1
             return
         self._emit(layer, scope, lo_x - grow, lo_y - grow, hi_x + grow, hi_y + grow)
 
@@ -634,6 +709,9 @@ class ShapeStream:
         # Counted where the screen counts it: the ring arrives once per placement, while its
         # edges went to `n_polygon_edge` above.
         self.n_emitted += len(frames)
+        row = self.by_layer[layer.index]
+        row[L_SHAPES] += len(frames)
+        row[L_SIGNAL if scope == SIGNAL else L_POWER] += len(frames)
 
 
 class DefRouting:
@@ -659,7 +737,8 @@ class DefRouting:
 
 
 def parse_def(def_path: AnyStr, stream: Optional[ShapeStream] = None,
-              top=None, skip_components: bool = False, cancel=None, lines=None) -> DefRouting:
+              top=None, skip_components: bool = False, cancel=None, lines=None,
+              puts=None) -> DefRouting:
     """Parse one DEF, streaming its wiring into ``stream`` if one is given.
 
     Net, special-net and rule parsing are always enabled: the metal flow needs all three,
@@ -685,7 +764,7 @@ def parse_def(def_path: AnyStr, stream: Optional[ShapeStream] = None,
     # `cancel` is consulted once per heartbeat; returning True from it raises `Cancelled`,
     # which abandons the parse and leaves whatever was already handed to the sink in place.
     parser = DefParser(def_path, parse_net=True, parse_specialnet=True, parse_ndr=True,
-                       skip_comp=skip_components, cancel=cancel, lines=lines,
+                       skip_comp=skip_components, cancel=cancel, lines=lines, puts=puts,
                        sink=None if stream is None else sink)
     db_unit = parser.dbUnit()
     boundary = [[x / db_unit, y / db_unit] for x, y in parser.shape()]
