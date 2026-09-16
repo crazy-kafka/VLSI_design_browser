@@ -140,3 +140,27 @@ def test_the_committed_sample_places_its_sub_block_four_times():
                            [os.path.join(SAMPLE, "tech.lef")], grid_size=10.0)
     assert data.totals["emitted"] == 4 * 19817 + 9
     assert data.totals["jogs"] == 4 * 135
+
+
+def test_the_per_layer_counts_add_up_under_four_placements():
+    """The invariant the layer table rests on, at the only placement count that can break it.
+
+    A DEF parsed directly has one placement, and at one placement the two counting rules coincide:
+    a shape is one shape either way. At four they do not - the stream counts a jog once per parse
+    and the totals count it once per placement - and the rows did disagree: 135 jogs against 540.
+    The columns that are already counted per placement, `shapes` among them, stayed right, which is
+    why this is the fixture that tells the two rules apart.
+    """
+    from vlsi_viewer.parsers.routing import LAYER_COLUMNS
+
+    paths = [os.path.join(SAMPLE, "top.def"), os.path.join(SAMPLE, "sub.def")]
+    with contextlib.redirect_stdout(io.StringIO()):
+        data = build_metal(paths, [os.path.join(SAMPLE, "cells.lef")],
+                           [os.path.join(SAMPLE, "tech.lef")], grid_size=10.0)
+    rows = data.layer_stats["rows"]
+    assert rows, "no per-layer rows were collected"
+    sums = {name: sum(row[index] for row in rows) for index, name in enumerate(LAYER_COLUMNS)}
+    assert sums["jogs"] == data.totals["jogs"] > 0
+    assert sums["shapes"] == data.totals["emitted"]
+    assert sums["vias"] + data.layer_stats["via_unattributed"] == data.totals["vias"]
+    assert sums["signal"] + sums["power"] == sums["shapes"]

@@ -31,7 +31,8 @@ two-version diff view and an optional physical layout view (2-D heat map).
 - **Min-instance threshold** — hide small hierarchies from the tree (UI-only).
 - **Two-version comparison** — V1 / V2 / Diff tabs with per-metric Δabs and Δrel.
 - **Physical layout mode** — `--physical_mode` renders the placed design as a
-  2-D heat map (cell density / leakage power / dynamic power / ULVT density)
+  2-D heat map (cell density / leakage power / dynamic power / ULVT density, and
+  pin density when the cells came from a DEF + LEF)
   beside the hierarchy tree. Interactive pan/zoom/fit, a color range adjustable
   in the UI, a fixed vertical thermal legend, and outlined block boundaries.
   Hovering reports the cursor coordinates + grid value; clicking a hierarchy node
@@ -133,7 +134,7 @@ python main.py verilog --verilog v1.v --compare_verilog v2.v --lef cells.lef --t
 | `json` | `--cell_info`, `--block_info`, `--compare_block_info` | compare, `--physical_mode` |
 | `verilog` | `--verilog`, `--lef`, `--top`, `--compare_verilog`, `--out` | compare only |
 | `def` | `--def`, `--lef`, `--top`, `--compare_def`, `--out` | compare, `--physical_mode` |
-| `metal` | `--def`, `--lef`, `--tech-lef`, `--top` | `--grid-size`, `--min-layer`, `--max-layer`, `--macro-block-layers`, `--min-segment-length`, `--jobs`, `--profile` |
+| `metal` | `--def`, `--lef`, `--tech-lef`, `--top` | `--grid-size`, `--min-layer`, `--max-layer`, `--macro-block-layers`, `--min-segment-length`, `--jobs`, `--profile`, `--dump-db`, `--db`, `--dump-only` |
 
 Options shared by the first three: `--min-instances`, `--include-macros`, `--cache-dir`,
 `--force`, `--verbose`. `--grid_size` and `--contour_gap` apply to the two flows that can
@@ -152,7 +153,19 @@ the layers left out is counted as *filtered* rather than silently dropped, and t
 range by name, because the numbers only mean something against the stack they were counted in.
 Within a subcommand, physical mode and the compare flag are
 mutually exclusive, and `metal` has neither — nor the JSON pipeline's options, which it
-cannot act on: it converts nothing, builds no tree and caches nothing. In physical mode, hover the layout view to read
+cannot act on: it converts nothing and builds no tree.
+
+`metal --dump-db DIR` writes one intermediate **db** per DEF input, named from the DEF
+(`A.def.gz` → `A.def.db`), holding the per-layer grids and the counters that produced them; with
+`--dump-only` it writes them and exits without opening a window, so several designs can be dumped
+side by side. `metal --db FILE...` reads them back: a block whose db still matches this run — same
+DEF (size and mtime), same measured layers, same grid size, `--min-segment-length` and
+`--macro-block-layers`, same LEFs, same placement in the hierarchy — is not parsed at all, and with
+`--def` only the DEFs that changed are. A rebuild that took 1,786 s of parsing takes seconds, and
+a db holds nothing the LEFs could disagree with: the layer table, the capacity grid and the macro
+blockage are rebuilt from the live LEFs on every run, so a db can only be *refused* for pointing at
+different ones. A db is written only by a build that finished, so an interrupted run cannot leave a
+half-measured map behind that loads fast. In physical mode, hover the layout view to read
 the cursor coordinates and the heat-map grid value in the bottom-right status bar; in metal
 mode the same hover fills the panel's cell readout.
 
@@ -358,6 +371,16 @@ maps:
 | Leakage power | Σ(instance_area_ratio_in_grid × leakage_power) | 0.0 – max |
 | Dynamic power | Σ(instance_area_ratio_in_grid × dynamic_power) | 0.0 – max |
 | ULVT density | Σ(ULVT-instance area overlapping the grid) / grid_area | 0.0 – 1.0 |
+| Pin density | number of signal pins whose centre falls in the grid | 0 – max |
+
+Pin density is offered only when the cells carry pin geometry, which means a DEF run with its
+LEF (`def --def … --lef … --physical_mode`) — a `cell_info.json` has no pin column and cannot
+carry one. Each pin contributes **one point**, the centre of everything it draws, placed by its
+instance's orientation and its block's chain of placements (`M_orient·p − ℓ + loc`, the LEF/DEF
+reference's rule that an instance's location is the lower-left corner of its *oriented* bounding
+box). Power and ground pins are left out — by the LEF's `USE`, and by name (`VDD`, `VSS`, `VCC`,
+`GND`, `VPP`, `VBB`, `VPW`, `VNW`) — because a rail is on every instance of a cell in a row: it
+measures the row, not the design.
 
 Density counts **every** placed box, including physical-only cells, because the area
 they occupy is real. The other three maps count only instances with actual logic: a
@@ -389,6 +412,11 @@ pre-merged (exact) so the geometry scales to large (10M-instance) subsystems.
     python main.py metal --def core.def --lef cells.lef --tech-lef tech.lef --grid-size 5
     python main.py metal --def chip.def --lef cells.lef --tech-lef tech.lef \
         --min-layer 2 --max-layer 12
+
+    # parse once, open the map many times
+    python main.py metal --def core_wrap.def ioE.def fsu.def lsm.def \
+        --lef lefs/* --tech-lef tech.lef --dump-db dbs/ --dump-only
+    python main.py metal --db dbs/*.db --lef lefs/* --tech-lef tech.lef
 
 Placement tells you where the cells are; this tells you where the **metal** is. It reads a
 routed DEF and the tech LEF that defines its routing layers, and renders a per-layer heat map
@@ -488,6 +516,7 @@ are research-licensed, so remove them before publishing this repository.
 | `vlsi_viewer/parsers/` | vendored LEF / DEF / Verilog parsers (`DEF/`, `LEF/`, `verilog/`) |
 | `vlsi_viewer/parsers/convert.py` | EDA files → the viewer's `cell_info` / `instance_info` JSON |
 | `vlsi_viewer/physical.py` | physical mode: heat-map grids + per-hierarchy contour/density |
+| `vlsi_viewer/metal_db.py` | metal mode's intermediate db: format, save/load, and the mismatch that refuses one |
 | `vlsi_viewer/contour.py` | rectilinear union geometry (shapely) + box pre-merge |
 | `vlsi_viewer/heatmap.py` | thermal colormap, grid array → QImage |
 | `vlsi_viewer/ui_layout.py` | layout view widget (heat map, controls, legend, contour overlay) |

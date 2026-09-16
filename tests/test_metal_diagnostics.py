@@ -403,3 +403,24 @@ def test_the_summary_carries_the_same_per_layer_numbers_the_table_prints(tmp_pat
     # And one row per measured layer, the empty ones included.
     rows = [line for line in _messages(caplog) if line.startswith("  M")]
     assert len(rows) >= 2 * len(data.layers)
+
+
+def test_a_row_that_disagrees_with_the_counters_says_so(tmp_path, caplog, monkeypatch):
+    """The check a real run needed: it reported 2,730 more shapes than its layers could hold, and
+    nothing in the log could settle whether that was the run or the reading of it."""
+    from vlsi_viewer import metal as metal_module
+    from vlsi_viewer.parsers.routing import L_SHAPES
+
+    real_table = metal_module._log_layer_table
+
+    def table_then_corrupt(data):
+        data.layer_stats["rows"][0][L_SHAPES] -= 1
+        real_table(data)
+
+    monkeypatch.setattr(metal_module, "_log_layer_table", table_then_corrupt)
+    path, tech = _files(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="vlsi_viewer.metal"):
+        with contextlib.redirect_stdout(io.StringIO()):
+            build_metal([path], [], [tech], grid_size=10.0)
+    assert any("do not add up to the totals" in record.getMessage()
+               for record in caplog.records)

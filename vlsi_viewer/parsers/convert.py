@@ -117,7 +117,7 @@ def _cell_attrs(name: str, macro) -> dict:
     return attrs
 
 
-def cell_info_from_lef(lef_paths, with_obstructions: bool = False):
+def cell_info_from_lef(lef_paths, with_obstructions: bool = False, with_pins: bool = False):
     """``cell_info.json`` data from one or more macro LEF files.
 
     Every macro is emitted, including filler and tap cells: the viewer needs their
@@ -126,26 +126,54 @@ def cell_info_from_lef(lef_paths, with_obstructions: bool = False):
     show them as zero-area leaves in the tree.
 
     ``with_obstructions`` returns the macros' own ``OBS`` geometry alongside, keyed by cell and
-    then by layer, for the metal-density blockage model. It costs nothing to ask for: the
-    ``LefParser`` walk already reads obstructions while building each macro, so the choice is
-    between carrying them out of that parse and parsing the whole library a second time - which
-    is what the blockage stage used to do, and what a caller with both needs avoids.
+    then by layer, for the metal-density blockage model. ``with_pins`` returns each macro's
+    signal-pin centres instead, keyed by cell, for the pin-density map - one ``(x, y)`` per pin,
+    in the macro's own microns, with power and ground pins already dropped. Both cost nothing to
+    ask for: the ``LefParser`` walk already reads this geometry while building each macro, so the
+    choice is between carrying it out of that parse and parsing the whole library a second time -
+    which is what the blockage stage used to do, and what a caller with both needs avoids. They
+    are separate tables, so ask for one at a time.
     """
     from .LEF import LefParser
+
+    if with_obstructions and with_pins:
+        raise ValueError("cell_info_from_lef returns one extra table, not two")
 
     macros = LefParser(list(lef_paths)).getMacros()
     logger.info("lef: %d macro(s) from %d file(s)", len(macros), len(lef_paths))
     info = {name: _cell_attrs(name, macro) for name, macro in macros.items()}
-    if not with_obstructions:
-        return info
-    obstructions = {}
-    for name, macro in macros.items():
-        if not is_macro_class(macro.macroClass()):
-            continue                     # a standard cell's OBS is pin access, not a keep-out
-        declared = macro.obstructions()
-        if declared:
-            obstructions[name] = declared
-    return info, obstructions
+    if with_obstructions:
+        obstructions = {}
+        for name, macro in macros.items():
+            if not is_macro_class(macro.macroClass()):
+                continue                 # a standard cell's OBS is pin access, not a keep-out
+            declared = macro.obstructions()
+            if declared:
+                obstructions[name] = declared
+        return info, obstructions
+    if with_pins:
+        pins = {}
+        for name, macro in macros.items():
+            declared = [pin.centre for pin in macro.pins() if _counts_as_pin(pin)]
+            if declared:
+                pins[name] = declared
+        return info, pins
+    return info
+
+
+# Power and ground pins, which the pin-density map excludes: a rail pin sits on every
+# instance of a cell in a row, so it measures the row, not the design. The LEF's ``USE``
+# is the authority and is not always spelled in upper case; the name is the fallback for
+# the libraries that write ``USE SIGNAL`` on a VDD pin.
+_POWER_PIN_NAME = re.compile(r"^(VDD|VSS|VCC|GND|VPP|VBB|VPW|VNW)", re.IGNORECASE)
+
+
+def _counts_as_pin(pin) -> bool:
+    if pin.centre is None:
+        return False                     # no geometry, so no point to count
+    if (pin.use or "").upper() in ("POWER", "GROUND"):
+        return False
+    return _POWER_PIN_NAME.match(pin.pin_name or "") is None
 
 
 def instance_info_from_verilog(verilog_paths, top) -> dict:

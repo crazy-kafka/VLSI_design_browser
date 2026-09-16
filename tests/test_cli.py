@@ -120,9 +120,13 @@ def test_resolve_inputs_def_returns_in_memory_data(tmp_path):
     from vlsi_viewer.loader import load_block, load_cell_info
 
     args = parse_args(["def", "--def", f"{SAMPLE}/core.def", "--lef", f"{SAMPLE}/cells.lef"])
-    cells, blocks, compare = resolve_inputs(args)
+    cells, blocks, compare, pins = resolve_inputs(args)
     assert compare is None
     assert isinstance(cells, dict) and isinstance(blocks[0], dict)
+    # The def flow is the one that can carry pin geometry, for the pin-density map. The
+    # sample LEF's rails are already out of it: USE POWER/GROUND never reaches this table.
+    assert pins and set(pins) <= set(cells)
+    assert all(centres for centres in pins.values())
 
     name, df, boundary = load_block(blocks[0])
     assert name == "core" and boundary is not None and len(df) > 0
@@ -175,7 +179,7 @@ def test_out_dump_is_a_faithful_copy(tmp_path, flow):
     from vlsi_viewer.metrics import build_design
 
     argv, block_name = OUT_FLOWS[flow]
-    cells, blocks, _compare = resolve_inputs(parse_args(argv + ["--out", str(tmp_path)]))
+    cells, blocks, _compare, _pins = resolve_inputs(parse_args(argv + ["--out", str(tmp_path)]))
 
     cell_path = tmp_path / "cell_info.json"
     block_path = tmp_path / block_name
@@ -244,7 +248,7 @@ def test_merged_verilog_files_write_one_dump(tmp_path):
     second = tmp_path / "extra.v"
     shutil.copyfile(f"{SAMPLE}/core.v", second)
     out = tmp_path / "out"
-    _cells, blocks, _compare = resolve_inputs(parse_args([
+    _cells, blocks, _compare, _pins = resolve_inputs(parse_args([
         "verilog", "--verilog", f"{SAMPLE}/core.v", str(second),
         "--lef", f"{SAMPLE}/cells.lef", "--top", "core", "--out", str(out)]))
     assert len(blocks) == 1
@@ -290,7 +294,8 @@ def test_resolve_inputs_verilog_multi_file_is_one_design(tmp_path):
                        f"{SAMPLE}/core.v",      # the same netlist twice
                        "--compare_verilog", f"{SAMPLE}/core.v",
                        "--lef", f"{SAMPLE}/cells.lef", "--top", "core"])
-    cells, blocks, compare = resolve_inputs(args)
+    cells, blocks, compare, pins = resolve_inputs(args)
+    assert pins is None          # verilog has no LEF geometry to take pins from
     # several files make ONE design, so one block here and one in the compare set
     assert len(blocks) == 1 and len(compare) == 1
     assert set(blocks[0]["instances"]) == set(compare[0]["instances"])
@@ -307,7 +312,7 @@ def _tree(root):
 
 def test_resolve_inputs_json_passes_through():
     args = parse_args(JSON_ARGS)
-    assert resolve_inputs(args) == ("cell.json", ["a.json"], None)
+    assert resolve_inputs(args) == ("cell.json", ["a.json"], None, None)
 
 
 def test_quickstart_shortcuts_are_valid():

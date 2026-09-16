@@ -14,7 +14,7 @@ from vlsi_viewer.ui_search import SearchDialog
 from vlsi_viewer.ui_tree import BAR_COLOR_ROLE, BAR_ROLE, HierarchyTree
 
 
-def _tiny_physical(tmp_path):
+def _tiny_physical(tmp_path, pins=None):
     import json
     from vlsi_viewer.physical import build_physical
     cell = tmp_path / "cell.json"
@@ -26,7 +26,7 @@ def _tiny_physical(tmp_path):
         "instances": {"c": {"cell_name": "C1", "location_x": 0, "location_y": 0,
                             "leakage_power": 1.0, "dynamic_power": 2.0}},
     }))
-    return build_physical([str(top)], str(cell), grid_size=4.0)
+    return build_physical([str(top)], str(cell), grid_size=4.0, pins=pins)
 
 
 @pytest.fixture(scope="module")
@@ -134,6 +134,29 @@ def test_layout_view_builds(app, tmp_path):
     assert len(view._view.scene().items()) >= 2  # pixmap + boundary outline
     assert len(view._boundary_items) == 1
     assert view._pix_item.pixmap() is not None and not view._pix_item.pixmap().isNull()
+
+
+def test_pin_density_map_is_offered_only_where_pins_exist(app, tmp_path):
+    """The fifth entry is appended - never inserted - and only for data that has pins."""
+    from vlsi_viewer.ui_layout import HEAT_TYPES, LayoutView
+
+    keys = [key for key, _label in HEAT_TYPES]
+    plain = LayoutView(_tiny_physical(tmp_path))
+    assert [key for key, _label in plain._kinds] == keys
+    assert plain.type_combo.count() == len(keys)
+
+    pinned = LayoutView(_tiny_physical(tmp_path, pins={"C1": [(1.0, 1.0)]}))
+    assert [key for key, _label in pinned._kinds] == keys + ["pins"]
+    assert pinned.type_combo.itemText(len(keys)) == "Pin density"
+    # The count map must not put the source on the fixed [0, 1] ramp metal's metric uses:
+    # that flag is what `physical.kinds()` would have flipped, for every map at once.
+    assert pinned._fixed_ratio is False
+    pinned.set_kind("pins")
+    assert pinned._fixed_ratio is False
+    assert pinned._kind == "pins"
+    # selecting it renders: a count map autoscales to its own maximum
+    assert not pinned._pix_item.pixmap().isNull()
+    assert pinned._hi >= 1.0
 
 
 def test_tree_click_without_physical_does_not_raise(app, design):
@@ -386,6 +409,32 @@ def test_gradient_bar_color(app, design):
     ulvt_color = top.data(3, BAR_COLOR_ROLE)    # ULVT% -> quality gradient
     assert count_color == theme.BAR_COLOR
     assert ulvt_color is not None and ulvt_color != theme.BAR_COLOR
+
+
+def test_tree_opens_sorted_by_area_desc(app, tmp_path):
+    """The first population sorts by Area descending, not by hierarchy path."""
+    import json
+    from vlsi_viewer.metrics import build_design
+
+    inst = {"top_name": "TOP",
+            "instances": {"A_small/x": {"cell_name": "S1"},
+                          "Z_big/y": {"cell_name": "B1"}}}
+    cell = {"S1": {"area": 1.0}, "B1": {"area": 4.0}}
+    (tmp_path / "instance_info.json").write_text(json.dumps(inst))
+    (tmp_path / "cell_info.json").write_text(json.dumps(cell))
+    design = build_design([str(tmp_path / "instance_info.json")],
+                          str(tmp_path / "cell_info.json"))
+
+    tree = HierarchyTree()
+    tree.set_view(view_for_single(design))
+
+    top = tree.topLevelItem(0)
+    # lexicographic order would put A_small first; the area sort puts the bigger one first
+    assert [top.child(i).data(0, Qt.UserRole) for i in range(top.childCount())] == [
+        "TOP/Z_big", "TOP/A_small"]
+    assert tree._sort_column == 1 and tree._sort_order == Qt.DescendingOrder
+    assert tree.header().sortIndicatorSection() == 1
+    assert tree.header().sortIndicatorOrder() == Qt.DescendingOrder
 
 
 def test_sort_records_and_signals(app, design):

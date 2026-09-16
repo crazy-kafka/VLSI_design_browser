@@ -111,13 +111,29 @@ def test_metal_accepts_several_defs_and_tech_lefs():
     assert args.tech_lef == ["t1.lef", "t2.lef"]
 
 
-@pytest.mark.parametrize("missing", ["--def", "--lef", "--tech-lef"])
-def test_metal_requires_its_inputs(missing):
+@pytest.mark.parametrize("missing", ["--lef", "--tech-lef"])
+def test_metal_requires_its_lefs(missing):
+    """The LEFs are not optional even with dbs: the layer table and the blockage are rebuilt
+    from them on every run, so a db can never stand in for either."""
     argv = [a for a in METAL_ARGS]
     index = argv.index(missing)
     del argv[index:index + 2]
     with pytest.raises(SystemExit):
         parse_args(argv)
+
+
+def test_metal_needs_a_def_or_a_db(capsys):
+    """`--def` moved from argparse to a run-time check, because a db-only run has none."""
+    argv = [a for a in METAL_ARGS if a not in ("--def", f"{SAMPLE}/top.def")]
+    args = parse_args(argv)
+    assert args.def_files is None
+    assert main(argv) == 1
+    assert "needs --def, --db, or both" in capsys.readouterr().err
+
+
+def test_dump_only_needs_somewhere_to_dump(capsys):
+    assert main(METAL_ARGS + ["--dump_only"]) == 1
+    assert "--dump_only needs --dump-db" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("extra", [

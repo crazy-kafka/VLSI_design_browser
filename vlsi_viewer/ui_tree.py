@@ -130,9 +130,11 @@ class HierarchyTree(QTreeWidget):
         super().__init__(parent)
         self._view = None
         self._threshold = 0
-        self._sort_column = 0
-        self._sort_order = Qt.AscendingOrder
-        self._sort_active = False
+        # Area (column 1) descending from the first population, so the table opens on the
+        # largest hierarchies instead of in lexicographic path order.
+        self._sort_column = 1
+        self._sort_order = Qt.DescendingOrder
+        self._sort_active = True
         self._populated_once = False
         self._path_items = {}   # hierarchy path -> item (for lazy density updates)
         self._density_col = None
@@ -185,6 +187,8 @@ class HierarchyTree(QTreeWidget):
             self.header().setSectionResizeMode(ci, QHeaderView.Stretch)
         for path in self._view.roots:
             self.addTopLevelItem(self._make_item(path))
+        self.header().setSortIndicator(self._sort_column, self._sort_order)
+        self.sortItems(self._sort_column, self._sort_order)
         if expanded is None:
             # first population: expand the root node one level only
             self._populated_once = True

@@ -112,6 +112,15 @@ logged 1,780.6 s = 1.90×**. This is a projection, and it rests on the real desi
 imbalanced than the fixture - workers 6.0/19.5 s under stride there against 2.2/4.1 s here - because
 its net sizes vary and the fixture's mostly do not.
 
+**Corrected after the 09-16 run.** The chunk this projection rests on has grown. That run's largest
+single read is **909.78 s of a 1,696.70 s stage (54 %)**, where the 09-15 one was 829.6 s of
+1,780.64 s (48 %): the `VIRTUAL` fix adds 81 M inline RECTs to measure, and they land on the worker
+holding the giant statement - which is why that chunk is ~80 s slower while the stage is 84 s
+faster. Against the 09-16 baseline the same arithmetic gives 105 + 909.78 ≈ **1,015 s from
+1,696.70 s = 1.67×** (and ~993 s, 1.71×, if the parent's scan overlaps the first chunk). The case
+for the change is unchanged and the ceiling is lower: the giant statement is more of the wall than
+it was, so splitting *it* (Phase 6) is now worth more than byte ranges are.
+
 ## Against the pre-registered bar
 
 | clause | result |
@@ -119,7 +128,7 @@ its net sizes vary and the fixture's mostly do not.
 | equivalence exact, every fixture | **pass** |
 | ≥ 1.5× wall at 8 workers on the giant fixture | **fail** - measured 1.19-1.23× |
 | no regression at 2 or 4 | **fail at 2** (9.86 vs 8.26), pass at 4 |
-| projection for the real design ≥ 1.5× | **pass** - 1.90× |
+| projection for the real design ≥ 1.5× | **pass** - 1.90× on the 09-15 numbers, **1.67-1.71×** on the 09-16 ones |
 | peak RSS not higher | **not measured** - psutil is absent on this machine |
 
 Two clauses fail as written, so by the bar this is a **no-go on the fixture numbers alone**. The

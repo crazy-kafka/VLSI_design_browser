@@ -52,7 +52,7 @@ from typing import AnyStr, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-from . import __version__, config
+from . import __version__, config, metal_db
 from .assembly import Frame, HierarchyAssembler, find_single_top
 from .loader import load_block, load_cell_info
 from .parsers import Cancelled
@@ -184,7 +184,8 @@ class MetalData:
                  blocked: Dict[int, np.ndarray], macro_block_layers: int,
                  grids: Dict[Tuple[int, str], np.ndarray], warnings: List[AnyStr],
                  blockage: Dict = None, totals: Dict = None, stats: Dict = None,
-                 filtered_layers: Sequence = (), layer_stats: Dict = None):
+                 filtered_layers: Sequence = (), layer_stats: Dict = None,
+                 dbs: Sequence = (), reused: Sequence = ()):
         self.top_name = top_name
         self.boundary_polys = boundary_polys
         self.grid_size = float(grid_size)
@@ -198,6 +199,11 @@ class MetalData:
         self.filtered_layers = tuple(filtered_layers)
         self.macro_block_layers = int(macro_block_layers)
         self.warnings = list(warnings)
+        # What came out of an intermediate db rather than out of a DEF read: the db files this
+        # run was handed, and the blocks whose wiring none of them had to be re-parsed for. Both
+        # are provenance - the summary prints them so a fast run cannot be mistaken for a slow one.
+        self.dbs = list(dbs)
+        self.reused = list(reused)
         # How the blockage was decided - which macros declared OBS, which fell back to the
         # layer count. The readout reports it, because the two are not equally trustworthy.
         self.blockage = dict(blockage or {})
@@ -554,11 +560,13 @@ def _log_layer_table(data: MetalData) -> None:
             logger.info("  %-6s %-10s %-4s %13s %12.1f %7.1f %%", layer.name,
                         layer.direction or "-", "yes" if layer.usable else "no",
                         f"{row[L_SHAPES]:,}", area, 100.0 * data.layer_util(layer))
-        logger.info("  %-6s %11s %11s %11s %11s", "layer", "vias", "jogs", "diagonals", "signal")
+        logger.info("  %-6s %11s %11s %11s %11s %11s", "layer", "vias", "jogs", "diagonals",
+                    "signal", "power")
         for layer, row in zip(data.layers, rows):
             vias = row[L_VIAS] + stats.get("via_points_by_layer", {}).get(layer.name, 0)
-            logger.info("  %-6s %11s %11s %11s %11s", layer.name, f"{vias:,}",
-                        f"{row[L_JOGS]:,}", f"{row[L_DIAGONALS]:,}", f"{row[L_SIGNAL]:,}")
+            logger.info("  %-6s %11s %11s %11s %11s %11s", layer.name, f"{vias:,}",
+                        f"{row[L_JOGS]:,}", f"{row[L_DIAGONALS]:,}", f"{row[L_SIGNAL]:,}",
+                        f"{row[L_POWER]:,}")
     if stats.get("filtered_by_layer"):
         skipped = ", ".join(
             f"{name} {count / 1e6:.1f} M" for name, count in
@@ -569,6 +577,36 @@ def _log_layer_table(data: MetalData) -> None:
         # column that quietly omitted them would be worse than one that says it cannot place them.
         logger.info("metal: %s via point(s) could not be placed on a layer - their form names no "
                     "layer of its own", f"{stats['via_unattributed']:,}")
+
+
+def _check_layer_totals(data: MetalData) -> None:
+    """Compare the per-layer columns against the counters they are a split of, and say so.
+
+    A run reported 2,730 more emitted shapes than its layers could hold, and nothing noticed: the
+    table and the totals are printed from different places, and a divergence between them is a
+    question about a screenshot until something looks. This looks, once per run, and names the
+    difference - which is the only way a defect there can be settled from a log.
+
+    A warning rather than an error: the map is still built from the same numbers either way, and a
+    run that measured what it measured is worth having even if its table is short a few shapes.
+    """
+    stats = data.layer_stats
+    rows = stats.get("rows") or []
+    sums = {name: sum(row[index] for row in rows) for index, name in enumerate(LAYER_COLUMNS)}
+    wrong = [(column, sums[column], data.totals.get(counter))
+             for column, counter in (("shapes", "emitted"), ("jogs", "jogs"),
+                                     ("diagonals", "diagonals"), ("degenerate", "degenerate"),
+                                     ("unusable", "unusable"))
+             if sums[column] != data.totals.get(counter)]
+    placed = sums["vias"] + stats.get("via_unattributed", 0)
+    if placed != data.totals.get("vias"):
+        wrong.append(("vias+unattributed", placed, data.totals.get("vias")))
+    if wrong:
+        logger.warning(
+            "metal: the per-layer counts do not add up to the totals (%s); the table and the "
+            "summary are printed from the same counters, so this is a defect in the build rather "
+            "than something the run did",
+            ", ".join(f"{column} {got:,} vs {expected:,}" for column, got, expected in wrong))
 
 
 def _log_summary(summary: Dict) -> None:
@@ -594,12 +632,102 @@ def _log_summary(summary: Dict) -> None:
                     json.dumps(payload, sort_keys=True, default=str))
 
 
+def _new_text_stats() -> Dict:
+    """One block's input characterisation, in the shape `fold_stats` accumulates into."""
+    return {"forms": 0, "points": 0, "lines": 0, "statement_lines_max": 0,
+            "statement_chars_max": 0, "points_max": 0, "rects": 0, "layers_used": set()}
+
+
+def _text_from_header(stats: Dict) -> Dict:
+    """A db's stored input characterisation, back in that shape."""
+    text = _new_text_stats()
+    for key in ("forms", "points", "lines", "rects", "statement_lines_max",
+                "statement_chars_max", "points_max"):
+        text[key] = stats.get(key, 0)
+    text["layers_used"] = set(stats.get("layers_used", ()))
+    return text
+
+
+def _components_table(db: "metal_db.BlockDb"):
+    """The block table a db stands in for: its remembered components, as a DataFrame.
+
+    ``HierarchyAssembler`` reads ``cell_name``/``orient``/``location_x``/``location_y`` off
+    ``blocks[name][0]`` and looks only for block names, and ``_macro_blockage`` looks only for
+    macro names - so these rows answer both, and no other code learns that the block came from a
+    db rather than from pass 1.
+    """
+    rows = db.component_rows()
+    return pd.DataFrame({"cell_name": [row[0] for row in rows],
+                         "orient": [row[1] for row in rows],
+                         "location_x": [row[2] for row in rows],
+                         "location_y": [row[3] for row in rows]})
+
+
+def _db_boundary(db: "metal_db.BlockDb"):
+    """The block's own outline, which its DEF's boundary gave and its db kept."""
+    stored = db.header["boundary"]
+    return None if stored is None else [(float(x), float(y)) for x, y in stored]
+
+
+def _sink_from_db(db: "metal_db.BlockDb", tech, extent, grid_size) -> "_GridSink":
+    """A sink holding one db's grids, keyed back to the live stack's positions."""
+    sink = _GridSink(extent, grid_size)
+    index_of = {layer.name: layer.index for layer in tech.layers}
+    for (layer_name, scope), grid in db.grids.items():
+        index = index_of.get(layer_name)
+        if index is None:
+            raise ValueError(f"db names layer {layer_name!r}, which the tech LEF does not "
+                             f"declare")
+        sink.add_grids({(index, scope): grid})
+    return sink
+
+
+def _remembered_components(table, cells):
+    """The rows a db keeps: cells that are LEF macros, and cells the LEF does not have.
+
+    A macro's rows are the blockage's input. A cell the LEF does not have is what a sub-block
+    looks like when its own DEF is not part of the run, so those rows are what lets a parent's db
+    place a sub-block later. Every other row is a standard cell, whose footprint the LEF already
+    gives - keeping those would make a db as large as the DEF it exists to avoid reading.
+    """
+    columns = ["cell_name", "orient", "location_x", "location_y"]
+    if cells is None:
+        # No macro LEF: nothing can be told apart from anything, so the db remembers no
+        # components rather than all three million of them.
+        return table.iloc[0:0][columns]
+    macros = set(cells.index[cells["is_macro"].astype(bool)])
+    keep = table["cell_name"].isin(macros) | ~table["cell_name"].isin(cells.index)
+    return table.loc[keep.to_numpy(), columns]
+
+
+def _layer_rows_by_name(block_layers: Dict, tech) -> Dict:
+    """One block's layer rows - positional in the live stack - keyed by layer name."""
+    return {tech.layers[index].name: [int(v) for v in row]
+            for index, row in enumerate(block_layers["rows"]) if index < len(tech.layers)}
+
+
+def _layer_stats_in_position(stored: Dict, tech) -> Dict:
+    """A db's layer rows, put back into the positions of the live tech LEF's stack."""
+    return {"rows": [list(stored["rows"].get(layer.name, [0] * len(LAYER_COLUMNS)))
+                     for layer in tech.layers],
+            "filtered_by_layer": dict(stored["filtered_by_layer"]),
+            "via_points_by_layer": dict(stored["via_points_by_layer"]),
+            "via_unattributed": int(stored["via_unattributed"])}
+
+
+def _db_grids_for(name, sink: "_GridSink", tech) -> Dict:
+    """A parsed block's grids, keyed by layer *name* - the key a db is written and read by."""
+    names = {layer.index: layer.name for layer in tech.layers}
+    return {(names[index], scope): grid for (index, scope), grid in sink.grids().items()}
+
+
 def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
                 tech_paths: Sequence[AnyStr], grid_size: float = None,
                 macro_block_layers: int = None, min_segment=None,
                 top: AnyStr = None, on_progress=None, cancel=None,
                 jobs: int = 1, min_layer: int = None, max_layer: int = None,
-                work_dir: AnyStr = None) -> MetalData:
+                work_dir: AnyStr = None, db_paths: Sequence[AnyStr] = None,
+                dump_db: AnyStr = None) -> MetalData:
     """Build the per-layer utilisation grids for a DEF hierarchy.
 
     The DEFs are read twice, deliberately. The first pass takes only the components and the
@@ -626,6 +754,11 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
 
     ``jobs`` above 1 runs the wiring pass across that many processes (see :mod:`parallel`). The
     default is 1, so the flow the tests pin is the one that runs unless a caller asks otherwise.
+
+    ``db_paths`` are intermediate dbs (see :mod:`metal_db`): a block whose db matches this run is
+    not parsed at all, and one whose DEF changed in place is re-parsed while the others are not.
+    ``dump_db`` writes one db per DEF input into that directory, after the build has finished -
+    never from a cancelled one, whose grids are a prefix rather than a measurement.
     """
     grid_size = config.DEFAULT_METAL_GRID_SIZE if grid_size is None else float(grid_size)
     if macro_block_layers is None:
@@ -654,12 +787,61 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
                     ", ".join(layer.name for layer in declared.layers
                               if layer.name in tech.filtered_layers) or "none")
 
+    warnings: List[AnyStr] = []
+    # The dbs this run was handed, by the block each one covers. Loaded before pass 1, because a
+    # block whose db is valid is not read at all - and every check that does not need the
+    # hierarchy can be made here. The frames are the exception: they exist only once the walk
+    # has run, so that one check happens at the block.
+    dbs: Dict[AnyStr, metal_db.BlockDb] = {}
+    for db_path in list(db_paths or ()):
+        try:
+            db = metal_db.load(db_path)
+        except Exception as exc:      # a truncated or foreign file is a reason, not a crash
+            warnings.append(f"ignoring db {os.path.basename(str(db_path))}: {exc}")
+            continue
+        if db.block in dbs:
+            warnings.append(f"two dbs name the block {db.block!r}; the later one is ignored")
+            continue
+        dbs[db.block] = db
+    db_params = {"grid_size": grid_size, "min_layer": min_layer, "max_layer": max_layer,
+                 "min_segment": min_segment, "macro_block_layers": macro_block_layers}
+    tech_key = metal_db.set_key(tech_paths)
+    lef_key = metal_db.set_key(lef_paths)
+    measured_layers = [layer.name for layer in tech.layers]
+    usable: Dict[AnyStr, metal_db.BlockDb] = {}
+    for block, db in dbs.items():
+        reason = metal_db.mismatch(db, params=db_params, tech_key=tech_key, lef_key=lef_key,
+                                   layers=measured_layers)
+        if reason is None:
+            usable[block] = db
+        else:
+            logger.info("metal: db for %s not used: %s", block, reason)
+    # Which DEF a db was written from: the only way to recognise, without parsing it, which block
+    # a DEF defines.
+    db_for_def = {os.path.abspath(str(db.header["def"]["path"])): db for db in dbs.values()}
+
     # Pass 1: block table, so every block's frame is known before any wiring is streamed.
     stages.mark("components")
     progress("reading block outlines")
     blocks: Dict[AnyStr, tuple] = {}
     path_of_block: Dict[AnyStr, AnyStr] = {}
+    pending: Dict[AnyStr, metal_db.BlockDb] = {}   # to be reused, unless the frames disagree
+    skipped: List[AnyStr] = []
     for path in def_paths:
+        db = db_for_def.get(os.path.abspath(str(path)))
+        if db is not None and usable.get(db.block) is db:
+            reason = metal_db.mismatch(db, params=db_params, tech_key=tech_key, lef_key=lef_key,
+                                       layers=measured_layers,
+                                       def_note=metal_db.source_note(path))
+            if reason is None:
+                # No DEF read at all: the db carries the boundary, the components the hierarchy
+                # and the blockage read, and the wiring itself.
+                blocks[db.block] = (_components_table(db), _db_boundary(db))
+                path_of_block[db.block] = path
+                pending[db.block] = db
+                skipped.append(db.block)
+                continue
+            logger.info("metal: db for %s not used: %s", db.block, reason)
         data = instance_info_from_def(path, top)
         name, instances, boundary = load_block(data)
         # `data` is the decoded DEF and `instances` the block it was turned into; only the
@@ -671,8 +853,18 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
             continue
         blocks[name] = (instances, boundary)
         path_of_block[name] = path
+    # Blocks a db covers whose DEF was not given at all. A DEF read in this run always wins over
+    # a db for the same block name: it is the richer table, and it has just been read.
+    for block, db in usable.items():
+        if block in blocks:
+            continue
+        blocks[block] = (_components_table(db), _db_boundary(db))
+        pending[block] = db
     if not blocks:
-        raise ValueError("no DEF was readable")
+        raise ValueError("no DEF was readable" + (", and no db covered a block" if dbs else ""))
+    if skipped:
+        logger.info("metal: %d block(s) read from a db with no DEF parsed: %s",
+                    len(skipped), ", ".join(sorted(skipped)))
 
     root = top if (top in blocks) else find_single_top(blocks)
     stages.mark("cell-index", f"{len(blocks)} block(s), root {root!r}")
@@ -681,6 +873,14 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     # the obstructions alone.
     cells, obstructions = _indexed_cells(lef_paths)
     assembler = HierarchyAssembler(blocks, cells)
+    # Components the dbs remember that the LEF does not have: the cells that could be sub-blocks
+    # of a design this run only has part of. Used to make the missing-cell warning say which of
+    # its names are wiring rather than footprint.
+    remembered_blocks = set()
+    for db in dbs.values():
+        for name in db.header["component_cells"]:
+            if cells is None or name not in cells.index:
+                remembered_blocks.add(name)
 
     boundary_points = blocks[root][1]
     if boundary_points is None:
@@ -701,7 +901,6 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     die.add_polygon([(float(x), float(y)) for x, y in boundary_points])
     capacity_base = die.grid(dtype="float64")
 
-    warnings: List[AnyStr] = []
     stages.mark("blockage", f"{rows} x {cols} grid @ {grid_size:g} um, die "
                             f"{extent[2] - extent[0]:.1f} x {extent[3] - extent[1]:.1f} um")
     # The fallback counts from the bottom of the stack the LEF declares, not from the bottom of
@@ -722,8 +921,8 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     # Pass 2: stream each block's wiring through its frame. Imported here rather than at module
     # scope because `parallel` takes `_GridSink` from this module, and a worker needs the same
     # sink the caller uses.
-    from .parallel import (effective_workers, ignore_interrupts, input_size, layer_stats_of,
-                           merge_layer_stats, new_layer_stats, parse_parallel)
+    from .parallel import (effective_workers, fold_stats, ignore_interrupts, input_size,
+                           layer_stats_of, merge_layer_stats, new_layer_stats, parse_parallel)
 
     # `--jobs` is a cap: a pool costs a second or two of interpreter startup and a full scan of
     # the file per worker, so a small DEF is parsed in one process whatever the caller asked for.
@@ -753,62 +952,158 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
 
     def on_block(name, frame: Frame) -> None:
         """Collect a block's placements. The wiring is parsed once per block, below."""
-        if name not in path_of_block:
-            # A block we can see but have no DEF for: its wires cannot be measured. Said
-            # once, because silently omitting a whole sub-block's routing is the kind of
-            # thing nobody notices in a picture.
-            warnings.append(f"block {name!r} is instantiated but no DEF defines it; its "
+        if name not in path_of_block and name not in pending:
+            # A block we can see but have neither a DEF nor a db for: its wires cannot be
+            # measured. Said once, because silently omitting a whole sub-block's routing is the
+            # kind of thing nobody notices in a picture.
+            warnings.append(f"block {name!r} is instantiated but no DEF or db defines it; its "
                             f"wiring is not counted")
             return
         placements.setdefault(name, []).append(frame)
 
+    # What each block measured, as it measured it: unscaled by its placement count, because the
+    # fold below applies that and a db stores what a parse produced. A dump is written from here.
+    products: Dict[AnyStr, Dict] = {}
+    reused: List[AnyStr] = []
+
+    def fold_block(name, block_sink, counters, block_layers, block_text, placements_here) -> None:
+        """Fold one block's measurements in, whether a parse or a db produced them."""
+        # The wiring lands once per placement, so the counters that describe the *text* are
+        # counted once per placement too, or the summary would disagree with the grids.
+        # `emitted` is not among them: the stream counts that per placement already.
+        for key, value in counters.items():
+            totals[key] += value * (placements_here if key in PER_PLACEMENT_COUNTERS else 1)
+        # Scaled here rather than in the workers: this is the level that knows how many times the
+        # block is placed, and scaling twice would multiply the per-parse columns by K^2.
+        merge_layer_stats(layer_stats, block_layers, placements_here)
+        fold_stats(text_stats, block_text)
+        text_stats["lines"] = text_stats.get("lines", 0) + block_text.get("lines", 0)
+        sink.add_grids(block_sink.grids())
+        products[name] = {"sink": block_sink, "counters": counters,
+                          "layers": block_layers, "text": block_text}
+
+    def reuse_block(name, db, placements_here) -> None:
+        """Fold a block's stored measurements in, through the same fold a parse goes through."""
+        fold_block(name, _sink_from_db(db, tech, extent, grid_size), db.header["totals"],
+                   _layer_stats_in_position(db.header["layer_stats"], tech),
+                   _text_from_header(db.header["stats"]), placements_here)
+        reused.append(name)
+        logger.info("metal: %s: %d shape(s) read from a db, the DEF not parsed",
+                    name, db.header["totals"].get("emitted", 0))
+
+    def write_dbs() -> List[AnyStr]:
+        """One db per DEF input, written only from a build that finished.
+
+        A cancelled run writes nothing: its grids are a prefix of a measurement, and a db that
+        loads fast and draws the wrong map is the one outcome worth refusing.
+        """
+        written = []
+        for name, path in sorted(path_of_block.items()):
+            target = metal_db.db_path_for(path, dump_db)
+            product = products.get(name)
+            if product is None:
+                db = pending.get(name)
+                if db is None:
+                    continue                  # a DEF whose block the walk never reached
+                # Reused exactly as it was: the checks that let it be reused are what make
+                # writing it back unchanged faithful rather than a re-derivation.
+                metal_db.save(target, db)
+                written.append(target)
+                continue
+            table = _remembered_components(blocks[name][0], cells)
+            # Reported rather than capped: ~16 bytes a row, and a design that made it large ought
+            # to say so rather than quietly lose the rows a later sub-block dump would need.
+            logger.info("metal: %s: %d component row(s) remembered in its db (%d cell type(s))",
+                        name, len(table), table["cell_name"].nunique())
+            cell_names = sorted(set(table["cell_name"]))
+            cells_code = {cell: index for index, cell in enumerate(cell_names)}
+            orients_code = {orient: index for index, orient in
+                            enumerate(metal_db.ORIENTATIONS)}
+            components = np.array(
+                [[cells_code[cell], orients_code[orient or "N"], x, y]
+                 for cell, orient, x, y in zip(table["cell_name"], table["orient"],
+                                               table["location_x"], table["location_y"])],
+                dtype=np.float64).reshape(-1, 4)
+            frames = [(frame.orient, frame.origin[0], frame.origin[1])
+                      for frame in placements[name]]
+            header = metal_db.header_for(
+                block=name, top_name=root, rows=rows, cols=cols, extent=extent,
+                grid_size=grid_size, params=db_params, def_note=metal_db.source_note(path),
+                tech_key=tech_key, tech_count=len(tech_paths),
+                lef_key=lef_key, lef_count=len(lef_paths),
+                layers=measured_layers, boundary=blocks[name][1], frames=frames,
+                component_cells=cell_names, totals=product["counters"],
+                layer_stats={"rows": _layer_rows_by_name(product["layers"], tech),
+                             "filtered_by_layer": product["layers"]["filtered_by_layer"],
+                             "via_points_by_layer": product["layers"]["via_points_by_layer"],
+                             "via_unattributed": product["layers"]["via_unattributed"]},
+                stats=product["text"])
+            metal_db.save(target, metal_db.BlockDb(
+                header=header, grids=_db_grids_for(name, product["sink"], tech),
+                components=components))
+            written.append(target)
+        return written
+
     def parse_block(name: AnyStr, frames: List) -> None:
-        """Read one block's DEF once and place its wiring under every instance frame."""
-
-        def fold(counters: Dict) -> None:
-            # The wiring lands once per placement, so the counters that describe the *text* are
-            # counted once per placement too, or the summary would disagree with the grids.
-            # `emitted` is not among them: the stream counts that per placement already.
-            for key, value in counters.items():
-                totals[key] += value * (len(frames) if key in PER_PLACEMENT_COUNTERS else 1)
-
+        """Measure one block's wiring: read its DEF, or take it from a db."""
+        db = pending.get(name)
+        if db is not None:
+            reason = metal_db.mismatch(db, params=db_params, tech_key=tech_key, lef_key=lef_key,
+                                       layers=measured_layers,
+                                       frames=[(frame.orient, frame.origin[0], frame.origin[1])
+                                               for frame in frames])
+            if reason is None:
+                reuse_block(name, db, len(frames))
+                return
+            if name not in path_of_block:
+                # Its db is the only copy of this block's wiring there is, and it describes a
+                # different design than the one being drawn. Saying so beats drawing it wrong.
+                warnings.append(f"block {name!r} comes from a db that does not match this run "
+                                f"({reason}); its wiring is not counted")
+                return
+            warnings.append(f"block {name!r} was re-parsed: {reason}")
         path = path_of_block[name]
         progress(f"reading routing in {name}")
+        placements_here = len(frames)
+        block_sink = _GridSink(extent, grid_size)
+        block_text = _new_text_stats()
         if jobs > 1:
             # Each worker reads the DEF itself and takes every `jobs`-th net statement; the
             # grids come back per layer and are summed here. See `parallel`.
             counters, _stats, note = parse_parallel(
-                path, name, tech, frames, min_segment, extent, grid_size, sink, jobs,
-                text_stats=text_stats, cancel=cancel, pool=pool, work_dir=work_dir)
+                path, name, tech, frames, min_segment, extent, grid_size, block_sink, jobs,
+                text_stats=block_text, cancel=cancel, pool=pool, work_dir=work_dir)
             # Folded before the stop is raised, and in that order: the counters and the grids
             # have to tell the same story, or the run reports having measured nothing on top of
             # the partial map it did measure.
-            fold(counters)
-            merge_layer_stats(layer_stats, note["layers"])
+            fold_block(name, block_sink, counters, note["layers"], block_text, placements_here)
             if note.get("ndrs"):
                 logger.info("%s: %d non-default rule(s)", name, note["ndrs"])
             if note.get("interrupted"):
                 raise Cancelled(
                     f"interrupted; {note['stopped']} of {jobs} worker(s) stopped early")
             return
-        stream = ShapeStream(tech, sink, frames=frames, min_segment=min_segment)
+        stream = ShapeStream(tech, block_sink, frames=frames, min_segment=min_segment)
         # The components were read in pass 1; this pass wants the wiring, and re-building
         # three million DefComponents that nothing reads costs memory for nothing.
-        routing = parse_def(path, stream=stream, skip_components=True, cancel=cancel)
+        try:
+            routing = parse_def(path, stream=stream, skip_components=True, cancel=cancel)
+        except Cancelled:
+            # Keep what was read: the geometry is already in this block's own sink, and with a
+            # sink per block rather than one shared one, dropping it here would lose the
+            # partially measured block the interrupt is supposed to preserve.
+            stream.flush()
+            sink.add_grids(block_sink.grids())
+            raise
         stream.flush()
-        fold({key: getattr(stream, attribute) for key, attribute in SHAPE_COUNTERS})
-        merge_layer_stats(layer_stats, layer_stats_of(stream))
         stats = routing.stats
-        text_stats["forms"] += stats.get("forms", 0)
-        text_stats["points"] += stats.get("points", 0)
-        text_stats["lines"] += stats.get("lines", 0)
-        # Inline `RECT ( dx1 dy1 dx2 dy2 )` elements, which the DEF may not use at all. The
-        # `virtual` count is deliberately not carried here as well: the stream counts it, and
-        # one number in two places is how the two places come to disagree.
-        text_stats["rects"] += stats.get("rects", 0)
-        for key in ("statement_lines_max", "statement_chars_max", "points_max"):
-            text_stats[key] = max(text_stats[key], stats.get(key, 0))
-        text_stats["layers_used"] |= set(stats.get("layers_used", ()))
+        for key in ("forms", "points", "lines", "rects", "statement_lines_max",
+                    "statement_chars_max", "points_max"):
+            block_text[key] = stats.get(key, 0)
+        block_text["layers_used"] = set(stats.get("layers_used", ()))
+        fold_block(name, block_sink,
+                   {key: getattr(stream, attribute) for key, attribute in SHAPE_COUNTERS},
+                   layer_stats_of(stream), block_text, placements_here)
         if routing.ndrs:
             logger.info("%s: %d non-default rule(s)", name, len(routing.ndrs))
 
@@ -823,6 +1118,7 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
         # `initializer` runs in each worker before any task: it takes ^C out of the workers'
         # hands, so the interrupt stays the parent's decision and the map survives it.
         pool = ProcessPoolExecutor(max_workers=jobs, initializer=ignore_interrupts)
+    stopped_early = False
     try:
         # The walk stays per placement - `_macro_blockage` and `_boundary_polys` need one visit
         # per instance - and only the wiring pass defers, so that a block placed K times is
@@ -831,6 +1127,7 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
         for block_name, block_frames in placements.items():
             parse_block(block_name, block_frames)
     except Cancelled as stopped:
+        stopped_early = True
         # Not a failure: the grids hold everything read up to the interrupt, and saying so is
         # what keeps a partial map from being mistaken for a complete one. It now lands where a
         # prefix of every block's wiring has been read, rather than a prefix of the blocks.
@@ -842,9 +1139,16 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
             pool.shutdown()
     if assembler.missing:
         missing = sorted(set(assembler.missing))
+        # A component the LEF does not have may be a sub-block whose DEF - or whose db - is not
+        # part of this run, which is exactly what the top of a hierarchy looks like on its own.
+        # Naming it matters more than "no footprint": it is wiring this run cannot draw, and the
+        # remedy is the DEF or the db the user already has somewhere.
+        suspected = [name for name in missing if name in remembered_blocks]
+        hint = (f"; {', '.join(suspected[:3])} of them could be a sub-block whose wiring this "
+                f"run has no DEF or db for" if suspected else "")
         warnings.append(f"{len(missing)} cell type(s) are neither in the LEF nor a block, "
                         f"so they contribute no footprint: {', '.join(missing[:5])}"
-                        + (" ..." if len(missing) > 5 else ""))
+                        + (" ..." if len(missing) > 5 else "") + hint)
 
     if not tech.usable:
         warnings.append("no routing layer in the tech LEF has a usable width")
@@ -876,13 +1180,25 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
     # statement sizes, points per form, the layer names - are the ones a DEF's own header does
     # not carry.
     resident, peak = resident_mb()
+    # Dumped before the object that carries the warnings is built, so a run that could not dump
+    # says so in the list the caller reads rather than only in the log.
+    if dump_db is not None:
+        if stopped_early:
+            warnings.append("no db written: the build was stopped early, so its grids are a "
+                            "prefix rather than a measurement")
+        else:
+            written = write_dbs()
+            logger.info("metal: wrote %d db(s) to %s", len(written), dump_db)
     # Built before the summary is logged, and not only in the return: the summary's per-layer
     # lines report the same area and utilisation the map does, and the map is this object.
     built = MetalData(root, _boundary_polys(assembler, blocks, root), grid_size, extent, rows,
                       cols, tech.layers, capacity_base, blocked, macro_block_layers,
                       grids, warnings, blockage, totals, text_stats,
-                      filtered_layers=tech.filtered_layers, layer_stats=layer_stats)
+                      filtered_layers=tech.filtered_layers, layer_stats=layer_stats,
+                      dbs=[os.path.basename(str(path)) for path in (db_paths or ())],
+                      reused=reused)
     _log_layer_table(built)
+    _check_layer_totals(built)
     _log_summary({
         "design": root,
         "version": __version__,
@@ -893,7 +1209,11 @@ def build_metal(def_paths: Sequence[AnyStr], lef_paths: Sequence[AnyStr],
                    "min_layer": min_layer, "max_layer": max_layer, "top": top},
         "inputs": {"defs": [_file_note(path) for path in def_paths],
                    "lefs": len(lef_paths),
-                   "tech_lefs": [_file_note(path) for path in tech_paths]},
+                   "tech_lefs": [_file_note(path) for path in tech_paths],
+                   # What a db spared this run: the files it was handed, and the blocks whose
+                   # wiring came out of one instead of out of a DEF parse.
+                   "dbs": [os.path.basename(str(path)) for path in (db_paths or ())],
+                   "reused": list(reused)},
         "stages_s": {name: round(seconds, 2) for name, seconds in stage_seconds.items()},
         "shapes": dict(totals, total=shapes),
         "input_text": dict(text_stats, layers_used=len(text_stats["layers_used"])),

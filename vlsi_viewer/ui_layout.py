@@ -14,6 +14,18 @@ HEAT_TYPES = [("density", "Cell density"), ("leakage", "Leakage power"),
               ("dynamic", "Dynamic power"), ("ulvt", "ULVT density")]
 
 
+def _kinds_for(physical):
+    """The map selector's entries for a physical source.
+
+    Pin density is appended, never inserted: the four grids above keep their indices, which
+    the range bookkeeping and the tests both depend on. A source with no pin geometry (the
+    json path, whose cells come from a ``cell_info.json``) does not offer it at all.
+    """
+    if getattr(physical, "has_pins", False):
+        return HEAT_TYPES + [("pins", "Pin density")]
+    return HEAT_TYPES
+
+
 class LayoutView(QWidget):
     """Right-hand panel: GenericGraphicsView heat map + controls + legend.
 
@@ -41,7 +53,7 @@ class LayoutView(QWidget):
         super().__init__(parent)
         self._physical = physical
         self._external_controls = external_controls
-        self._kinds = physical.kinds() if hasattr(physical, "kinds") else HEAT_TYPES
+        self._kinds = physical.kinds() if hasattr(physical, "kinds") else _kinds_for(physical)
         self._contour_enabled = hasattr(physical, "contour_for")
         # A source whose values are ratios gets a fixed [0, 1] ramp: the whole point of the
         # metal metric is that 1.0 means every track consumed, so autoscaling to the data

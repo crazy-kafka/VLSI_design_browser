@@ -60,8 +60,8 @@ from typing import Dict, Iterator, List, NamedTuple, Optional, Sequence, Tuple
 
 from .metal import _GridSink, resident_mb
 from .parsers import Cancelled
-from .parsers.routing import (LAYER_COLUMNS, SHAPE_COUNTERS, ShapeStream, TechRouting,
-                              parse_def)
+from .parsers.routing import (LAYER_COLUMNS, PER_PLACEMENT_COLUMNS, SHAPE_COUNTERS,
+                              ShapeStream, TechRouting, parse_def)
 
 logger = logging.getLogger(__name__)
 
@@ -699,8 +699,13 @@ def layer_stats_of(stream) -> Dict:
             "via_unattributed": stream.n_via_unattributed}
 
 
-def merge_layer_stats(target: Dict, source: Dict) -> None:
-    """Add one chunk's or worker's per-layer numbers into another's.
+def merge_layer_stats(target: Dict, source: Dict, placements: int = 1) -> None:
+    """Add one chunk's, worker's or block's per-layer numbers into another's.
+
+    ``placements`` scales the columns whose counters are counted once per *parse* - see
+    `PER_PLACEMENT_COLUMNS`, which is `PER_PLACEMENT_COUNTERS` in another shape. It belongs to the
+    caller that knows how many times the block is placed: the per-block merge in `build_metal`,
+    never a worker folding the chunks it read from one parse.
 
     The rows are widened rather than indexed into: a target that has seen fewer layers than the
     source is the normal case when the first contributor is a chunk of a trimmed stack.
@@ -709,7 +714,7 @@ def merge_layer_stats(target: Dict, source: Dict) -> None:
         target["rows"].append([0] * len(LAYER_COLUMNS))
     for row, other in zip(target["rows"], source["rows"]):
         for index, value in enumerate(other):
-            row[index] += value
+            row[index] += value * (placements if index in PER_PLACEMENT_COLUMNS else 1)
     for key in ("filtered_by_layer", "via_points_by_layer"):
         for name, count in source[key].items():
             target[key][name] = target[key].get(name, 0) + count

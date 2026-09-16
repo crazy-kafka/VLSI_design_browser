@@ -8,6 +8,38 @@ MACRO INV_X1_SVT
   ORIGIN 0 0 ;
   SIZE 0.4 BY 1.0 ;
   SYMMETRY X Y ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.083 0.100 0.183 0.200 ;
+    END
+  END A
+  PIN ZN
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.217 0.800 0.317 0.900 ;
+    END
+  END ZN
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.900 0.400 1.000 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.000 0.400 0.100 ;
+    END
+  END VSS
 END INV_X1_SVT
 
 MACRO INV_X2_LVT
@@ -15,6 +47,38 @@ MACRO INV_X2_LVT
   ORIGIN 0 0 ;
   SIZE 0.6 BY 1.0 ;
   SYMMETRY X Y ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.150 0.100 0.250 0.200 ;
+    END
+  END A
+  PIN ZN
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.350 0.800 0.450 0.900 ;
+    END
+  END ZN
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.900 0.600 1.000 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.000 0.600 0.100 ;
+    END
+  END VSS
 END INV_X2_LVT
 
 MACRO BUF_X2_SVT
@@ -22,6 +86,38 @@ MACRO BUF_X2_SVT
   ORIGIN 0 0 ;
   SIZE 0.8 BY 1.0 ;
   SYMMETRY X Y ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.217 0.100 0.317 0.200 ;
+    END
+  END A
+  PIN ZN
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.483 0.800 0.583 0.900 ;
+    END
+  END ZN
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.900 0.800 1.000 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.000 0.800 0.100 ;
+    END
+  END VSS
 END BUF_X2_SVT
 
 MACRO BUF_X4_LVT
@@ -29,6 +125,38 @@ MACRO BUF_X4_LVT
   ORIGIN 0 0 ;
   SIZE 1.2 BY 1.0 ;
   SYMMETRY X Y ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.350 0.100 0.450 0.200 ;
+    END
+  END A
+  PIN ZN
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.750 0.800 0.850 0.900 ;
+    END
+  END ZN
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.900 1.200 1.000 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.000 1.200 0.100 ;
+    END
+  END VSS
 END BUF_X4_LVT
 
 MACRO NAND2_X1_SVT
@@ -36,6 +164,46 @@ MACRO NAND2_X1_SVT
   ORIGIN 0 0 ;
   SIZE 0.8 BY 1.0 ;
   SYMMETRY X Y ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.150 0.100 0.250 0.200 ;
+    END
+  END A
+  PIN B
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.350 0.100 0.450 0.200 ;
+    END
+  END B
+  PIN ZN
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.550 0.800 0.650 0.900 ;
+    END
+  END ZN
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.900 0.800 1.000 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.000 0.800 0.100 ;
+    END
+  END VSS
 END NAND2_X1_SVT
 
 MACRO NOR2_X1_LVT
@@ -43,6 +211,46 @@ MACRO NOR2_X1_LVT
   ORIGIN 0 0 ;
   SIZE 0.8 BY 1.0 ;
   SYMMETRY X Y ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.150 0.100 0.250 0.200 ;
+    END
+  END A
+  PIN B
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.350 0.100 0.450 0.200 ;
+    END
+  END B
+  PIN ZN
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.550 0.800 0.650 0.900 ;
+    END
+  END ZN
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.900 0.800 1.000 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.000 0.800 0.100 ;
+    END
+  END VSS
 END NOR2_X1_LVT
 
 MACRO AND2_X1_SVT
@@ -50,6 +258,46 @@ MACRO AND2_X1_SVT
   ORIGIN 0 0 ;
   SIZE 1.0 BY 1.0 ;
   SYMMETRY X Y ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.200 0.100 0.300 0.200 ;
+    END
+  END A
+  PIN B
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.450 0.100 0.550 0.200 ;
+    END
+  END B
+  PIN ZN
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.700 0.800 0.800 0.900 ;
+    END
+  END ZN
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.900 1.000 1.000 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.000 1.000 0.100 ;
+    END
+  END VSS
 END AND2_X1_SVT
 
 MACRO OR2_X1_LVT
@@ -57,6 +305,46 @@ MACRO OR2_X1_LVT
   ORIGIN 0 0 ;
   SIZE 1.0 BY 1.0 ;
   SYMMETRY X Y ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.200 0.100 0.300 0.200 ;
+    END
+  END A
+  PIN B
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.450 0.100 0.550 0.200 ;
+    END
+  END B
+  PIN ZN
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.700 0.800 0.800 0.900 ;
+    END
+  END ZN
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.900 1.000 1.000 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.000 1.000 0.100 ;
+    END
+  END VSS
 END OR2_X1_LVT
 
 MACRO XOR2_X1_ULVT
@@ -64,6 +352,46 @@ MACRO XOR2_X1_ULVT
   ORIGIN 0 0 ;
   SIZE 1.4 BY 1.0 ;
   SYMMETRY X Y ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.300 0.100 0.400 0.200 ;
+    END
+  END A
+  PIN B
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.650 0.100 0.750 0.200 ;
+    END
+  END B
+  PIN ZN
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 1.000 0.800 1.100 0.900 ;
+    END
+  END ZN
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.900 1.400 1.000 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.000 1.400 0.100 ;
+    END
+  END VSS
 END XOR2_X1_ULVT
 
 MACRO MUX2_X1_LVT
@@ -71,6 +399,54 @@ MACRO MUX2_X1_LVT
   ORIGIN 0 0 ;
   SIZE 1.2 BY 1.0 ;
   SYMMETRY X Y ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.190 0.100 0.290 0.200 ;
+    END
+  END A
+  PIN B
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.430 0.100 0.530 0.200 ;
+    END
+  END B
+  PIN S
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.670 0.100 0.770 0.200 ;
+    END
+  END S
+  PIN Z
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.910 0.800 1.010 0.900 ;
+    END
+  END Z
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.900 1.200 1.000 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.000 1.200 0.100 ;
+    END
+  END VSS
 END MUX2_X1_LVT
 
 MACRO SDF_X1_SVT
@@ -78,6 +454,62 @@ MACRO SDF_X1_SVT
   ORIGIN 0 0 ;
   SIZE 1.6 BY 1.0 ;
   SYMMETRY X Y ;
+  PIN D
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.217 0.100 0.317 0.200 ;
+    END
+  END D
+  PIN SI
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.483 0.100 0.583 0.200 ;
+    END
+  END SI
+  PIN SE
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.750 0.100 0.850 0.200 ;
+    END
+  END SE
+  PIN CK
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 1.017 0.100 1.117 0.200 ;
+    END
+  END CK
+  PIN Q
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 1.283 0.800 1.383 0.900 ;
+    END
+  END Q
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.900 1.600 1.000 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.000 1.600 0.100 ;
+    END
+  END VSS
 END SDF_X1_SVT
 
 MACRO SDF_X2_LVT
@@ -85,6 +517,62 @@ MACRO SDF_X2_LVT
   ORIGIN 0 0 ;
   SIZE 2.0 BY 1.0 ;
   SYMMETRY X Y ;
+  PIN D
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.283 0.100 0.383 0.200 ;
+    END
+  END D
+  PIN SI
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.617 0.100 0.717 0.200 ;
+    END
+  END SI
+  PIN SE
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.950 0.100 1.050 0.200 ;
+    END
+  END SE
+  PIN CK
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 1.283 0.100 1.383 0.200 ;
+    END
+  END CK
+  PIN Q
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 1.617 0.800 1.717 0.900 ;
+    END
+  END Q
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.900 2.000 1.000 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.000 2.000 0.100 ;
+    END
+  END VSS
 END SDF_X2_LVT
 
 MACRO MB4_SDF_ULVT
@@ -92,6 +580,62 @@ MACRO MB4_SDF_ULVT
   ORIGIN 0 0 ;
   SIZE 4.0 BY 1.0 ;
   SYMMETRY X Y ;
+  PIN D
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.617 0.100 0.717 0.200 ;
+    END
+  END D
+  PIN SI
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 1.283 0.100 1.383 0.200 ;
+    END
+  END SI
+  PIN SE
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 1.950 0.100 2.050 0.200 ;
+    END
+  END SE
+  PIN CK
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 2.617 0.100 2.717 0.200 ;
+    END
+  END CK
+  PIN Q
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 3.283 0.800 3.383 0.900 ;
+    END
+  END Q
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.900 4.000 1.000 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.000 4.000 0.100 ;
+    END
+  END VSS
 END MB4_SDF_ULVT
 
 MACRO CLKBUF_X2_LVT
@@ -99,6 +643,38 @@ MACRO CLKBUF_X2_LVT
   ORIGIN 0 0 ;
   SIZE 0.8 BY 1.0 ;
   SYMMETRY X Y ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.217 0.100 0.317 0.200 ;
+    END
+  END A
+  PIN ZN
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.483 0.800 0.583 0.900 ;
+    END
+  END ZN
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.900 0.800 1.000 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.000 0.800 0.100 ;
+    END
+  END VSS
 END CLKBUF_X2_LVT
 
 MACRO ICG_X1_SVT
@@ -106,6 +682,46 @@ MACRO ICG_X1_SVT
   ORIGIN 0 0 ;
   SIZE 1.0 BY 1.0 ;
   SYMMETRY X Y ;
+  PIN CK
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.200 0.100 0.300 0.200 ;
+    END
+  END CK
+  PIN E
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.450 0.100 0.550 0.200 ;
+    END
+  END E
+  PIN GCK
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.700 0.800 0.800 0.900 ;
+    END
+  END GCK
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.900 1.000 1.000 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.000 1.000 0.100 ;
+    END
+  END VSS
 END ICG_X1_SVT
 
 MACRO FILL_8
@@ -113,6 +729,22 @@ MACRO FILL_8
   ORIGIN 0 0 ;
   SIZE 0.8 BY 1.0 ;
   SYMMETRY X Y ;
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.900 0.800 1.000 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.000 0.800 0.100 ;
+    END
+  END VSS
 END FILL_8
 
 MACRO FILL_16
@@ -120,6 +752,22 @@ MACRO FILL_16
   ORIGIN 0 0 ;
   SIZE 1.6 BY 1.0 ;
   SYMMETRY X Y ;
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.900 1.600 1.000 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.000 1.600 0.100 ;
+    END
+  END VSS
 END FILL_16
 
 MACRO TAP_1
@@ -127,6 +775,22 @@ MACRO TAP_1
   ORIGIN 0 0 ;
   SIZE 0.4 BY 1.0 ;
   SYMMETRY X Y ;
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.900 0.400 1.000 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.000 0.400 0.100 ;
+    END
+  END VSS
 END TAP_1
 
 MACRO DCAP_4
@@ -134,6 +798,22 @@ MACRO DCAP_4
   ORIGIN 0 0 ;
   SIZE 0.8 BY 1.0 ;
   SYMMETRY X Y ;
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.900 0.800 1.000 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.000 0.800 0.100 ;
+    END
+  END VSS
 END DCAP_4
 
 MACRO SRAM_512
@@ -141,5 +821,93 @@ MACRO SRAM_512
   ORIGIN 0 0 ;
   SIZE 16.0 BY 8.0 ;
   SYMMETRY X Y ;
+  PIN CLK
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 1.550 0.100 1.650 0.200 ;
+    END
+  END CLK
+  PIN WE
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 3.150 0.100 3.250 0.200 ;
+    END
+  END WE
+  PIN RE
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 4.750 0.100 4.850 0.200 ;
+    END
+  END RE
+  PIN ADDR0
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 6.350 0.100 6.450 0.200 ;
+    END
+  END ADDR0
+  PIN ADDR1
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 7.950 0.100 8.050 0.200 ;
+    END
+  END ADDR1
+  PIN DIN0
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 9.550 0.100 9.650 0.200 ;
+    END
+  END DIN0
+  PIN DIN1
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 11.150 0.100 11.250 0.200 ;
+    END
+  END DIN1
+  PIN DOUT0
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 12.750 0.100 12.850 0.200 ;
+    END
+  END DOUT0
+  PIN DOUT1
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+      RECT 14.350 7.800 14.450 7.900 ;
+    END
+  END DOUT1
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 7.900 16.000 8.000 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER metal1 ;
+      RECT 0.000 0.000 16.000 0.100 ;
+    END
+  END VSS
 END SRAM_512
 

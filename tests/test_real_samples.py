@@ -475,3 +475,24 @@ def test_the_wrong_tech_lef_is_loud_about_it():
     data = _quiet(build_metal, [GCD], [CELLS], [SKY130], grid_size=GRID)
     assert any("does not define" in warning for warning in data.warnings), data.warnings
     assert data.heat(data.group_kind([layer.name for layer in data.layers])).max() == 0.0
+
+
+def test_the_pin_density_map_counts_the_real_design_pin_by_pin():
+    """The DEF+LEF route: the LEF's signal pins, placed by the DEF's own orientations.
+
+    The expected count is derived independently - one point per pin of every placed instance,
+    straight from the two conversion outputs - so a transform that dropped a placement, or put
+    one where a second rotation says, fails here instead of drawing a plausible-looking map.
+    """
+    from vlsi_viewer.physical import build_physical
+
+    cells, pins = _quiet(cell_info_from_lef, [CELLS], with_pins=True)
+    block = _quiet(instance_info_from_def, GCD)
+    data = _quiet(build_physical, [block], cells, grid_size=GRID, pins=pins)
+
+    assert data.has_pins
+    grid = data.heat("pins")
+    expected = sum(len(pins.get(row["cell_name"], ()))
+                   for row in block["instances"].values())
+    assert expected > 0
+    assert grid.sum() == expected

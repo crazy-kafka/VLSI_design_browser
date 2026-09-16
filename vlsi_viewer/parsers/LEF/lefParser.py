@@ -291,6 +291,10 @@ class LefParser:
                             use = 'SIGNAL'
                             layer = 'UNKNOWN'
                             shape = [(0.0, 0.0), (0.0, 0.0)]
+                            # Union of every RECT the pin declares, for its centre: a pin
+                            # drawn as several rectangles is still one point in the
+                            # pin-density map. ``shape`` above keeps its last-RECT meaning.
+                            union = None
                             while pin_end not in lef_lines[cursor]:
                                 direction_match = CompiledRe.re_direction.search(lef_lines[cursor])
                                 if direction_match:
@@ -311,10 +315,16 @@ class LefParser:
 
                                 pin_shape_match = CompiledRe.re_rect.search(lef_lines[cursor])
                                 if pin_shape_match:
-                                    shape = [(float(pin_shape_match.group(1)),
-                                            float(pin_shape_match.group(2))),
-                                            (float(pin_shape_match.group(3)),
-                                            float(pin_shape_match.group(4)))]
+                                    rect = (float(pin_shape_match.group(1)),
+                                            float(pin_shape_match.group(2)),
+                                            float(pin_shape_match.group(3)),
+                                            float(pin_shape_match.group(4)))
+                                    shape = [(rect[0], rect[1]), (rect[2], rect[3])]
+                                    if union is None:
+                                        union = rect
+                                    else:
+                                        union = (min(union[0], rect[0]), min(union[1], rect[1]),
+                                                 max(union[2], rect[2]), max(union[3], rect[3]))
                                     cursor += 1
                                     continue
                                 cursor += 1
@@ -330,7 +340,9 @@ class LefParser:
                                 elif direction == 'INOUT':
                                     inout_pin_num += 1
 
-                            this_macro.setPin(pin_name, direction, use, layer, shape)
+                            centre = None if union is None else (((union[0] + union[2]) / 2.0,
+                                                                  (union[1] + union[3]) / 2.0))
+                            this_macro.setPin(pin_name, direction, use, layer, shape, centre)
                         elif CompiledRe.re_obs_start.search(lef_lines[cursor]):
                             cursor = self.__readObstructions(lef_lines, cursor, this_macro)
                     cursor += 1

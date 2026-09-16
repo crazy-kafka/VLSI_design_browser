@@ -274,3 +274,128 @@ def test_physical_only_is_density_only(tmp_path, where):
     assert len(physical.boxes_for("TOP")) == len(absent.boxes_for("TOP"))
     assert physical.contour_for("TOP") == absent.contour_for("TOP")
     assert physical.density_for("TOP") == pytest.approx(absent.density_for("TOP"))
+
+
+# -- pin density ---------------------------------------------------------------
+#
+# The one grid that is not built from the boxes: it walks every placement again, transforms
+# each cell's own pin geometry, and counts one point per pin. What it must get right is the
+# placement rule - DEF puts the *lower-left corner of the oriented bounding box* at the
+# instance's location (LEF/DEF reference), so a macro-local pin has to be rotated and then
+# shifted by that corner before it lands where the view draws the cell.
+
+ORIENTS = ("N", "S", "W", "E", "FN", "FS", "FW", "FE")
+
+
+def _pin_design(tmp_path, size=(4.0, 2.0), pin=(1.0, 0.5)):
+    """One ``size`` cell with a single pin at ``pin``, placed once per orientation.
+
+    The placements sit 20 um apart along x on a 4 um grid, so each instance's box covers a
+    column range of its own: a pin that landed outside its box would be counted against a
+    different instance, or against none.
+    """
+    cell = tmp_path / "pin_cell.json"
+    cell.write_text(json.dumps({"P1": {"area": size[0] * size[1], "size_x": size[0],
+                                       "size_y": size[1], "leakage_power": 1.0,
+                                       "dynamic_power": 2.0}}))
+    inst = {}
+    for i, orient in enumerate(ORIENTS):
+        inst[f"u{i}"] = {"cell_name": "P1", "location_x": 20.0 * i, "location_y": 0.0,
+                         "orient": orient, "leakage_power": 1.0, "dynamic_power": 2.0}
+    b = _block(tmp_path, "TOP", inst, boundary=[(0, 0), (170, 20)])
+    return b, str(cell), {"P1": [pin]}
+
+
+def test_pin_offsets_follow_the_placement_rule():
+    """The eight offsets that move a macro-local pin point onto the placed box.
+
+    Zero for the three orientations whose rotation leaves the local lower-left corner at the
+    origin, and the macro's own extent for the rest - for W it is the height, for E the width.
+    """
+    import numpy as np
+    from vlsi_viewer.physical import _PIN_ORIENTS, _pin_offsets
+
+    offx, offy = _pin_offsets(np.array([4.0]), np.array([2.0]))
+    got = {o: (float(offx[i][0]), float(offy[i][0])) for i, o in enumerate(_PIN_ORIENTS)}
+    assert got == {"N": (0.0, 0.0), "S": (4.0, 2.0), "W": (2.0, 0.0), "E": (0.0, 4.0),
+                   "FN": (4.0, 0.0), "FS": (0.0, 2.0), "FW": (0.0, 0.0), "FE": (2.0, 4.0)}
+
+
+def test_pin_density_counts_one_point_per_placed_pin(tmp_path):
+    b, cell, pins = _pin_design(tmp_path)
+    data = build_physical([b], cell, grid_size=4.0, pins=pins)
+    assert data.has_pins
+    assert data._pins is None            # built on first use, not while loading
+
+    grid = data.heat("pins")
+    assert data._pins is not None        # ... and kept
+    assert grid.sum() == 8               # one point per placement, in every orientation
+
+    # Every counted point falls inside the box the density map draws for its own instance.
+    # The boxes come from the box pass, so this is an independent check of the transform: a
+    # pin placed one macro extent away - the failure mode of ignoring the offset - lands in a
+    # neighbouring instance's columns, or outside the die entirely.
+    boxes = data.boxes_for("TOP")
+    for i in range(len(ORIENTS)):
+        x0, y0, x1, y1 = (float(v) for v in boxes[i])
+        ix0, ix1 = int(x0 // 4.0), int((x1 - 1e-9) // 4.0)
+        iy0, iy1 = int(y0 // 4.0), int((y1 - 1e-9) // 4.0)
+        assert grid[iy0:iy1 + 1, ix0:ix1 + 1].sum() == 1, ORIENTS[i]
+
+
+def test_pin_density_of_a_reused_sub_block(tmp_path):
+    """A block placed twice contributes its instances twice, through their placement frames."""
+    cell = tmp_path / "sub_cell.json"
+    cell.write_text(json.dumps({"P1": {"area": 8.0, "size_x": 4.0, "size_y": 2.0,
+                                       "leakage_power": 1.0, "dynamic_power": 2.0}}))
+    top = _block(tmp_path, "TOP",
+                 {"b1": {"cell_name": "B", "location_x": 0, "location_y": 0},
+                  "b2": {"cell_name": "B", "location_x": 40, "location_y": 0}},
+                 boundary=[(0, 0), (80, 20)], fname="top.json")
+    sub = _block(tmp_path, "B",
+                 {"p": {"cell_name": "P1", "location_x": 0, "location_y": 0},
+                  "q": {"cell_name": "P1", "location_x": 8, "location_y": 0}},
+                 boundary=[(0, 0), (12, 2)], fname="sub.json")
+    data = build_physical([top, sub], str(cell), grid_size=4.0, pins={"P1": [(1.0, 0.5)]})
+    grid = data.heat("pins")
+    assert grid.sum() == 4                       # two instances, two placements
+    # sub-block 1 puts pins at x = 1 and x = 9 -> grid columns 0 and 2; sub-block 2 at 41, 49
+    assert [(ix, int(round(float(grid[0, ix])))) for ix in (0, 2, 10, 12)] == [
+        (0, 1), (2, 1), (10, 1), (12, 1)]
+
+
+def test_a_source_without_pins_offers_no_pin_map(tmp_path):
+    """The json path: no pin geometry exists to count, so the map is not offered."""
+    b, cell, _pins = _pin_design(tmp_path)
+    data = build_physical([b], cell, grid_size=4.0)
+    assert not data.has_pins
+    with pytest.raises(KeyError):
+        data.heat("pins")
+
+
+def test_pin_density_under_a_rotated_sub_block(tmp_path):
+    """The leaf's orientation composes *inside* its block's, not the other way round.
+
+    A pin goes through its cell's orientation, then the placement, then the block's frame. The
+    two orders differ by a rotation of the placement point, which is exactly what this pins:
+    the block is W at (40, 0), its cell is N at (0, 0) with a pin at (1.0, 0.5), so the pin
+    lands at (39.5, 1.0) - and the box the density map draws for that same instance is
+    [38, 40] x [0, 4].
+    """
+    cell = tmp_path / "rot_cell.json"
+    cell.write_text(json.dumps({"P1": {"area": 8.0, "size_x": 4.0, "size_y": 2.0,
+                                       "leakage_power": 1.0, "dynamic_power": 2.0}}))
+    top = _block(tmp_path, "TOP",
+                 {"b": {"cell_name": "B", "location_x": 40.0, "location_y": 0.0,
+                        "orient": "W"}},
+                 boundary=[(0, 0), (80, 20)], fname="top.json")
+    sub = _block(tmp_path, "B",
+                 {"p": {"cell_name": "P1", "location_x": 0.0, "location_y": 0.0}},
+                 boundary=[(0, 0), (12, 2)], fname="sub.json")
+
+    data = build_physical([top, sub], str(cell), grid_size=4.0, pins={"P1": [(1.0, 0.5)]})
+    grid = data.heat("pins")
+    assert grid.sum() == 1
+    assert grid[0, 9] == 1.0            # (39.5, 1.0) on a 4 um grid
+    x0, y0, x1, y1 = (float(v) for v in data.boxes_for("TOP")[0])
+    assert (x0, y0, x1, y1) == (38.0, 0.0, 40.0, 4.0)

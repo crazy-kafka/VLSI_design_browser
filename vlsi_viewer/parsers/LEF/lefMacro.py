@@ -62,8 +62,9 @@ class LefMacro:
     def setSize(self, width: float, height: float):
         self.__macro['size'] = (width, height)
 
-    def setPin(self, pin_name, direction, use, layer, shape):
-        self.__macro['pin'].update({pin_name: LefPin(pin_name, direction, use ,layer, shape)})
+    def setPin(self, pin_name, direction, use, layer, shape, centre=None):
+        self.__macro['pin'].update(
+            {pin_name: LefPin(pin_name, direction, use, layer, shape, centre)})
 
     def setInputPinNum(self, N):
         self.__macro['input_pin_num'] = N

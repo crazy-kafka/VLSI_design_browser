@@ -132,9 +132,10 @@ def parse_args(argv=None):
 
     p = sub.add_parser("metal", help="DEF + macro LEF + tech LEF: metal-density maps")
     # dest is explicit because the default would be `args.def`, and `def` is a keyword.
-    p.add_argument("--def", dest="def_files", required=True, nargs="+", metavar="DEF",
+    p.add_argument("--def", dest="def_files", nargs="+", metavar="DEF",
                    help="DEF file(s) with routing; several are assembled into one "
-                        "hierarchy with a single top")
+                        "hierarchy with a single top. Optional only when --db covers every "
+                        "block of the design")
     p.add_argument("--lef", required=True, nargs="+", metavar="LEF",
                    help="macro LEF file(s) describing the cell library")
     p.add_argument("--tech-lef", dest="tech_lef", required=True, nargs="+", metavar="TLEF",
@@ -177,6 +178,18 @@ def parse_args(argv=None):
                    help="time the build with cProfile and print the top 15 by self time; "
                         "optionally write a .pstats file. The wall clock it reports is "
                         "inflated, so use it to find the cost, not to measure it")
+    # The underscore spellings are aliases here too, for the same reason as the layer flags:
+    # these name parameters of `build_metal`.
+    p.add_argument("--dump-db", "--dump_db", dest="dump_db", metavar="DIR",
+                   help="write one intermediate db per DEF input into DIR, named from the DEF "
+                        "(A.def.gz -> A.def.db), so a later run rebuilds the map without parsing "
+                        "the DEF again")
+    p.add_argument("--db", dest="db_files", nargs="+", metavar="DB",
+                   help="intermediate db file(s) written by --dump-db. A block whose db still "
+                        "matches this run - same DEF, same knobs, same LEFs, same placement - is "
+                        "not parsed at all; with --def, only the DEFs that changed are")
+    p.add_argument("--dump-only", "--dump_only", dest="dump_only", action="store_true",
+                   help="write the dbs (with --dump-db) and exit without opening a window")
     _add_shared(p)
 
     return parser.parse_args(argv)
@@ -219,23 +232,30 @@ def _dump_json(path, data, written=None):
 
 
 def resolve_inputs(args):
-    """``(cell_info, blocks, compare_blocks)`` for whichever subcommand ran.
+    """``(cell_info, blocks, compare_blocks, pins)`` for whichever subcommand ran.
 
     ``json`` returns the paths it was given. ``verilog`` and ``def`` return the converted
     data itself - dicts, not files - so a run writes nothing to disk unless ``--out DIR``
     was given, in which case the JSON is dumped there purely as a copy to inspect or feed
     back to the ``json`` subcommand.
 
+    ``pins`` is the pin-density map's geometry, and only the ``def`` flow has any: it is read
+    out of the same LEF walk that builds ``cell_info``. A ``cell_info.json`` cannot carry it,
+    so the json flow passes ``None`` and that map is simply not offered.
+
     Split out from :func:`main` so the conversion is testable without Qt.
     """
     if args.cmd == "json":
         return (args.cell_info, list(args.block_info),
-                list(args.compare_block_info) if args.compare_block_info else None)
+                list(args.compare_block_info) if args.compare_block_info else None, None)
 
     from .parsers.convert import (cell_info_from_lef, instance_info_from_def,
                                   instance_info_from_verilog)
 
-    cells = cell_info_from_lef(args.lef)
+    if args.cmd == "def":
+        cells, pins = cell_info_from_lef(args.lef, with_pins=True)
+    else:
+        cells, pins = cell_info_from_lef(args.lef), None
 
     if args.cmd == "verilog":
         # One netlist, however many files it is split across.
@@ -260,7 +280,7 @@ def resolve_inputs(args):
 
     logger.warning("%s input carries no power data: the leakage and dynamic heat maps "
                    "will be empty", args.cmd)
-    return cells, blocks, compare
+    return cells, blocks, compare, pins
 
 
 def _run_metal(args):
@@ -295,15 +315,24 @@ def _run_metal(args):
         import cProfile
         profiler = cProfile.Profile()
         profiler.enable()
-    logger.info("metal: reading %d DEF file(s)", len(args.def_files))
+    if not args.def_files and not args.db_files:
+        print("error: metal mode needs --def, --db, or both", file=sys.stderr)
+        return 1
+    if args.dump_only and not args.dump_db:
+        print("error: --dump_only needs --dump-db DIR to write into", file=sys.stderr)
+        return 1
+    def_files = list(args.def_files or ())
+    logger.info("metal: reading %d DEF file(s)%s", len(def_files),
+                f" and {len(args.db_files)} db(s)" if args.db_files else "")
     try:
-        data = build_metal(args.def_files, args.lef, args.tech_lef,
+        data = build_metal(def_files, args.lef, args.tech_lef,
                            grid_size=args.grid_size,
                            macro_block_layers=args.macro_block_layers,
                            min_segment=args.min_segment_length, top=args.top,
                            on_progress=lambda message: logger.info("metal: %s", message),
                            cancel=stop.is_set, jobs=args.jobs,
-                           min_layer=args.min_layer, max_layer=args.max_layer)
+                           min_layer=args.min_layer, max_layer=args.max_layer,
+                           db_paths=args.db_files, dump_db=args.dump_db)
     except Exception as exc:  # surface load errors on the CLI, no window needed
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -320,6 +349,13 @@ def _run_metal(args):
 
     for warning in data.warnings:
         logger.warning("metal: %s", warning)
+
+    if args.dump_only:
+        # Everything this run was asked for has happened; the window is the part it did not ask
+        # for. Returning here also keeps Qt out of a dump, which is what lets several of them run
+        # side by side on a machine with no display.
+        logger.info("metal: --dump_only: not opening a window")
+        return 0
 
     from PyQt5.QtWidgets import QApplication
 
@@ -345,7 +381,7 @@ def main(argv=None):
 
     physical = None
     try:
-        cell_info, blocks, compare_blocks = resolve_inputs(args)
+        cell_info, blocks, compare_blocks, pins = resolve_inputs(args)
         design1 = load_or_build(blocks, cell_info,
                                 cache_dir=args.cache_dir, force=args.force)
         design2 = None
@@ -355,7 +391,7 @@ def main(argv=None):
             from .physical import build_physical
             physical = build_physical(blocks, cell_info,
                                       grid_size=args.grid_size,
-                                      contour_gap=args.contour_gap)
+                                      contour_gap=args.contour_gap, pins=pins)
         elif compare_blocks:
             design2 = load_or_build(compare_blocks, cell_info,
                                     cache_dir=args.cache_dir, force=args.force)

@@ -163,6 +163,63 @@ END PLAIN
     assert macros["RAM"].size() == (10.0, 20.0)
 
 
+def test_lef_pin_centres_drop_power_and_ground(tmp_path):
+    """Pin centres for the pin-density map: one point per pin, rails excluded.
+
+    A rail pin is on every instance of a cell in a row, so counting it would measure the
+    row rather than the design. ``USE`` is the authority; the name is the fallback, because
+    a library that writes ``USE SIGNAL`` on a VSS pin is not rare.
+    """
+    from vlsi_viewer.parsers.LEF import LefParser
+
+    lef = _write(tmp_path, "pins.lef", """\
+MACRO C1
+  SIZE 4 BY 8 ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT 0 0 1 1 ;
+        RECT 1 3 3 5 ;
+    END
+  END A
+  PIN NC
+    DIRECTION INPUT ;
+  END NC
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER metal1 ;
+        RECT 0 0 4 0.5 ;
+    END
+  END VDD
+  PIN VSS_1
+    DIRECTION INOUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT 0 7.5 4 8 ;
+    END
+  END VSS_1
+END C1
+""")
+    cells, pins = cell_info_from_lef([lef], with_pins=True)
+    assert set(cells) == {"C1"}
+    # A's two rects union to (0,0)-(3,5), so its centre is (1.5, 2.5) - one point for the
+    # pin, not one per rectangle. NC declares nothing and the two rails are dropped.
+    assert pins == {"C1": [(1.5, 2.5)]}
+    # ``shape`` still means the last RECT the pin declared, which other readers rely on.
+    assert LefParser([lef]).getMacros()["C1"].pin("A").shape == [(1.0, 3.0), (3.0, 5.0)]
+
+
+def test_pin_and_obstruction_tables_are_asked_for_one_at_a_time(tmp_path):
+    lef = _write(tmp_path, "one.lef", "MACRO C1\n  SIZE 1 BY 1 ;\nEND C1\n")
+    with pytest.raises(ValueError):
+        cell_info_from_lef([lef], with_obstructions=True, with_pins=True)
+
+
 def test_a_rect_before_any_layer_belongs_to_no_layer(tmp_path):
     """Nothing in the grammar allows it, and guessing a layer would be worse than dropping it."""
     from vlsi_viewer.parsers.LEF import LefParser

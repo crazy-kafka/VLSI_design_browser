@@ -12,6 +12,7 @@ import time
 import numpy as np
 
 from . import config, schema
+from .assembly import HierarchyAssembler, _ORIENT_MATRIX
 from .coordinateProcess import CoordinateProcess, Orient
 from .loader import load_block, load_cell_info
 
@@ -53,6 +54,18 @@ class PhysicalData:
         self.contour_gap = contour_gap
         self._contour_cache = {}               # (path, gap) -> (loops, area)
         self._contour_lock = threading.Lock()
+        # Pin density is the one grid that is not built from the box arrays: it needs every
+        # placement's frame and its cell's pin geometry, so ``build_physical`` hands the source
+        # here and the grid is made on first use. ``None`` for a source with no pins at all
+        # (the json path), which is what keeps the map out of the selector there.
+        self._pin_source = None
+        self._pins = None
+        self._pin_lock = threading.Lock()
+
+    @property
+    def has_pins(self) -> bool:
+        """Whether a pin-density grid can be built for this layout."""
+        return self._pin_source is not None
 
     @property
     def boxes(self):
@@ -65,8 +78,22 @@ class PhysicalData:
                  bool(self._is_macro[i])) for i in range(n)]
 
     def heat(self, kind: str) -> np.ndarray:
+        if kind == "pins" and self.has_pins:
+            return self._pin_grid()
         return {"density": self.density, "leakage": self.leakage,
                 "dynamic": self.dynamic, "ulvt": self.ulvt}[kind]
+
+    def _pin_grid(self) -> np.ndarray:
+        """Pin counts, one point per signal pin of every placed instance (built once)."""
+        with self._pin_lock:
+            if self._pins is None:
+                blocks, cells, pins = self._pin_source
+                t0 = time.perf_counter()
+                self._pins = _pin_density(blocks, self.top_name, cells, pins,
+                                          self.extent, self.rows, self.cols, self.grid_size)
+                logger.info("physical: pin density over %d cell(s), max %g pin(s) per grid cell "
+                            "(%.1fs)", len(cells), self._pins.max(), time.perf_counter() - t0)
+        return self._pins
 
     def _slice_for(self, path: str):
         """Slice of the sorted arrays covering ``path`` and its descendants."""
@@ -151,6 +178,124 @@ def _oriented_extent(orient: str, w: float, h: float):
     return (w, h) if (r // 90) % 2 == 0 else (h, w)
 
 
+_PIN_ORIENTS = tuple(_ORIENT_MATRIX)   # the eight DEF orientations, in table order
+
+
+def _pin_offsets(sizes_x, sizes_y):
+    """``(8, C)`` offsets that move a macro-local pin point onto the placed bounding box.
+
+    The columns are cell codes, so ``_pin_table``'s and this table are read with the same
+    index.
+
+    DEF puts the *lower-left corner of the placement bounding rectangle* at the instance's
+    location, after any rotation or flip (LEF/DEF reference, COMPONENTS). A pin's coordinates
+    are in the macro's own frame, whose lower-left is the origin, so a point has to be rotated
+    and then shifted by the lower-left of its own oriented bounding box: the offset here is
+    that corner, negated. It is zero for N/FW/FN and non-zero for the rest - for W it is the
+    macro's height - which is why a rotated cell's pins would otherwise land one macro extent
+    away from the box the view draws for it.
+    """
+    n = len(sizes_x)
+    offx = np.zeros((len(_PIN_ORIENTS), n), dtype=np.float64)
+    offy = np.zeros((len(_PIN_ORIENTS), n), dtype=np.float64)
+    for i, orient in enumerate(_PIN_ORIENTS):
+        (a, b), (c, d) = _ORIENT_MATRIX[orient]
+        xs = (np.zeros(n), a * sizes_x, b * sizes_y, a * sizes_x + b * sizes_y)
+        ys = (np.zeros(n), c * sizes_x, d * sizes_y, c * sizes_x + d * sizes_y)
+        offx[i] = -np.minimum.reduce(xs)
+        offy[i] = -np.minimum.reduce(ys)
+    return offx, offy
+
+
+def _pin_table(cells, pins):
+    """Flat pin-centre arrays, with slot 0 reserved for cells that have no pins.
+
+    Returns ``(counts, starts, xs, ys)`` indexed by cell code, where code 0 means "not in the
+    library" and codes 1..C are the rows of ``cells`` - so a cell declaring no pin at all (a
+    filler, or one whose every pin is a rail) is simply a count of zero.
+    """
+    counts = np.zeros(len(cells) + 1, dtype=np.intp)
+    xs, ys = [], []
+    for code, name in enumerate(cells.index, start=1):
+        points = pins.get(name)
+        if not points:
+            continue
+        counts[code] = len(points)
+        xs.extend(point[0] for point in points)
+        ys.extend(point[1] for point in points)
+    starts = np.concatenate(([0], np.cumsum(counts)))[:-1]
+    return (counts, starts,
+            np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64))
+
+
+def _pin_density(blocks, top, cells, pins, extent, rows, cols, grid_size,
+                 chunk_points=2_000_000):
+    """One count per signal pin of every placed instance, binned into a ``(rows, cols)`` grid.
+
+    Vectorised per block and orientation rather than per instance: the point count is
+    ``sum over instances of pins(cell)``, which is tens of millions on a chip-level DEF, and a
+    Python loop over that is the difference between seconds and minutes. The expansion is
+    chunked so the temporaries stay bounded whatever that count turns out to be.
+    """
+    # Leading zeros give the offsets the same cell codes the pin table uses, where 0 is
+    # "not in the library" and its count - and so these entries - is never read.
+    offx, offy = _pin_offsets(np.concatenate(([0.0], cells["size_x"].to_numpy(dtype=np.float64))),
+                              np.concatenate(([0.0], cells["size_y"].to_numpy(dtype=np.float64))))
+    counts, starts, px, py = _pin_table(cells, pins)
+    x0, y0 = extent[0], extent[1]
+    grid = np.zeros((rows, cols), dtype="float64")
+    total = 0
+
+    def on_block(name, frame):
+        nonlocal total, grid
+        instances = blocks[name][0]
+        if instances is None or instances.empty:
+            return
+        # +1, because 0 is the "not in the library" slot. A sub-block instance lands there
+        # too, and contributes nothing: its own pins are counted when its block is visited.
+        codes = cells.index.get_indexer(instances["cell_name"].to_numpy()) + 1
+        # An absent orientation reads as '' or NaN, and DEF's default is north - the same
+        # `or "N"` the box pass applies to each row.
+        orient = np.asarray(instances["orient"].fillna("").astype(str))
+        orient = np.where(orient == "", "N", orient)
+        loc_x = instances["location_x"].to_numpy(dtype=np.float64)
+        loc_y = instances["location_y"].to_numpy(dtype=np.float64)
+        for index, orient_name in enumerate(_PIN_ORIENTS):
+            picked = np.flatnonzero(orient == orient_name)
+            if not picked.size:
+                continue
+            cnt = counts[codes[picked]]
+            cells_picked = codes[picked]
+            # Instance origin in global coordinates: the block's frame applied to the
+            # placement point shifted by the cell's own pin offset.
+            org_x, org_y = frame.apply_points(loc_x[picked] + offx[index][cells_picked],
+                                              loc_y[picked] + offy[index][cells_picked])
+            # ...and the composite matrix, which maps a macro-local pin point.
+            (a, b), (c, d) = frame.compose(orient_name, (0.0, 0.0)).matrix
+            chunk = max(1, chunk_points // max(1, int(cnt.max())))
+            for lo in range(0, picked.size, chunk):
+                part = cnt[lo:lo + chunk]
+                n_pts = int(part.sum())
+                if not n_pts:
+                    continue
+                inst = np.repeat(np.arange(part.size, dtype=np.intp), part)
+                # where each pin sits inside its own cell's run of the pin table
+                within = (np.arange(n_pts, dtype=np.intp)
+                          - np.repeat(np.cumsum(part) - part, part))
+                point = np.repeat(starts[cells_picked[lo:lo + chunk]], part) + within
+                gx = a * px[point] + b * py[point] + org_x[lo:lo + chunk][inst]
+                gy = c * px[point] + d * py[point] + org_y[lo:lo + chunk][inst]
+                ix = ((gx - x0) // grid_size).astype(np.intp)
+                iy = ((gy - y0) // grid_size).astype(np.intp)
+                inside = (ix >= 0) & (ix < cols) & (iy >= 0) & (iy < rows)
+                grid += np.bincount(iy[inside] * cols + ix[inside],
+                                    minlength=rows * cols).reshape(rows, cols)
+                total += int(inside.sum())
+    HierarchyAssembler(blocks).walk(top, on_block)
+    logger.info("physical: pin density %d pin point(s) on a %d x %d grid", total, rows, cols)
+    return grid
+
+
 def _load_blocks_and_cells(block_paths, cell_path):
     blocks = {}
     for p in block_paths:
@@ -166,12 +311,17 @@ def _load_blocks_and_cells(block_paths, cell_path):
 
 
 def build_physical(block_paths, cell_path, grid_size: float = 3.0,
-                   contour_gap: float = None) -> PhysicalData:
+                   contour_gap: float = None, pins=None) -> PhysicalData:
     """Build heat-map grids for a single-top-block design.
 
     ``contour_gap`` is the proximity threshold (in physical units) for merging a
     hierarchy's instances into one contour loop; defaults to
     ``config.DEFAULT_CONTOUR_GAP_FACTOR * grid_size`` and must be >= 0.
+
+    ``pins`` is ``{cell_name: [(x, y), ...]}`` - each macro's signal-pin centres in its own
+    microns, as ``convert.cell_info_from_lef(with_pins=True)`` returns them. It enables the
+    pin-density map; without it (a source whose cells came from a ``cell_info.json``, which
+    cannot carry pins) that map is not offered at all.
 
     Raises ``ValueError`` if there is not exactly one top-level block, if the top
     block has no ``boundary``, if a boundary is not rectilinear, or if the grid
@@ -427,7 +577,12 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
 
     logger.info("physical: %d cell box(es), grid %d x %d, extent %s",
                 n, rows, cols, extent)
-    return PhysicalData(top, boundary_polys, grid_size,
+    data = PhysicalData(top, boundary_polys, grid_size,
                         extent, rows, cols, density, leakage, dynamic, ulvt,
                         geom, is_ulvt, is_macro, is_phys_only, leak, dyn,
                         leaf_paths, contour_gap)
+    if pins:
+        # Retained rather than consumed: the pin-density grid is built on first use, so a
+        # run that never opens that map pays neither the time nor the memory for it.
+        data._pin_source = (blocks, cells, pins)
+    return data

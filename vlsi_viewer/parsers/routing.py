@@ -279,6 +279,13 @@ L_SHAPES, L_VIAS, L_JOGS, L_DIAGONALS, L_DEGENERATE, L_UNUSABLE, L_SIGNAL, L_POW
 LAYER_COLUMNS = ("shapes", "vias", "jogs", "diagonals", "degenerate", "unusable",
                  "signal", "power")
 
+# The columns the caller scales by the placement count, and the rest are counted per placement here.
+# This is `PER_PLACEMENT_COUNTERS` in another shape, and it has to stay that way: a block placed
+# more than once is parsed once, so a column counted per *parse* would move the summary and leave
+# the table behind - which is exactly what a four-placement fixture showed: 135 jogs in the rows
+# against 540 in the totals.
+PER_PLACEMENT_COLUMNS = (L_VIAS, L_JOGS, L_DIAGONALS, L_DEGENERATE, L_UNUSABLE)
+
 
 class ShapeStream:
     """Turns parsed nets into micron-normalised shapes, in batches, retaining nothing.
@@ -631,8 +638,11 @@ class ShapeStream:
             # bounding box, which for a 10 um diagonal would over-count by about 25x.
             self.n_diagonal += 1
             row = self.by_layer[layer.index]
+            # The class is counted per parse - the caller scales it, like every other dropping
+            # counter - but the shape it becomes is counted per placement, as `flush` counts it
+            # into `n_emitted` and as `_emit` counts the rectangles.
             row[L_DIAGONALS] += 1
-            row[L_SIGNAL if scope == SIGNAL else L_POWER] += 1
+            row[L_SIGNAL if scope == SIGNAL else L_POWER] += len(self.frames) or 1
             self._diagonals.append((layer.index, scope, x0 / self.db_unit,
                                     y0 / self.db_unit, x1 / self.db_unit,
                                     y1 / self.db_unit,
