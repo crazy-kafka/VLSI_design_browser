@@ -183,11 +183,14 @@ def parse_args(argv=None):
     p.add_argument("--dump-db", "--dump_db", dest="dump_db", metavar="DIR",
                    help="write one intermediate db per DEF input into DIR, named from the DEF "
                         "(A.def.gz -> A.def.db), so a later run rebuilds the map without parsing "
-                        "the DEF again")
+                        "the DEF again. A db carries the block's own shapes as well as its grids "
+                        "(~11 bytes a shape compressed), so a block dumped in its own job can be "
+                        "placed by whatever design loads it")
     p.add_argument("--db", dest="db_files", nargs="+", metavar="DB",
                    help="intermediate db file(s) written by --dump-db. A block whose db still "
                         "matches this run - same DEF, same knobs, same LEFs, same placement - is "
-                        "not parsed at all; with --def, only the DEFs that changed are")
+                        "not parsed at all, and one dumped in a different design is rebuilt from "
+                        "the shapes it stored; with --def, only the DEFs that changed are")
     p.add_argument("--dump-only", "--dump_only", dest="dump_only", action="store_true",
                    help="write the dbs (with --dump-db) and exit without opening a window")
     _add_shared(p)

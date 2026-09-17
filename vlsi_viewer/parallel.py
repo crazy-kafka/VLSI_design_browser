@@ -59,6 +59,7 @@ from multiprocessing import shared_memory
 from typing import Dict, Iterator, List, NamedTuple, Optional, Sequence, Tuple
 
 from .metal import _GridSink, resident_mb
+from .metal_db import SectionWriter, batch_hook
 from .parsers import Cancelled
 from .parsers.routing import (LAYER_COLUMNS, PER_PLACEMENT_COLUMNS, SHAPE_COUNTERS,
                               ShapeStream, TechRouting, parse_def)
@@ -648,7 +649,7 @@ def _watch(cancel, flag: _Flag, done: threading.Event) -> None:
             return
 
 
-def parse_chunk(chunk: Chunk, cancel=None, puts=None):
+def parse_chunk(chunk: Chunk, cancel=None, puts=None, writer=None):
     """Parse one chunk into grids. Runs in a worker process, so it takes nothing on trust.
 
     A cancel is not an error here: the parser stops at a line boundary and everything it had
@@ -666,6 +667,11 @@ def parse_chunk(chunk: Chunk, cancel=None, puts=None):
     sink = _GridSink(chunk.extent, chunk.grid_size)
     stream = ShapeStream(chunk.tech, sink, frames=chunk.frames,
                          min_segment=chunk.min_segment)
+    if writer is not None:
+        # This worker's own part of the block's body, written as the batches are flushed and
+        # before any frame touches them: the block's geometry, which is what makes a db loadable
+        # into a design the run that wrote it never saw.
+        stream.on_batch = batch_hook(chunk.tech, writer)
     routing = None
     try:
         routing = parse_def(chunk.design, stream=stream, skip_components=True, lines=text,
@@ -673,6 +679,11 @@ def parse_chunk(chunk: Chunk, cancel=None, puts=None):
     except Cancelled:
         pass
     stream.flush()
+    if writer is not None and stream.db_unit:
+        # The unit the parser configured on the first net. It travels back with the note so the
+        # parent can record it in the db's header - only a run that read the DEF knows it, and a
+        # replay needs it to turn the stored integers back into microns.
+        writer.db_unit = stream.db_unit
     counters = {name: getattr(stream, attribute) for name, attribute in SHAPE_COUNTERS}
     if routing is None:
         # No rule table from a parse that stopped early, and its size is only ever an info line.
@@ -777,7 +788,7 @@ def _worker(task):
     raising: the caller folds those partial grids like any others.
     """
     (path, design, tech, frames, min_segment, extent, grid_size, index, stride,
-     chunk_statements, flag, ranges, header) = task
+     chunk_statements, flag, ranges, header, geometry_prefix) = task
     # A `_Flag` is callable, and the parsers only ever ask `cancel()`, so everything below this
     # line is the same whether the stop signal came from another process or from this one.
     cancel = flag
@@ -799,10 +810,15 @@ def _worker(task):
     stopped = 0
     layers = new_layer_stats()
     chunks = _chunks(reader, chunk_statements, tech, frames, min_segment, extent, grid_size)
+    writer = None
+    if geometry_prefix is not None:
+        # This worker's own part of the block's body. Parts rather than per-layer records: every
+        # accumulator downstream is a sum, so concatenating them is all a merge has to be.
+        writer = SectionWriter(f"{geometry_prefix}{index}")
     try:
         for chunk in chunks:
             (counters, chunk_stats, chunk_grids, chunk_ndrs, chunk_stopped,
-             chunk_layers) = parse_chunk(chunk, cancel=cancel, puts=puts)
+             chunk_layers) = parse_chunk(chunk, cancel=cancel, puts=puts, writer=writer)
             merge_layer_stats(layers, chunk_layers)
             for name, value in counters.items():
                 totals[name] += value
@@ -818,6 +834,11 @@ def _worker(task):
         # The reader's per-line check fires *between* chunks, with earlier ones already banked,
         # so the stop is caught here rather than being allowed to take that work with it.
         stopped = 1
+    finally:
+        # Closed even on the stop path, so the parent has one complete part per worker rather
+        # than a file whose footer never arrived; a stopped run's parts are deleted, not read.
+        if writer is not None:
+            writer.close()
     # Every worker reads the whole file, so any of them could report its length; only one does,
     # and the caller sums it across blocks rather than across workers. With ranges no worker has
     # read the whole file, so the length is the scan's and no worker reports one.
@@ -844,6 +865,10 @@ def _worker(task):
         "read_bytes": (sum(end - start for start, end, _seed in ranges) if ranges
                        else input_size(path)),
         "layers": layers,
+        # The DEF's database unit, which only a worker that read a net knows. It travels back so
+        # the parent can put it in the db's header - the stored shapes are integers, and this is
+        # what turns them back into microns when the db is replayed.
+        "db_unit": writer.db_unit if writer is not None else None,
         # Handed back so the parent can compare the statements actually read against the ones its
         # own scan found - a divergence between the two would otherwise be a silently smaller
         # measurement rather than a failed run.
@@ -853,7 +878,8 @@ def _worker(task):
 def parse_parallel(path: str, design: str, tech: TechRouting, frames, min_segment, extent,
                    grid_size: float, sink: _GridSink, jobs: int,
                    chunk_statements: Optional[int] = None, text_stats: Dict = None,
-                   cancel=None, pool=None, work_dir: Optional[str] = None) -> Tuple[Dict, Dict, dict]:
+                   cancel=None, pool=None, work_dir: Optional[str] = None,
+                   geometry_prefix: Optional[str] = None) -> Tuple[Dict, Dict, dict]:
     """Stream one DEF's wiring into ``sink`` across ``jobs`` processes.
 
     Returns the counters, the input characterisation and a header parse, the same things the
@@ -904,8 +930,9 @@ def parse_parallel(path: str, design: str, tech: TechRouting, frames, min_segmen
             read_path, temporary = path, None
 
     def task_for(index: int, share) -> Tuple:
+        # Positional, and appended to: the unpack in `_worker` has to move with it.
         return (read_path, design, tech, tuple(frames), min_segment, extent, grid_size, index,
-                jobs, chunk_statements, flag, share, units)
+                jobs, chunk_statements, flag, share, units, geometry_prefix)
 
     if units is None:
         tasks = [task_for(index, None) for index in range(jobs)]
@@ -918,7 +945,10 @@ def parse_parallel(path: str, design: str, tech: TechRouting, frames, min_segmen
         "forms": 0, "points": 0, "lines": 0, "statement_lines_max": 0,
         "statement_chars_max": 0, "points_max": 0, "layers_used": set()}
     note = {"ndrs": 0, "stopped": 0, "interrupted": False, "found": {}, "read_bytes": 0,
-            "worker_seconds": [], "worker_rss_mb": [], "layers": new_layer_stats()}
+            "worker_seconds": [], "worker_rss_mb": [], "layers": new_layer_stats(),
+            # Every worker reads the same UNITS statement, so any of them can report the unit;
+            # the first that read a net does, and a worker with nothing to read leaves it None.
+            "db_unit": None}
 
     def drain(pool) -> None:
         for counters, worker_stats, grids, worker_note in pool.map(_worker, tasks):
@@ -935,6 +965,8 @@ def parse_parallel(path: str, design: str, tech: TechRouting, frames, min_segmen
             note["worker_seconds"].append(worker_note["seconds"])
             note["worker_rss_mb"].append(worker_note["rss_mb"])
             note["read_bytes"] += worker_note["read_bytes"]
+            if note["db_unit"] is None:
+                note["db_unit"] = worker_note["db_unit"]
             merge_layer_stats(note["layers"], worker_note["layers"])
             for section, count in worker_note["found"].items():
                 note["found"][section] = note["found"].get(section, 0) + count

@@ -165,7 +165,16 @@ DEF (size and mtime), same measured layers, same grid size, `--min-segment-lengt
 a db holds nothing the LEFs could disagree with: the layer table, the capacity grid and the macro
 blockage are rebuilt from the live LEFs on every run, so a db can only be *refused* for pointing at
 different ones. A db is written only by a build that finished, so an interrupted run cannot leave a
-half-measured map behind that loads fast. In physical mode, hover the layout view to read
+half-measured map behind that loads fast.
+
+A db also carries the block's **own shapes**, before the hierarchy placed it, so it does not depend
+on the run that wrote it: a sub-block dumped on its own — with no parent DEF anywhere — is placed
+correctly by whatever design loads it, and so is a design re-placed after its dbs were written.
+When the stored grids do not fit the run (a different placement, a different die or grid size, or a
+different macro LEF), the run says so and rasterises the stored shapes itself instead of parsing
+again — ~0.5 µs a shape against ~19 µs — which is the one case a rebuild is not instant in. That
+costs file size: about **11 bytes per shape** compressed, so a 44 M-shape block is a ~0.5 GB db. In
+physical mode, hover the layout view to read
 the cursor coordinates and the heat-map grid value in the bottom-right status bar; in metal
 mode the same hover fills the panel's cell readout.
 
@@ -418,6 +427,13 @@ pre-merged (exact) so the geometry scales to large (10M-instance) subsystems.
         --lef lefs/* --tech-lef tech.lef --dump-db dbs/ --dump-only
     python main.py metal --db dbs/*.db --lef lefs/* --tech-lef tech.lef
 
+    # or dump each block in its own job, with a pool, and no parent to wait for
+    python main.py metal --def ioE.def --lef lefs/* --tech-lef tech.lef \
+        --dump-db dbs/ --dump-only --jobs 8
+    python main.py metal --def fsu.def --lef lefs/* --tech-lef tech.lef \
+        --dump-db dbs/ --dump-only --jobs 8
+    python main.py metal --db dbs/*.db --lef lefs/* --tech-lef tech.lef
+
 Placement tells you where the cells are; this tells you where the **metal** is. It reads a
 routed DEF and the tech LEF that defines its routing layers, and renders a per-layer heat map
 of routing utilisation.
@@ -516,7 +532,7 @@ are research-licensed, so remove them before publishing this repository.
 | `vlsi_viewer/parsers/` | vendored LEF / DEF / Verilog parsers (`DEF/`, `LEF/`, `verilog/`) |
 | `vlsi_viewer/parsers/convert.py` | EDA files → the viewer's `cell_info` / `instance_info` JSON |
 | `vlsi_viewer/physical.py` | physical mode: heat-map grids + per-hierarchy contour/density |
-| `vlsi_viewer/metal_db.py` | metal mode's intermediate db: format, save/load, and the mismatch that refuses one |
+| `vlsi_viewer/metal_db.py` | metal mode's intermediate db: the container, save/load, the shapes a replay reads back, and the mismatch that refuses one |
 | `vlsi_viewer/contour.py` | rectilinear union geometry (shapely) + box pre-merge |
 | `vlsi_viewer/heatmap.py` | thermal colormap, grid array → QImage |
 | `vlsi_viewer/ui_layout.py` | layout view widget (heat map, controls, legend, contour overlay) |

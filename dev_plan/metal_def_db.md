@@ -76,6 +76,27 @@ defines it`).
    them), `--dump_only` returning 0 at the existing "before Qt" seam.
 4. **Docs** — README's flag table and the metal paragraph that says it "caches nothing"; this file.
 
+## The 09-17 runs, and the check they added
+
+Two db-only runs of `lx956c_core_clamp_wrap` (`dev_plan/issue/real_design_log_0917.md`), each
+block's db dumped by a separate standalone run, found the one validity check that was missing:
+
+- `lx956c_ioe` was refused on the frame (`N at (0, 0)` recorded, the design places it at
+  `(0, 661.2)`) — the design working, and a demonstration of why a sub-block's db is only correct
+  in the frame of the run that wrote it.
+- `lx956c_fsu` sits at `(0, 0)` in the design — *the same frame a standalone dump records* — so the
+  frame check could not tell the two apart, its `72 x 124` grids were added to the design's
+  `189 x 253`, and `Bins.add_grid` raised `grid is (72, 124), this grid's is (189, 253)`.
+
+`mismatch()` now takes the run's `(rows, cols, extent)` and compares it after the LEF identities and
+before the frames; the extent as well as the cell count, because the same count over a shifted die
+puts every grid in the wrong place. `_sink_from_db` also checks an array's shape against its own
+header and names the block, so a truncated file is attributable rather than surfacing as the
+rasteriser's bare shape error. Run 1's behaviour — warn, draw the rest — is unchanged, and the
+message now says what to do instead: re-dump that block with its design's db. (Phase 3 below
+replaced that remedy for a db that carries shapes: the run replays them instead, and the message
+says so rather than sending the user off to re-dump a block it is about to draw.)
+
 ## Verification
 
 Equivalence is the centrepiece: build the sample with `--dump-db`, rebuild from `--db` alone, and
@@ -124,3 +145,97 @@ The tests found one real gap: a *remembered candidate* whose db is missing is in
 sub-block's wiring with only the generic "neither in the LEF nor a block" warning to show for it.
 That warning now names those components as possible sub-blocks and says their wiring needs their own
 DEF or db.
+
+## Phase 3: the block's own shapes, so every block dumps alone
+
+Phases 1–2 left the half of the 09-17 problem that mattered most in practice: a db held *rasterised
+grids*, so it was bound to the frame **and** the grid of the run that wrote it, and two blocks
+dumped in their own jobs could not be assembled. `--db <parent>.db --def <SUB>.def` worked but
+serialised the dumps behind the parent's db, which is exactly the parallelism the feature exists to
+get. So a db now also carries the block's **own** shapes, and the loading run rasterises them under
+its own frames.
+
+The measurements that decided it are in `dev_plan/metal_def_db_eval.md`: **0.51 µs per shape** to
+replay (read + inflate + rasterise, measured on the path it would take) against 19.12 µs to parse,
+and **10.9–11.0 bytes per rect** compressed, stable to 1 % across scales — 0.49 GB for the top
+block's 44.4 M rects, ~1.7 min to replay against 14.2 min to parse.
+
+The seam is `ShapeStream`, which already accumulated every shape in the block's own coordinates and
+applied the frames only in `flush()`:
+
+- **`on_batch(kind, layer_index, scope, packed)`** fires in `flush()` before the frame loop, with the
+  pending group as int32 database units — the unit `configure()` was handed on the first net, so the
+  round trip is exact (`round(x * db_unit)` out, `n / db_unit` back in).
+- **`add_batch(...)`** is the inverse: unpack to microns, append to `_pending`, and the next `flush`
+  places them under *this* stream's frames. Nothing is re-classified — a stored shape already passed
+  the layer range, the jog filter and the scope — and `_as_1d` keeps the parse's hot path at one
+  `asarray` over the list it already has.
+- **Polygons** are not buffered at all, so `_add_polygon`'s per-frame loop became `_emit_polygon`:
+  one place where a ring meets a frame, called by the parse and by the replay both.
+
+**The container is a record stream with a footer** (`body records | header JSON | uint64 len |
+b"VLSIDB2\n"`), because the writer cannot know up front how many batches a parse will produce. The
+footer's index lets the grids path seek without reading past half a gigabyte of shapes, and
+`BlockDb.geometry()` yields one record at a time so a 0.49 GB section never becomes 0.49 GB of
+memory. A file that does not end with the magic is read as a **v1 npz**, so a db written by the
+build before this one keeps working — and the refusals that only make sense for a db with no shapes
+to replay are still tested against one.
+
+**Workers write their own parts.** Every worker opens a `SectionWriter` on `<db>.part<index>`, passes
+the object (never crossing a process boundary) to `parse_chunk`, and closes it; the parent merges by
+**concatenating** the part files, which is complete precisely because every accumulator downstream is
+a sum. Parts are truncating, removed by the parent on both the success and the cancelled path.
+
+**Reuse tries three things in order: grids → replay → refuse.** The geometry flavour's validity is
+deliberately *looser*: the DEF it came from, `min_segment`, the measured layer set and the tech LEF
+— everything that decided which shapes were stored — but not the macro LEFs, the grid size or the
+die, because those act on the live rasterisation. A replay contributes grids only; the counters,
+layer stats and text stats come from the header, so a replayed map's numbers are exactly a parse's.
+
+Two things the tests forced out that the plan had not:
+
+- **`emitted` and three row columns are counted per placement, not per parse.** A sub-block dumped
+  alone was placed once and is replayed into four, so `_rescaled` moves those numbers by the ratio
+  and leaves the rest to `fold_block`'s placement scaling. Without it the summary said 19,826 shapes
+  where the table said 79,277 — a disagreement that would have looked like a db defect.
+- **The pre-filter was silently defeating the fallback.** The first pass drops a db that fails the
+  strict check before any block exists, and the geometry path is only ever consulted *inside*
+  `parse_block` — so a changed macro LEF, a changed `--grid-size` or a changed `--min-segment-length`
+  refused every db outright and re-parsed, with the replay unreachable. It now computes two verdicts:
+  a db that cannot answer for the grids but *can* supply shapes stays a candidate for its block, and
+  `parse_block` makes the same two-stage decision again with the frames in hand. A db that fails both
+  is the only one that is dropped, and it says why at INFO.
+
+Verification, `tests/test_metal_db.py` (23 cases) and `tests/test_metal_gui.py`:
+
+- **the hierarchical case end to end** — `sub.def` alone dumped with a pool, `top.def` alone dumped
+  with a pool, neither naming a parent, then one run over the two dbs with **no DEF at all**:
+  `reused == ["TOP"]`, `replayed == ["SUB"]`, counters/layer stats/text stats equal and the grids
+  close (a pooled dump sums in another order). `(rects + diagonals + polygons) x placements ==
+  emitted` is checked against the file, so nothing may be dropped between the counters and the body.
+- **a bare sub dump assembled elsewhere** — the 09-17 workflow, now exact: every grid
+  `array_equal` to the one-shot parse, through four placements at four orientations.
+- **a standalone dump whose grids do not fit** — the run-2 die mismatch: grids refused, shapes
+  replayed, no warning, and the refusal named in the log.
+- **the old container**, one arm each: a v1 db that matches rebuilds exactly, and a v1 db from a bare
+  dump is still refused by name rather than drawn at (0, 0).
+- the replay refused when `min_segment` differs; the replay accepted when only the *macro* LEFs
+  change; the container round-tripping rects, diagonals and a variable-length ring across two parts;
+  a truncated db reported and re-parsed while the other db still loads.
+
+Measured after the change, with `bench_db_geometry.py` now driving the shipped path (`SectionWriter`
+→ `write` → `load` → `geometry` → `add_batch`) rather than a private layout: **0.50 µs per shape**
+(1,402,400 shapes in 0.70 s) and **16.0 B/rect raw, 11.0 B zlib 6** — unchanged from the
+pre-implementation estimate, which is the point of having measured it first. **636 tests pass.**
+
+The hand-run the plan asked for, on the committed sample:
+
+    python -m vlsi_viewer metal --def sample_data/metal/sub.def --lef ... --dump-db dbs \
+        --dump-only --jobs 8
+    python -m vlsi_viewer metal --def sample_data/metal/top.def --lef ... --dump-db dbs \
+        --dump-only --jobs 8
+    python -m vlsi_viewer metal --db dbs/sub.def.db dbs/top.def.db --lef ... --dump-only
+
+The third run reads no DEF at all and logs `SUB: its db's grids do not match this run (...); replaying
+its stored shapes`, then `19,817 shape(s) replayed in 8 batch(es)` (two workers' parts, merged), with
+`"reused": ["TOP"], "replayed": ["SUB"]` in the summary and no warnings.

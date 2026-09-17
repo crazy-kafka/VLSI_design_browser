@@ -287,6 +287,19 @@ LAYER_COLUMNS = ("shapes", "vias", "jogs", "diagonals", "degenerate", "unusable"
 PER_PLACEMENT_COLUMNS = (L_VIAS, L_JOGS, L_DIAGONALS, L_DEGENERATE, L_UNUSABLE)
 
 
+def _as_1d(parts) -> np.ndarray:
+    """One coordinate column from a pending bucket.
+
+    A parse appends scalars, one per shape, so that bucket is a list of floats. A replayed db
+    appends a whole batch at a time, so it is a list of arrays. The first branch is what keeps
+    the parse's hot path exactly as it was - one `asarray` over the list it already has - and the
+    replay's from being a Python loop over tens of millions of scalars.
+    """
+    if isinstance(parts[0], np.ndarray):
+        return parts[0].reshape(-1) if len(parts) == 1 else np.concatenate(parts)
+    return np.asarray(parts, dtype=np.float64)
+
+
 class ShapeStream:
     """Turns parsed nets into micron-normalised shapes, in batches, retaining nothing.
 
@@ -335,6 +348,11 @@ class ShapeStream:
         # each layer's own pitch" - below one track pitch a jog covers under 0.04 um^2 of a
         # 10 um cell. Pass 0 to keep every jog.
         self.min_segment = min_segment
+        # Optional: `on_batch(kind, layer_index, scope, packed)` is called with each batch as the
+        # block's *own* geometry, before any frame is applied - which is what an intermediate db
+        # stores, and why a db can be written by a run that never knew where the block sits. See
+        # `add_batch` for the other direction. None costs one comparison per flush.
+        self.on_batch = None
         self._pending: Dict[Tuple[int, int], List[list]] = {}
         self._diagonals: list = []
         self._count = 0
@@ -460,10 +478,16 @@ class ShapeStream:
         """
         frames = self.frames or (None,)
         for (layer_index, scope), coords in self._pending.items():
-            x0 = np.asarray(coords[0], dtype=np.float64)
-            y0 = np.asarray(coords[1], dtype=np.float64)
-            x1 = np.asarray(coords[2], dtype=np.float64)
-            y1 = np.asarray(coords[3], dtype=np.float64)
+            x0 = _as_1d(coords[0])
+            y0 = _as_1d(coords[1])
+            x1 = _as_1d(coords[2])
+            y1 = _as_1d(coords[3])
+            if self.on_batch is not None:
+                # The block's own geometry, in the DEF's own integers: `configure` has the unit
+                # before the first net is read, so this is always the same number the parser used.
+                self.on_batch("rects", layer_index, scope,
+                              np.stack([np.round(axis * self.db_unit)
+                                        for axis in (x0, y0, x1, y1)], axis=1).astype(np.int32))
             for frame in frames:
                 if frame is None:
                     self.sink.add_rects(layer_index, scope, x0, y0, x1, y1)
@@ -474,6 +498,8 @@ class ShapeStream:
         self._count = 0
 
         diagonals = self._diagonals
+        if diagonals and self.on_batch is not None:
+            self._stored_diagonals(diagonals)
         for layer_index, scope, x0, y0, x1, y1, half in diagonals:
             for frame in frames:
                 if frame is None:
@@ -486,6 +512,49 @@ class ShapeStream:
         # diagonals at all.
         self.n_emitted += len(diagonals) * len(frames)
         self._diagonals = []
+
+    def _stored_diagonals(self, diagonals) -> None:
+        """Hand the pending diagonals to `on_batch`, one call per layer and scope.
+
+        They are buffered as a flat list of per-shape tuples, so the grouping is what turns them
+        into the batches a dump stores. Few in practice - zero on a design that routes
+        orthogonally, and a few hundred thousand on one that does not.
+        """
+        grouped: Dict[Tuple[int, int], list] = {}
+        for layer_index, scope, x0, y0, x1, y1, half in diagonals:
+            grouped.setdefault((layer_index, scope), []).append((x0, y0, x1, y1, half))
+        for (layer_index, scope), rows in grouped.items():
+            self.on_batch("diagonals", layer_index, scope,
+                          np.round(np.asarray(rows, dtype=np.float64)
+                                   * self.db_unit).astype(np.int32))
+
+    def add_batch(self, kind: AnyStr, layer_index: int, scope: int, packed) -> None:
+        """Queue a stored batch as if it had just been read, for `flush` to place.
+
+        The inverse of `on_batch`, and the reason a db can be frame-free: what comes back is the
+        block's own geometry, so the frames *this* stream holds decide where it lands - the
+        design it is being loaded into, not the one it was dumped from. Nothing is re-classified:
+        what a dump stored had already passed the layer range, the jog filter and the scope.
+        """
+        self.require_configured()
+        values = np.asarray(packed, dtype=np.float64) / self.db_unit
+        if kind == "rects":
+            bucket = self._pending.get((layer_index, scope))
+            if bucket is None:
+                bucket = self._pending[(layer_index, scope)] = [[], [], [], []]
+            for column in range(4):
+                bucket[column].append(values[:, column])
+            return
+        if kind == "diagonals":
+            for x0, y0, x1, y1, half in values:
+                self._diagonals.append((layer_index, scope, x0, y0, x1, y1, half))
+            return
+        if kind == "polygons":
+            # Rings are placed straight away, as the parser does: they are not buffered, so
+            # there is nothing for `flush` to hand over later.
+            self._emit_polygon(self.tech.layers[layer_index], scope, values)
+            return
+        raise ValueError(f"unknown batch kind {kind!r}")
 
     # -- nets ------------------------------------------------------------------------
 
@@ -677,6 +746,24 @@ class ShapeStream:
             return
         self._emit(layer, scope, lo_x - grow, lo_y - grow, hi_x + grow, hi_y + grow)
 
+    def _emit_polygon(self, layer: RouteLayer, scope: int, exterior) -> None:
+        """Place one ring under every frame and hand it to the sink.
+
+        One definition, used by the parse and by a replayed db: a ring meets its frames in one
+        place, so the two directions cannot come to place it differently.
+        """
+        frames = self.frames or (None,)
+        for frame in frames:
+            if frame is None:
+                self.sink.add_polygon(layer.index, scope, exterior)
+            else:
+                # The point map on every vertex, not a corner normalisation: a ring is a
+                # sequence of vertices, and min/max would make a bounding box of any ring that
+                # is not an axis-aligned rectangle.
+                self.sink.add_polygon(
+                    layer.index, scope,
+                    np.stack(frame.apply_points(exterior[:, 0], exterior[:, 1]), axis=1))
+
     def _add_polygon(self, polygon, scope: int) -> None:
         """A ``+ POLYGON`` ring, expanded by half the layer's spacing rule.
 
@@ -705,23 +792,19 @@ class ShapeStream:
         if grow > 0:
             shape = shape.buffer(grow, join_style=2)
         exterior = np.asarray(shape.exterior.coords, dtype=np.float64)
-        frames = self.frames or (None,)
-        for frame in frames:
-            if frame is None:
-                self.sink.add_polygon(layer.index, scope, exterior)
-            else:
-                # The point map on every vertex, not a corner normalisation: a ring is a
-                # sequence of vertices, and min/max would make a bounding box of any ring that
-                # is not an axis-aligned rectangle.
-                self.sink.add_polygon(
-                    layer.index, scope,
-                    np.stack(frame.apply_points(exterior[:, 0], exterior[:, 1]), axis=1))
+        if self.on_batch is not None:
+            # One ring per call, in the block's own coordinates, before any frame. A ring is
+            # variable-length, so it travels as its own batch rather than as a column of one.
+            self.on_batch("polygons", layer.index, scope,
+                          np.round(exterior * self.db_unit).astype(np.int32))
+        self._emit_polygon(layer, scope, exterior)
         # Counted where the screen counts it: the ring arrives once per placement, while its
         # edges went to `n_polygon_edge` above.
-        self.n_emitted += len(frames)
+        placements = len(self.frames) or 1
+        self.n_emitted += placements
         row = self.by_layer[layer.index]
-        row[L_SHAPES] += len(frames)
-        row[L_SIGNAL if scope == SIGNAL else L_POWER] += len(frames)
+        row[L_SHAPES] += placements
+        row[L_SIGNAL if scope == SIGNAL else L_POWER] += placements
 
 
 class DefRouting:

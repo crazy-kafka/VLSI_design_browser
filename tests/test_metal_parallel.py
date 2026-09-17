@@ -568,9 +568,10 @@ END DESIGN
     with contextlib.redirect_stdout(io.StringIO()):
         tech = TechRouting.read([str(tech_path)])
     # (path, design, tech, frames, min_segment, extent, grid_size, index, stride,
-    #  chunk_statements, flag, ranges, header) - the last two are `None` without byte ranges.
+    #  chunk_statements, flag, ranges, header, geometry_prefix) - the last three are `None`
+    # without byte ranges and without a dump to write geometry into.
     flag = _Flag.create()
-    task = (str(path), "one", tech, None, None, EXTENT, 10.0, 3, 4, 1, flag, None, None)
+    task = (str(path), "one", tech, None, None, EXTENT, 10.0, 3, 4, 1, flag, None, None, None)
     root = logging.getLogger()
     handlers = root.handlers[:]          # `_worker` installs its own, as it must in a child
     try:

@@ -1,19 +1,28 @@
-"""The metal mode's intermediate db: dump, reuse, and every way a db is refused.
+"""The metal mode's intermediate db: dump, reuse, replay, and every way a db is refused.
 
 The centrepiece is equivalence: a map rebuilt from dbs must be the *same map*, not a similar one -
 so the grids are compared with `array_equal` and the counters exactly. Everything else here is a
 refusal that has to happen for the right reason, because a db that is used when it should not be is
 a wrong map that loads fast, which is the one outcome worth refusing.
+
+A db carries two flavours of itself. The *grids* are the block rasterised on the run's own frame
+and grid, and they are bound to both, so they are only usable by a run that matches on every input
+that shaped them. The *shapes* are the block's own geometry, stored as the parser read it and
+before any frame touched it, so a run with different frames, a different die or a different grid
+can rasterise them itself. A db written before the second flavour exists - the v1 npz below - has
+only the first, and its refusals are the ones the geometry section replaced.
 """
 import contextlib
 import io
+import json
 import os
 import shutil
+from typing import Dict
 
 import numpy as np
 import pytest
 
-from vlsi_viewer import metal_db
+from vlsi_viewer import metal_db, parallel
 from vlsi_viewer.cli import main
 from vlsi_viewer.metal import build_metal
 
@@ -29,6 +38,59 @@ def _build(def_paths, db_paths=None, dump_db=None, **kwargs):
     with contextlib.redirect_stdout(io.StringIO()):
         return build_metal(list(def_paths), [CELLS], [TECH], grid_size=10.0,
                            db_paths=db_paths, dump_db=dump_db, **kwargs)
+
+
+def _force_pool(monkeypatch):
+    """Let the pool run on a fixture this small.
+
+    `--jobs` is a cap rather than an instruction, and a 2 MB sample is one worker's worth - so
+    without this a pooled dump would silently be a sequential one, and the test would compare the
+    sequential path with itself.
+    """
+    monkeypatch.setattr(parallel, "BYTES_PER_WORKER", 0)
+
+
+def _same_map(one, other, exact=True):
+    """Every number a db is supposed to reproduce: the counters, the layer rows, the text stats
+    and the grids.
+
+    ``exact`` is the stronger claim a replay of the same shapes in the same order makes - the same
+    arithmetic on the same values - and it holds on this sample. A *pooled* dump is the case that
+    only promises closeness: its workers read statements in a different order, so the sums over a
+    grid cell land in a different order too.
+    """
+    assert one.totals == other.totals
+    assert one.layer_stats == other.layer_stats
+    assert one.stats == other.stats
+    assert set(one._grids) == set(other._grids)
+    for key, grid in other._grids.items():
+        got, want = np.asarray(one._grids[key]), np.asarray(grid)
+        if exact:
+            assert np.array_equal(got, want), key
+        else:
+            assert np.allclose(got, want, rtol=1e-6, atol=1e-6), key
+
+
+def _as_v1(path, **edits):
+    """Rewrite a dumped db in the container dumps used before the record stream: an npz.
+
+    The old writer stored the header and one compressed array per grid, which is the whole reason
+    the geometry section exists - there was nowhere in the file to put a shape. So this is both
+    the compatibility fixture and the fixture for every refusal that now only applies to a db with
+    no shapes to replay. ``edits`` changes header fields, for the tests that want a db this build
+    must refuse.
+    """
+    db = metal_db.load(str(path))
+    header = {key: value for key, value in db.header.items()
+              if key not in ("index", "geometry")}
+    header.update(edits)
+    payload = {"header": np.array(json.dumps(header))}
+    for (layer, scope), grid in db.grids.items():
+        payload[f"grid__{layer}__{scope}"] = np.asarray(grid, dtype=np.float32)
+    if db.components is not None:
+        payload["components"] = np.asarray(db.components)
+    with open(str(path), "wb") as handle:
+        np.savez_compressed(handle, **payload)
 
 
 def _db_paths(directory):
@@ -197,15 +259,95 @@ def test_the_sub_block_dump_workflow(tmp_path):
     assert again.rows == whole.rows and again.cols == whole.cols
 
 
-def test_a_bare_sub_dump_is_refused_rather_than_drawn_in_the_wrong_place(tmp_path):
-    """A sub-block dumped with no parent records the placement it saw - its own origin - and the
-    run that has the parent refuses it by name, instead of stacking its wiring at (0, 0)."""
+def test_a_bare_sub_dump_is_placed_by_the_design_that_loads_it(tmp_path):
+    """The 09-17 workflow: a sub-block dumped with no parent at all, then assembled by a design.
+
+    Its db records the placement the dumping run saw - its own origin - so its *grids* are
+    unusable here. Its shapes are not: they were stored in the sub-block's own coordinates, and
+    the run that knows where the sub-block goes rasterises them under its own frames. Before the
+    geometry section this was a refusal by name, because the alternative was drawing the
+    sub-block's wiring at (0, 0).
+    """
     dbs = tmp_path / "dbs"
+    whole = _build([TOP, SUB])
     _build([SUB], dump_db=str(dbs))                       # no parent: SUB is its own root
-    with contextlib.redirect_stdout(io.StringIO()):
-        again = build_metal([TOP], [CELLS], [TECH], grid_size=10.0, db_paths=_db_paths(dbs))
-    assert again.reused == []
-    assert any("SUB" in warning and "not counted" in warning for warning in again.warnings)
+    again = _build([TOP], db_paths=_db_paths(dbs))
+    assert again.reused == [] and again.replayed == ["SUB"]
+    assert again.warnings == []
+    _same_map(again, whole)
+    assert again.cell_detail(3, 3, whole.kinds()[0][0]) == whole.cell_detail(3, 3, whole.kinds()[0][0])
+
+
+def test_the_hierarchy_dumps_and_assembles_across_processes(tmp_path, monkeypatch):
+    """The hierarchical case, end to end: two blocks, two independent dump jobs, each with a pool
+    and neither naming a parent - then one run over the two dbs with no DEFs at all.
+
+    This is what the geometry section is for. The sub-block's dump is pooled, so its body is
+    written by workers as they flush their own batches and merged by the parent; it is standalone,
+    so its placement is its own origin; and the design that loads it places it four times at four
+    different orientations. Its grids cannot serve that, so the replay has to - and the map has to
+    come out the same one the one-shot parse makes.
+    """
+    _force_pool(monkeypatch)
+    dbs = tmp_path / "dbs"
+    whole = _build([TOP, SUB])
+    _build([SUB], dump_db=str(dbs), jobs=2)              # the sub-block alone, pooled
+    assert sorted(os.listdir(str(dbs))) == ["sub.def.db"]
+    _build([TOP], dump_db=str(dbs), jobs=2)              # the top alone, its own job
+    assert sorted(os.listdir(str(dbs))) == ["sub.def.db", "top.def.db"]
+
+    # Nothing was dropped between the counters and the file: every shape the parse counted as
+    # emitted is in the body, once per placement. It is the one check that the workers' parts and
+    # the parent's merge together hold the whole block - and it is made against a number counted
+    # by a different path than the one that wrote the file.
+    sub_db = metal_db.load(str(dbs / "sub.def.db"))
+    stored = sum(sub_db.header["geometry"].values())
+    assert stored * len(sub_db.frames) == sub_db.header["totals"]["emitted"]
+
+    again = _build([], db_paths=_db_paths(dbs))
+    assert again.reused == ["TOP"]                       # the root: same frames, its grids stand
+    assert again.replayed == ["SUB"]                     # dumped elsewhere: its shapes replayed
+    assert again.warnings == whole.warnings
+    _same_map(again, whole, exact=False)                 # a pooled dump sums in another order
+    assert again.top_name == whole.top_name
+    assert again.rows == whole.rows and again.cols == whole.cols
+    kind = whole.kinds()[0][0]
+    assert again.cell_detail(3, 3, kind) == whole.cell_detail(3, 3, kind)
+
+
+def test_the_replay_carries_the_placements_it_was_dumped_at(tmp_path):
+    """A block dumped on its own was placed once and is placed four times here.
+
+    Two things in a db are counted per placement rather than per parse - `emitted`, and the three
+    columns that count shapes in the layer table - so a replay into a different placement count has
+    to move them, or the summary says one and the table says four.
+    """
+    dbs = tmp_path / "dbs"
+    whole = _build([TOP, SUB])
+    _build([SUB], dump_db=str(dbs))
+    sub_db = metal_db.load(str(dbs / "sub.def.db"))
+    assert [tuple(frame)[0] for frame in sub_db.frames] == ["N"]   # one placement: its own origin
+    assert sub_db.header["totals"]["emitted"] < whole.totals["emitted"]
+
+    again = _build([TOP], db_paths=_db_paths(dbs))
+    assert again.totals["emitted"] == whole.totals["emitted"]
+
+
+def test_a_dump_passes_through_the_dbs_it_reused(tmp_path):
+    """A dump directory holds one db per block, whichever way the block got there.
+
+    A block that came out of a db is *copied*, not re-derived: its db already holds what this run
+    would write, shapes included - and those shapes are not in this process to rewrite, so writing
+    the live grids over it would throw away the half that makes it loadable by the next design.
+    """
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _build([TOP, SUB], dump_db=str(first))
+    again = _build([TOP, SUB], db_paths=_db_paths(first), dump_db=str(second))
+    assert sorted(again.reused) == ["SUB", "TOP"]
+    assert sorted(os.listdir(str(second))) == ["sub.def.db", "top.def.db"]
+    for name in ("sub.def.db", "top.def.db"):
+        assert (second / name).read_bytes() == (first / name).read_bytes(), name
 
 
 def test_an_unreadable_db_is_reported_and_ignored(tmp_path):
@@ -245,12 +387,138 @@ def test_a_version_from_another_build_is_refused(tmp_path):
     guess about what its numbers mean."""
     dbs = tmp_path / "dbs"
     _build([TOP, SUB], dump_db=str(dbs))
-    db = metal_db.load(str(dbs / "top.def.db"))
-    db.header["format"] = metal_db.DB_FORMAT + 1
-    metal_db.save(str(dbs / "top.def.db"), db)
+    _as_v1(dbs / "top.def.db", format=metal_db.DB_FORMAT + 1)
 
     again = _build([TOP, SUB], db_paths=_db_paths(dbs))
     assert "TOP" not in again.reused and "SUB" in again.reused
+
+
+def test_an_old_style_db_still_loads_and_is_still_refused_by_placement(tmp_path):
+    """Both halves of keeping the v1 reader, on a v1 db.
+
+    A db written before the geometry section is an npz with grids and no shapes, so every check it
+    passed then still applies to it. It loads and rebuilds exactly as it did - and one whose
+    placement belongs to another design is refused by name rather than drawn at (0, 0), which is
+    the refusal the geometry section replaced for the container that has shapes in it.
+    """
+    dbs = tmp_path / "dbs"
+    whole = _build([TOP, SUB])
+    _build([TOP, SUB], dump_db=str(dbs))
+    for name in ("top.def.db", "sub.def.db"):
+        _as_v1(dbs / name)
+
+    again = _build([TOP, SUB], db_paths=_db_paths(dbs))
+    assert again.reused == ["TOP", "SUB"] and again.replayed == []
+    assert again.warnings == []
+    _same_map(again, whole)
+
+    # The second half: the same v1 file, dumped by a run that had no parent to place it.
+    other = tmp_path / "other"
+    _build([SUB], dump_db=str(other))
+    _as_v1(other / "sub.def.db")
+    top_only = _build([TOP])
+    partial = _build([TOP], db_paths=[str(other / "sub.def.db")])
+    assert partial.reused == [] and partial.replayed == []
+    assert any("SUB" in warning and "not counted" in warning for warning in partial.warnings)
+    _same_map(partial, top_only)
+
+
+def test_a_truncated_db_is_reported_and_the_others_still_work(tmp_path):
+    """A file that stops half way is a reason to parse, not a crash and not a silent skip: the
+    reader finds no footer where it expects one and the caller re-reads that DEF."""
+    dbs = tmp_path / "dbs"
+    fresh = _build([TOP, SUB])
+    _build([TOP, SUB], dump_db=str(dbs))
+    path = dbs / "top.def.db"
+    data = path.read_bytes()
+    path.write_bytes(data[: len(data) // 2])
+
+    again = _build([TOP, SUB], db_paths=_db_paths(dbs))
+    assert again.reused == ["SUB"]
+    assert any("ignoring db top.def.db" in warning for warning in again.warnings)
+    assert again.totals == fresh.totals
+    for key, grid in fresh._grids.items():
+        assert np.array_equal(np.asarray(again._grids[key]), np.asarray(grid)), key
+
+
+def test_the_container_round_trips_every_record_kind(tmp_path):
+    """The body is a record stream, so every kind of shape survives it: rectangles, diagonals
+    (four coordinates and a half width) and polygons, whose ring is variable length - one record
+    holding one shape, however many vertices it has."""
+    part = str(tmp_path / "unit.part0")
+    writer = metal_db.SectionWriter(part)
+    writer.batch("rects", "M1", "signal",
+                 np.array([[1, 2, 3, 4], [5, 6, 7, 8]], dtype=np.int32))
+    writer.batch("diagonals", "M2", "power", np.array([[1, 2, 3, 4, 5]], dtype=np.int32))
+    writer.batch("polygons", "M3", "signal",
+                 np.array([0, 0, 10, 0, 10, 10, 0, 10], dtype=np.int32))
+    writer.close()
+    assert writer.counts == {"rects": 2, "diagonals": 1, "polygons": 1}
+    # A second worker's part, appended to the same record name: the parent's merge is this, and
+    # the batches of one name have to come back in the order they were written - a grid sums over
+    # neighbouring shapes, and the order they are summed in is the order they were flushed in.
+    second = str(tmp_path / "unit.part1")
+    more = metal_db.SectionWriter(second)
+    more.batch("rects", "M1", "signal", np.array([[9, 9, 9, 9]], dtype=np.int32))
+    more.close()
+
+    path = str(tmp_path / "unit.db")
+    metal_db.write(path, header={"format": metal_db.DB_FORMAT, "block": "X", "frames": []},
+                   grids={("M1", "signal"): np.zeros((2, 3), dtype=np.float32)},
+                   parts=[part, second])
+    db = metal_db.load(path)
+    # Batch for batch, in the order they were written: one record per flush for the kinds the
+    # stream buffers, and one per ring for a polygon, which has no batch of its own.
+    got: Dict = {}
+    for kind, layer, scope, packed in db.geometry():
+        got.setdefault((kind, layer, scope), []).append(packed.tolist())
+    assert got == {("rects", "M1", "signal"): [[[1, 2, 3, 4], [5, 6, 7, 8]], [[9, 9, 9, 9]]],
+                   ("diagonals", "M2", "power"): [[[1, 2, 3, 4, 5]]],
+                   ("polygons", "M3", "signal"): [[0, 0, 10, 0, 10, 10, 0, 10]]}
+    # What was stored, as the header records it - the number a caller reads to know whether a db
+    # can stand in for a parse at all, before reading a byte of its body.
+    assert db.header["geometry"] == {"rects": 3, "diagonals": 1, "polygons": 1}
+    assert db.has_geometry and np.array_equal(np.asarray(db.grids[("M1", "signal")]),
+                                              np.zeros((2, 3), dtype=np.float32))
+
+
+def test_the_replay_is_refused_when_the_shapes_are_no_longer_the_ones_wanted(tmp_path, caplog):
+    """`min_segment` decided which shapes were stored, so a db written under a different one has
+    the wrong shapes in it - and no amount of live rasterising puts the missing ones back.
+
+    A re-parse, not a warning: the DEF is in the run and nothing is wrong with it, which is the
+    same reading `min_layer` and `max_layer` get. What makes it a refusal at all is that the
+    stored shapes are *shorter* than the ones this run wants, not that they are stale.
+    """
+    dbs = tmp_path / "dbs"
+    _build([SUB], dump_db=str(dbs))
+    fresh = _build([TOP, SUB], min_segment=1.0)
+    with caplog.at_level("INFO", logger="vlsi_viewer.metal"):
+        again = _build([TOP, SUB], db_paths=_db_paths(dbs), min_segment=1.0)
+    assert again.reused == [] and again.replayed == []
+    assert any("db for SUB not used" in record.getMessage()
+               and "min_segment is" in record.getMessage() for record in caplog.records)
+    assert again.warnings == []
+    _same_map(again, fresh)
+
+
+def test_a_changed_macro_lef_replays_the_stored_shapes(tmp_path):
+    """The macro LEFs decide the blockage, which is recomputed live - so a db is still usable for
+    its shapes when they change, and the map matches what the live LEFs say."""
+    dbs = tmp_path / "dbs"
+    _build([TOP, SUB], dump_db=str(dbs))
+
+    cells = tmp_path / "cells.lef"
+    shutil.copy(CELLS, cells)
+    with open(str(cells), "a", encoding="utf-8") as handle:
+        handle.write("\n# touched\n")
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        fresh = build_metal([TOP, SUB], [str(cells)], [TECH], grid_size=10.0)
+        again = build_metal([TOP, SUB], [str(cells)], [TECH], grid_size=10.0,
+                            db_paths=_db_paths(dbs))
+    assert again.reused == [] and again.replayed == ["TOP", "SUB"]
+    _same_map(again, fresh)
 
 
 def test_dump_only_writes_the_dbs_and_returns_without_a_window(tmp_path):
@@ -260,3 +528,68 @@ def test_dump_only_writes_the_dbs_and_returns_without_a_window(tmp_path):
                  "--dump-db", str(dbs), "--dump-only"])
     assert code == 0
     assert sorted(os.listdir(str(dbs))) == ["sub.def.db", "top.def.db"]
+
+
+def _one_sub_at_the_origin(tmp_path):
+    """The sample's top, with its single sub-block placed at ( 0 0 ) N.
+
+    That is the frame a standalone dump of the sub-block records, which is what makes this the
+    09-17 run-2 case: the frame check cannot tell "placed at the design's origin" from "written as
+    its own root", so only the grid geometry can refuse the db.
+    """
+    lines = (tmp_path / "top.def").read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("COMPONENTS"))
+    end = next(i for i, line in enumerate(lines) if line.startswith("END COMPONENTS"))
+    lines[start:end + 1] = ["COMPONENTS 1 ;",
+                            "- u0 SUB + SOURCE DIST + PLACED ( 0 0 ) N ;",
+                            "END COMPONENTS"]
+    (tmp_path / "top.def").write_text("\n".join(lines) + "\n")
+    return str(tmp_path / "top.def")
+
+
+def test_a_standalone_dump_takes_the_replay_when_its_grids_do_not_fit(tmp_path, caplog):
+    """The 09-17 run 2: the db passes every check but its grids are its own die's.
+
+    Before the geometry comparison, `Bins.add_grid` raised `grid is (52, 40), this grid's is
+    (62, 62)` mid-build - an error about the rasteriser for a problem with the db. Then it became
+    a refusal; now the grids are refused *and the stored shapes are used*, because the die and the
+    frame are properties of the run that rasterises and not of the shapes. What it must draw is
+    what parsing both DEFs draws.
+    """
+    _sample_pair(tmp_path)
+    top = _one_sub_at_the_origin(tmp_path)
+    sub = str(tmp_path / "sub.def")
+    dbs = tmp_path / "dbs"
+    _build([top], dump_db=str(dbs))                    # the top alone: SUB is a candidate, at (0,0)
+    _build([sub], dump_db=str(dbs))                    # SUB alone: its own root at (0,0)
+
+    live = _build([top, sub])
+    with caplog.at_level("INFO", logger="vlsi_viewer.metal"):
+        again = _build([], db_paths=_db_paths(dbs))    # no exception, no warning, no re-parse
+    assert again.reused == ["TOP"] and again.replayed == ["SUB"]
+    assert again.warnings == []
+    _same_map(again, live)
+    # Said out loud, because a run that quietly re-rasterised a block would look like one that had
+    # simply been slow - and the fast path was declined for a reason the user can act on.
+    said = " ".join(record.getMessage() for record in caplog.records)
+    assert "grids do not match this run" in said and "this run's is" in said
+    assert "replaying its stored shapes" in said
+
+
+def test_mismatch_compares_the_grid_and_the_die(tmp_path):
+    """The unit behind that refusal: same cell count over a shifted die is still a refusal."""
+    dbs = tmp_path / "dbs"
+    _build([TOP, SUB], dump_db=str(dbs))
+    db = metal_db.load(str(dbs / "top.def.db"))
+    params = db.header["params"]
+    same = (db.header["rows"], db.header["cols"], db.header["extent"])
+
+    assert metal_db.mismatch(db, params=params, geometry=same) is None
+    wrong_cells = metal_db.mismatch(db, params=params,
+                                    geometry=(same[0] + 1, same[1], same[2]))
+    assert wrong_cells and "this run's is" in wrong_cells
+    shifted = list(same[2])
+    shifted[2] += 10.0
+    wrong_die = metal_db.mismatch(db, params=params,
+                                  geometry=(same[0], same[1], tuple(shifted)))
+    assert wrong_die and "this run's is" in wrong_die

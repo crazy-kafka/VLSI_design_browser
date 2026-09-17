@@ -732,33 +732,48 @@ def test_a_contour_toggle_is_a_no_op(window):
 
 def test_a_map_rebuilt_from_a_db_renders_the_same(app, metal, tmp_path):
     """The db path end to end in the window: the panel's numbers, the map and the status bar are
-    the same ones a full parse produces, because the grids and the layer table are the same."""
+    the same ones a full parse produces, because the grids and the layer table are the same.
+
+    Both flavours are here. The first db was written by this design's own run and answers
+    directly; the second was written by a sub-block dumped on its own, so its grids belong to
+    another design's die and everything drawn from it had to be re-rasterised first. The window
+    cannot tell them apart, which is the point: it is the same map either way.
+    """
     import contextlib
     import io
 
     from vlsi_viewer.metal import build_metal
     from vlsi_viewer.ui_main import MainWindow
 
+    def build(defs, **kwargs):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return build_metal(list(defs), [f"{SAMPLE}/cells.lef"], [f"{SAMPLE}/tech.lef"],
+                               grid_size=10.0, **kwargs)
+
     dbs = tmp_path / "dbs"
-    with contextlib.redirect_stdout(io.StringIO()):
-        build_metal([f"{SAMPLE}/top.def", f"{SAMPLE}/sub.def"], [f"{SAMPLE}/cells.lef"],
-                    [f"{SAMPLE}/tech.lef"], grid_size=10.0, dump_db=str(dbs))
-        rebuilt = build_metal([], [f"{SAMPLE}/cells.lef"], [f"{SAMPLE}/tech.lef"],
-                              grid_size=10.0,
-                              db_paths=[str(dbs / "top.def.db"), str(dbs / "sub.def.db")])
+    build([f"{SAMPLE}/top.def", f"{SAMPLE}/sub.def"], dump_db=str(dbs))
+    rebuilt = build([], db_paths=[str(dbs / "top.def.db"), str(dbs / "sub.def.db")])
+
+    alone = tmp_path / "alone"
+    build([f"{SAMPLE}/sub.def"], dump_db=str(alone))
+    replayed = build([f"{SAMPLE}/top.def"], db_paths=[str(alone / "sub.def.db")])
+    assert replayed.replayed == ["SUB"]
 
     parsed_win = MainWindow(metal=metal)
     db_win = MainWindow(metal=rebuilt)
+    replayed_win = MainWindow(metal=replayed)
     try:
-        # The layer panel is what a db must reproduce: the stack, its order and its checkboxes.
-        assert list(parsed_win._panel._boxes) == list(db_win._panel._boxes)
-        for layer, boxes in parsed_win._panel._boxes.items():
-            assert boxes[0].text() == db_win._panel._boxes[layer][0].text(), layer
         metal.set_scope("all")
-        rebuilt.set_scope("all")
-        kind = metal.kinds()[0][0]
-        assert np.array_equal(np.asarray(metal.heat(kind)), np.asarray(rebuilt.heat(kind)))
-        assert parsed_win._panel.peak_label.text() == db_win._panel.peak_label.text()
+        for data, other in ((rebuilt, db_win), (replayed, replayed_win)):
+            # The layer panel is what a db must reproduce: the stack, its order and its checkboxes.
+            assert list(parsed_win._panel._boxes) == list(other._panel._boxes)
+            for layer, boxes in parsed_win._panel._boxes.items():
+                assert boxes[0].text() == other._panel._boxes[layer][0].text(), layer
+            data.set_scope("all")
+            kind = metal.kinds()[0][0]
+            assert np.array_equal(np.asarray(metal.heat(kind)), np.asarray(data.heat(kind)))
+            assert parsed_win._panel.peak_label.text() == other._panel.peak_label.text()
     finally:
         parsed_win.close()
         db_win.close()
+        replayed_win.close()
