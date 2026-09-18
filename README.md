@@ -121,6 +121,10 @@ python main.py json --cell_info c.json --block_info a.json --force
 python main.py def --def core.def --lef cells.lef --physical_mode
 python main.py def --def v1.def --compare_def v2.def --lef cells.lef   # two-version diff
 
+# neither DEF nor a netlist carries power: --json fills it in from instance JSON
+python main.py def --def core.def --lef cells.lef \
+    --json core.power.json --physical_mode
+
 # --- verilog: gate-level netlist + macro LEF (no placement -> no physical mode)
 python main.py verilog --verilog core.v --lef cells.lef --top core
 python main.py verilog --verilog v1.v --compare_verilog v2.v --lef cells.lef --top core
@@ -132,8 +136,8 @@ python main.py verilog --verilog v1.v --compare_verilog v2.v --lef cells.lef --t
 | subcommand | inputs | modes |
 |---|---|---|
 | `json` | `--cell_info`, `--block_info`, `--compare_block_info` | compare, `--physical_mode` |
-| `verilog` | `--verilog`, `--lef`, `--top`, `--compare_verilog`, `--out` | compare only |
-| `def` | `--def`, `--lef`, `--top`, `--compare_def`, `--out` | compare, `--physical_mode` |
+| `verilog` | `--verilog`, `--lef`, `--top`, `--compare_verilog`, `--out`, `--json` | compare only |
+| `def` | `--def`, `--lef`, `--top`, `--compare_def`, `--out`, `--json` | compare, `--physical_mode` |
 | `metal` | `--def`, `--lef`, `--tech-lef`, `--top` | `--grid-size`, `--min-layer`, `--max-layer`, `--macro-block-layers`, `--min-segment-length`, `--jobs`, `--profile`, `--dump-db`, `--db`, `--dump-only` |
 
 Options shared by the first three: `--min-instances`, `--include-macros`, `--cache-dir`,
@@ -279,6 +283,11 @@ convert their inputs to exactly the structures documented under [Input
 format](#input-format) — LEF becomes the cell library, the netlist or DEF becomes block
 data — and load them **in memory**: a run writes no file at all.
 
+The parsers underneath are importable on their own — see
+[PARSERS.md](PARSERS.md) for the interface of each layer (the vendored
+`DefParser`/`LefParser`/`VerilogParser`, the converters above them, and the
+routing-layer/geometry one), what each needs, and the quirks to know about.
+
 ### Names of the JSON written by `--out`
 
 `--out DIR` dumps the converted JSON into `DIR`, as a copy to inspect or to feed back to
@@ -293,7 +302,9 @@ the `json` subcommand. The names follow the design, not the input file:
 The top cell is the DEF's `DESIGN` statement, or `--top` when given — `--top` also renames
 the design itself. A netlist names no design, so there `--top` is required and is the only
 source of the name. The cell library carries no such name because several LEF files are
-**one** library: it is always plain `cell_info.json`.
+**one** library: it is always plain `cell_info.json`. A run that was given `--json` writes
+what it *filled in*, so the dump is the design with its power data — and feeding it back to
+the `json` subcommand needs no fill step at all.
 
 Naming a block after its top is what lets a version diff keep both sides. `v1/core.def`
 against `v2/core.def` are the same file name describing the same design, so both infer the
@@ -307,16 +318,52 @@ same name, and the CLI warns instead of letting one silently replace the other.
 | LEF (`--lef`) | the cell library | macro `SIZE` (microns) → `size_x`/`size_y`/`area`; `CLASS` other than `CORE` → `is_macro`. Several files are one library |
 | DEF (`--def`) | one block each | `DESIGN` → `top_name`, `DIEAREA` → `boundary`, `COMPONENTS` → instances. Coordinates are DEF database units divided by `UNITS DISTANCE MICRONS` |
 | Verilog (`--verilog`) | **one** block | flattened to instance-name paths; **no placement**, hence no physical mode. Several files are one netlist |
+| JSON (`--json`, def/verilog only) | instance attributes to **fill in** | `leakage_power`/`dynamic_power` in practice. `top_name` names the block the keys are relative to, so a flattened top file and a per-block file both apply; the input's own values win |
 
 **How the multi-file flags differ, deliberately:** a netlist is normally split across
 files (one per module), so several `--verilog` files are merged into a single design. Each
 DEF, by contrast, is a complete design, so several `--def` files stay separate blocks —
 the "incremental JSON" behaviour. `.gz` inputs are read transparently for all three.
 
+### Filling in what the inputs cannot say: `--json`
+
+Neither DEF nor a netlist carries leakage or dynamic power, so those heat maps come out
+empty unless something supplies the numbers. `--json FILE...` does that: instance data in
+the format of [Input format](#input-format) is filled into the converted design before
+anything loads it.
+
+    # the whole design in one file, or one file per sub-block, in either order
+    python main.py def --def core.def --lef cells.lef \
+        --json top.power.json sub_a.power.json --physical_mode
+
+A file's `top_name` says which block its keys are relative to, which is what makes both of
+these work — a *flattened* `TOP.json` whose keys are paths under the top (`u_core/u1`), and
+a per-block `sub_A.json` whose keys are that sub-block's own instance names (`u1`). A record
+for a sub-block's leaf fills **every** placement of that block, because the filling happens
+before the hierarchy is expanded: one record for a block placed four times lights four
+places on the map.
+
+An attribute the input already provides is never overwritten — the DEF's cell names and
+placement are facts about the design, not gaps — and a record naming an instance the design
+does not have is ignored. Both are counted, and the run says what it did:
+
+    power: core.power.json -> 3994 of 3994 record(s) filled
+    power: 3994 of 3994 design instance(s) filled from 1 file(s)
+
+A file whose records match nothing at all is a warning, not a silent no-op — the usual cause
+is a `top_name` that is not a block of this design, and the warning names the blocks it does
+have. With `--out`, the dumped JSON carries the filled values and is an ordinary input to
+the `json` subcommand, so the merge can be made once and reused.
+
 Things worth knowing:
 
-- **Power is absent.** Neither DEF nor a netlist carries leakage/dynamic power, so the
-  leakage and dynamic heat maps are empty for these flows and the CLI warns about it.
+- **Power is absent from the formats** — a DEF and a netlist describe structure and
+  placement, not activity — so the leakage and dynamic heat maps are empty until `--json`
+  fills them, and the CLI warns when nothing was filled. In `verilog` they cannot be
+  rendered at all (no placement, no physical mode); there `--out` is how to keep them.
+- **The fill is not power-specific.** Any instance attribute the input does not provide can
+  come from the JSON, so a physical-only flag or a placement can be filled into a netlist
+  run as well. `dynamic_power` and `leakage_power` are the ones with a map to land in.
 - **Filler is dropped.** `FILL*` components tile every row gap, so keeping them would
   peg the density map at 100%. Tap, decap and other physical-only cells are kept and
   flagged instead — they appear in density but not in the tree.
@@ -332,9 +379,10 @@ Things worth knowing:
   to 2000 database units per micron. An unrecognised `TRACKS` clause is reported and
   skipped rather than aborting the parse.
 
-`sample_data/eda/` is a browsable example — a macro LEF, a DEF and a gate-level
-netlist describing the same small CPU cluster, generated by
-`python sample_data/eda/generate_eda_sample.py`.
+`sample_data/eda/` is a browsable example — a macro LEF, a DEF, a gate-level netlist and a
+power file describing the same small CPU cluster, generated by
+`python sample_data/eda/generate_eda_sample.py`. `python quickstart.py def` renders it with
+the power filled in, and the same `core.power.json` fills the netlist run.
 
 ## Metrics
 
@@ -529,7 +577,7 @@ are research-licensed, so remove them before publishing this repository.
 | `vlsi_viewer/ui_compare.py` | V1 / V2 / Diff tabs |
 | `vlsi_viewer/ui_main.py` | main window (toolbar + wiring) |
 | `vlsi_viewer/cli.py` | command-line entry point (three input subcommands) |
-| `vlsi_viewer/parsers/` | vendored LEF / DEF / Verilog parsers (`DEF/`, `LEF/`, `verilog/`) |
+| `vlsi_viewer/parsers/` | vendored LEF / DEF / Verilog parsers (`DEF/`, `LEF/`, `verilog/`) — [their interface, for a project that wants to import them](PARSERS.md) |
 | `vlsi_viewer/parsers/convert.py` | EDA files → the viewer's `cell_info` / `instance_info` JSON |
 | `vlsi_viewer/physical.py` | physical mode: heat-map grids + per-hierarchy contour/density |
 | `vlsi_viewer/metal_db.py` | metal mode's intermediate db: the container, save/load, the shapes a replay reads back, and the mismatch that refuses one |
@@ -548,8 +596,19 @@ subparser in `cli.py`.
 ## Testing
 
 ```bash
-python -m pytest
+python -m pytest                    # ~80 s: the metal and GUI tests each build the sample map
+python -m pytest -n 4               # ~27 s, with pytest-xdist installed (see the caveat below)
+python -m pytest tests/test_metal_db.py
 ```
+
+The end-to-end metal tests parse the sample DEF and LEF for every case, so a build is ~0.7 s and
+that region dominates the run; distributing across processes is where the wall time goes.
+
+**One known problem with `-n`**, unrelated to the code under test: a worker that hosts
+`tests/test_metal_gui.py` *after* another GUI module can die silently — no traceback, no failed
+assertion, just a lost worker — at `-n 4` as well as `-n 8`. It looks like a Qt application object
+outliving the module-scoped fixture that created it. Run `python -m pytest` (serial, ~80 s) when you
+need a trustworthy result.
 
 The suite covers metric formulas (against hand-computed values), filtering
 (missing / macro / physical-only), hierarchy construction, pickle round-trip,
