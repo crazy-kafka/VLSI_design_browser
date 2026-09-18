@@ -155,7 +155,8 @@ flows testable without Qt.
 - The LEF parser keeps one RECT per pin, and its macro/pin loops have no index bounds — an
   unterminated `MACRO` raises `IndexError` (asserted in a test, as a known wart).
 - `.def.gz` is supported by the parser but untested here; the sample is plain text.
-- No power data reaches the DEF/verilog flows, so those heat maps are empty by design.
+- No power data *in the inputs* reaches the DEF/verilog flows, so those heat maps are empty
+  unless `--json` fills them — implemented later, see `dev_plan/power_json_fill.md`.
 - `dev_plan/code_sample/extractCellInfo.py` is a reference for the upstream rules, not a
   runnable script here: it uses `tkinter` plus a hard-coded Cadence TCL setup, and its
   top-level `LEF`/`DEF` imports refer to the old layout.

@@ -143,7 +143,9 @@ def test_no_file_is_written_without_out(tmp_path):
                   "--lef", f"{SAMPLE}/cells.lef", "--top", "core"]):
         resolve_inputs(parse_args(argv))
     assert _tree(SAMPLE) == before
-    assert not [p for p in _tree(SAMPLE) if p.endswith(".json")]
+    # The sample ships its power data for `--json`, and that is the only JSON in it: a run that
+    # dumped a converted copy beside its inputs would show up right here.
+    assert [p for p in _tree(SAMPLE) if p.endswith(".json")] == ["core.power.json"]
 
 
 def _block_name(top, compare=False):
@@ -328,3 +330,94 @@ def test_quickstart_shortcuts_are_valid():
         assert sources, argv
         for path in sources:
             assert os.path.exists(path), f"{name}: missing sample {path}"
+
+
+# -- --json: the incremental fill -------------------------------------------------
+
+# The parse-only fixtures above use bare names; a run that reads files needs the sample paths.
+POWER_ARGS = ["def", "--def", f"{SAMPLE}/core.def", "--lef", f"{SAMPLE}/cells.lef",
+              "--json", f"{SAMPLE}/core.power.json"]
+
+
+def test_json_flag_parses_on_the_flows_that_need_it():
+    """`--json` exists exactly where the input carries no attributes of its own.
+
+    Not on `json`, whose files *are* the data, and not on `metal`, where `--j` would become an
+    ambiguous abbreviation of `--jobs` - the same "the flag is simply absent" shape that keeps
+    physical mode off the verilog subcommand.
+    """
+    assert parse_args(DEF_ARGS).json_files is None
+    assert parse_args(VERILOG_ARGS).json_files is None
+    assert parse_args(DEF_ARGS + ["--json", "a.json", "b.json"]).json_files == ["a.json", "b.json"]
+    assert parse_args(VERILOG_ARGS + ["--json", "p.json"]).json_files == ["p.json"]
+
+    for argv in (JSON_ARGS + ["--json", "a.json"],
+                 ["metal", "--lef", "l.lef", "--tech-lef", "t.lef", "--json", "a.json"]):
+        with pytest.raises(SystemExit):
+            parse_args(argv)
+
+
+def test_the_power_warning_only_fires_when_nothing_was_filled(caplog):
+    """The old message stays for a run that was given no data, and gives way to what happened.
+
+    A user who passed `--json` and got no power is the case that must not read like the case
+    where they passed nothing at all.
+    """
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="vlsi_viewer.cli"):
+        resolve_inputs(parse_args(["def", "--def", f"{SAMPLE}/core.def",
+                                   "--lef", f"{SAMPLE}/cells.lef"]))
+    assert "carries no power data" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="vlsi_viewer.cli"):
+        resolve_inputs(parse_args(POWER_ARGS))
+    assert "carries no power data" not in caplog.text
+    assert "3994 of 3994 design instance(s) filled from 1 file(s)" in caplog.text
+
+
+def test_a_json_file_that_matches_nothing_says_so(caplog, tmp_path):
+    """The warning that matters most: data was supplied and none of it was used."""
+    import logging
+
+    other = tmp_path / "other.json"
+    other.write_text(json.dumps({"top_name": "something_else", "instances": {"a": {}}}))
+    stale = ["def", "--def", f"{SAMPLE}/core.def", "--lef", f"{SAMPLE}/cells.lef",
+             "--json", str(other)]
+    with caplog.at_level(logging.WARNING, logger="vlsi_viewer.cli"):
+        resolve_inputs(parse_args(stale))
+    assert "still carries no power data" in caplog.text
+
+
+def test_the_out_dump_carries_the_fill_and_reloads(tmp_path):
+    """The incremental contract: what `--out` writes is an ordinary input to the `json` flow.
+
+    Filling before the dump is what makes that true, and it is also why the dump stays
+    content-identical to the in-memory blocks `resolve_inputs` returns.
+    """
+    from vlsi_viewer.loader import load_block
+
+    out = tmp_path / "out"
+    args = parse_args(POWER_ARGS + ["--out", str(out)])
+    _cells, blocks, _compare, _pins = resolve_inputs(args)
+
+    with open(out / "core.instance_info.json", encoding="utf-8") as fh:
+        dumped = json.load(fh)
+    assert dumped == blocks[0]
+    powered = [record for record in dumped["instances"].values() if "leakage_power" in record]
+    assert len(powered) == len(dumped["instances"])
+
+    # ... and the `json` flow reads it back with the values intact.
+    name, df, _boundary = load_block(str(out / "core.instance_info.json"))
+    assert name == "core" and df["leakage_power"].sum() > 0
+
+
+def test_a_missing_json_file_is_a_cli_error(capsys, tmp_path):
+    """A path that is not there is a wrong argument, not a run with a partial fill."""
+    from vlsi_viewer.cli import main
+
+    argv = ["def", "--def", f"{SAMPLE}/core.def", "--lef", f"{SAMPLE}/cells.lef",
+            "--json", str(tmp_path / "nope.json"), "--out", str(tmp_path)]
+    assert main(argv) == 1
+    assert "error: instance json" in capsys.readouterr().err

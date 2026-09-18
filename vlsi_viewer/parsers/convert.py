@@ -8,10 +8,16 @@ Units: LEF ``SIZE`` is in microns and DEF coordinates are integers in DEF databa
 units, so every DEF coordinate is divided by ``DefParser.dbUnit()`` to match.
 """
 import gzip
+import json
 import logging
 import re
+from dataclasses import dataclass
+from typing import AnyStr, Dict, List, Sequence
 
 from .. import schema
+# The loader's own coercion, so a value this accepts is a value the loader accepts: one
+# definition of what a JSON attribute may look like ("1" for a bool, "2.5" for a float).
+from ..loader import _coerce
 
 logger = logging.getLogger(__name__)
 
@@ -263,3 +269,261 @@ def instance_info_from_def(def_path, top=None) -> dict:
                 "%d boundary point(s)", def_path, len(instances), dropped_fill,
                 unplaced, len(boundary))
     return {"top_name": name, "boundary": boundary, "instances": instances}
+
+
+
+
+# ------------------------------------------------------------------ incremental fill
+#
+# DEF and a netlist describe structure and placement and carry no power, so the leakage and
+# dynamic heat maps come out flat for those flows. `--json` closes that gap: instance data from
+# files the `json` subcommand already reads is filled into the converted blocks *here*, before
+# anything loads them.
+#
+# Here rather than after loading, because absence is only expressible in a dict like this: the
+# loader turns a missing attribute into its default (0.0 for power), and a default cannot be told
+# from a value somebody meant. And it happens before the hierarchy is expanded, so one record for
+# a sub-block's leaf fills *every* placement of that block - `metrics.load_blocks` and
+# `physical.walk` both expand these same dicts later, each of them reading power off the entry.
+
+
+@dataclass
+class FillSummary:
+    """What one fill did, for the summary `cli` prints and for the tests.
+
+    ``instances`` and ``total`` are counted over *design* instances, not over records: a record
+    for a sub-block's leaf that the design places four times fills four. They are walk counts
+    rather than a tally kept while filling, because two files may fill one instance's different
+    attributes and a per-file tally would call that two instances.
+    """
+
+    files: int = 0
+    records: int = 0                 # records offering at least one fillable value
+    matched: int = 0                 # records that resolved to a leaf of the design
+    instances: int = 0               # design instances that carry a filled attribute
+    total: int = 0                   # design instances in all, for the partial-fill denominator
+    conflicts: int = 0               # the input already had the attribute: the file's is dropped
+    unusable: int = 0                # a record or value that could not be used
+    mismatched_cells: int = 0        # a record whose cell_name is not the design's
+
+
+def _names(names, limit: int = 5) -> str:
+    """``a, b, c`` for a warning: enough to recognise the design, not a listing of it."""
+    ordered = sorted(str(name) for name in names)
+    shown = ", ".join(ordered[:limit])
+    return shown + (f", +{len(ordered) - limit}" if len(ordered) > limit else "")
+
+
+def _read_instance_json(path) -> dict:
+    """One ``--json`` file as written - no defaults, because absence is what the fill reads."""
+    try:
+        with open(str(path), "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError) as exc:
+        # A missing or malformed file is a wrong argument rather than a partial fill, so this
+        # reaches `cli.main`, which prints `error: ...` and exits 1 - the same as a bad --def.
+        raise ValueError(f"instance json {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"instance json {path}: expected an object with 'instances'")
+    return data
+
+
+def _index_blocks(blocks) -> Dict[str, List[dict]]:
+    """``top_name -> the blocks with that name``, in input order.
+
+    Several blocks can share a name (``metrics._merge_blocks`` unions them, earlier file winning a
+    duplicate leaf), so every lookup goes through `_instances` and takes the earlier entry.
+    """
+    index: Dict[str, List[dict]] = {}
+    for block in blocks:
+        index.setdefault(str(block.get("top_name") or ""), []).append(block)
+    return index
+
+
+def _instances(index: Dict[str, List[dict]], name: str) -> dict:
+    """The instances of the block called ``name``, with the group's duplicates merged."""
+    merged: dict = {}
+    for block in index.get(name, ()):
+        for leaf, entry in block["instances"].items():
+            merged.setdefault(leaf, entry)           # earlier file wins, as `_merge_blocks` does
+    return merged
+
+
+def _resolve(index: Dict[str, List[dict]], name: str, key: str, seen=frozenset()):
+    """The instance entry ``key`` names, relative to the block called ``name``, or ``None``.
+
+    The key is tried whole first: a DEF that flattens its hierarchy into the component names
+    (``sample_data/eda`` writes ``- u0/b0/tap_1_0 TAP_1 ...``) holds ``u0/b0/tap_1_0`` as one
+    instance, while one that really instantiates a sub-block holds ``u0`` and the key descends
+    through it. Descending is by ``cell_name`` naming another block - the same rule
+    `metrics.load_blocks` and `physical.walk` use to expand the hierarchy - so an entry this
+    accepts is one both of them will place and read power off.
+    """
+    if name not in index or name in seen:
+        return None
+    instances = _instances(index, name)
+    if key in instances:
+        return instances[key]
+    head, sep, tail = key.partition("/")
+    if not sep or not head:
+        return None
+    entry = instances.get(head) or {}
+    child = str(entry.get("cell_name") or "")
+    if child in index:
+        return _resolve(index, child, tail, seen | {name})
+    return None
+
+
+def _target(index: Dict[str, List[dict]], top: str, raw_key):
+    """`_resolve` for one record, tolerating the absolute path a user may have exported.
+
+    The hierarchy paths the viewer shows and ``--out`` writes start with the top name
+    (``core/u0/b0/x``), so a leading ``<top>/`` is stripped and the key retried.
+    """
+    key = str(raw_key).replace("\\", "/").strip("/")
+    found = _resolve(index, top, key)
+    if found is None and key.startswith(top + "/"):
+        found = _resolve(index, top, key[len(top) + 1:])
+    return found
+
+
+def _shape(index: Dict[str, List[dict]], wanted) -> List[int]:
+    """``[design instances, the ones carrying a filled attribute]``.
+
+    The same walk the hierarchy does, counting rather than placing: a block nothing instantiates
+    is a top (all of them are, if every block is referenced), and a block placed K times counts
+    its leaves K times - which is what makes "N of M instance(s)" mean instances on screen.
+    """
+    referenced = {str(entry.get("cell_name") or "")
+                  for group in index.values() for block in group
+                  for entry in block["instances"].values()}
+    tops = [name for name in index if name not in referenced] or list(index)
+    leaves, filled = {}, {}
+    for name in index:
+        entries = _instances(index, name)
+        keep = [entry for entry in entries.values()
+                if str(entry.get("cell_name") or "") not in index]
+        leaves[name] = len(keep)
+        filled[name] = sum(1 for entry in keep if any(spec in entry for spec in wanted))
+    counts = [0, 0]
+    visiting = set()
+
+    def walk(name: str) -> None:
+        if name in visiting:            # a cycle: the walks warn and stop, and so does the count
+            return
+        visiting.add(name)
+        counts[0] += leaves[name]
+        counts[1] += filled[name]
+        for entry in _instances(index, name).values():
+            child = str(entry.get("cell_name") or "")
+            if child in index:
+                walk(child)
+        visiting.discard(name)
+
+    for name in tops:
+        walk(name)
+    return counts
+
+
+def fill_instances(blocks, json_paths) -> FillSummary:
+    """Fill instance attributes from ``--json`` files into converted blocks, **in place**.
+
+    The file's ``top_name`` names the block its record keys are relative to, which is the whole
+    of "a flattened top file or a per-block file": keys are resolved against that block, and a
+    key whose first path segment names an instance of another block descends into it. Either
+    form, in any order, so a ``TOP.json`` covering the design and a ``sub_A.json`` covering one
+    sub-block both apply - and a sub-block's record fills every placement of it.
+
+    An attribute the converted input already has is never overwritten: its cell name and placement
+    are facts about the design, not gaps, so the file's value for one is dropped and counted. A
+    record naming an instance the design does not have is ignored and counted. Nothing here is
+    fatal, because a partial fill is the normal case - one file per sub-block is exactly that.
+    """
+    index = _index_blocks(blocks)
+    summary = FillSummary(files=len(json_paths))
+    wanted = set()
+    for path in json_paths:
+        data = _read_instance_json(path)
+        top = str(data.get("top_name") or "")
+        records = data.get("instances")
+        if top not in index:
+            logger.warning(
+                "power: %s names '%s', which is no block of this design (%s); its %d record(s) "
+                "are unused", path, top or "<no top_name>", _names(index),
+                len(records) if isinstance(records, dict) else 0)
+            continue
+        if not isinstance(records, dict):
+            raise ValueError(f"instance json {path}: 'instances' must be an object")
+
+        unmatched: List[str] = []
+        containers: List[str] = []
+        mismatched: List[tuple] = []
+        unusable = applied = 0
+        offered = filled_records = 0
+        for raw_key, record in records.items():
+            if not isinstance(record, dict):
+                unusable += 1
+                continue
+            entry = _target(index, top, raw_key)
+            if entry is None:
+                unmatched.append(str(raw_key))
+                continue
+            if str(entry.get("cell_name") or "") in index:
+                containers.append(str(raw_key))      # a sub-block's own instance, not a leaf
+                continue
+            summary.matched += 1
+            values = {}
+            for spec in schema.INSTANCE_ATTRS:
+                if spec.name not in record or record[spec.name] is None:
+                    continue
+                try:
+                    values[spec.name] = _coerce(record[spec.name], spec.type)
+                except (TypeError, ValueError):
+                    unusable += 1
+            if not values:
+                continue                             # not a record this feature can use
+            summary.records += 1
+            offered += 1
+            wrote = 0
+            for name, value in values.items():
+                if name in entry:
+                    # The input's own value stands. Only a real disagreement is a conflict - a
+                    # file restating a placement it agrees with has ignored nothing - and a
+                    # disagreeing cell name is the strongest sign the file belongs to another
+                    # version of the design, so that one is said out loud.
+                    if entry[name] != value:
+                        summary.conflicts += 1
+                        if name == "cell_name":
+                            summary.mismatched_cells += 1
+                            mismatched.append((str(raw_key), value, entry[name]))
+                    continue
+                entry[name] = value
+                wanted.add(name)               # what the design ends up *carrying* from the file
+                applied += 1
+                wrote += 1
+            if wrote:
+                filled_records += 1
+        summary.unusable += unusable
+        logger.info("power: %s -> %d of %d record(s) filled", path, filled_records, offered)
+        if unmatched or containers:
+            logger.warning(
+                "power: %s: %d of %d record(s) filled no instance of '%s'%s (e.g. %s)", path,
+                len(unmatched) + len(containers), len(records), top,
+                f", {len(containers)} of them naming a sub-block rather than a leaf"
+                if containers else "", _names(unmatched or containers, 3))
+        if mismatched:
+            key, value, own = mismatched[0]
+            logger.warning("power: %s: %d record(s) name a different cell than the design "
+                           "(e.g. %s: %s, where the design places %s); the design keeps its own",
+                           path, len(mismatched), key, value, own)
+        if unusable:
+            logger.warning("power: %s: %d record(s) or value(s) could not be used",
+                           path, unusable)
+        if not applied:
+            logger.warning("power: %s: nothing was filled under '%s'; its data is unused",
+                           path, top)
+
+    # Counted even when nothing was filled, so "0 of N instance(s)" is a real denominator: the
+    # number to read next to the warning that says no record matched.
+    summary.total, summary.instances = _shape(index, wanted)
+    return summary

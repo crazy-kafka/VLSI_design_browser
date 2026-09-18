@@ -559,11 +559,17 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
         row_b = y0 + np.arange(r0, r1 + 1) * gs
         row_t = y0 + (np.arange(r0, r1 + 1) + 1) * gs
         oy = np.minimum(by1[i], row_t) - np.maximum(by0[i], row_b)
-        patch = np.outer(oy, ox) / gs2
+        area = np.outer(oy, ox)               # the box's area inside each bin it covers
+        patch = area / gs2                    # ... as a fraction of the bin, for density
         density[r0:r1 + 1, c0:c1 + 1] += patch
         if ul[i]:
             ulvt[r0:r1 + 1, c0:c1 + 1] += patch
-        frac = patch / box_area[i]
+        # The power is apportioned by *area* fraction, as a std cell's is below - not by the
+        # density patch, which is a per-bin fraction and does not sum to one over the box. A
+        # macro's leakage and dynamic came out divided by the grid area (4x low at the default
+        # 2 um grid) until this was split out; `test_a_macro_apportions_its_power_like_a_std_cell`
+        # is the regression test.
+        frac = area / box_area[i]
         leakage[r0:r1 + 1, c0:c1 + 1] += frac * lk[i]
         dynamic[r0:r1 + 1, c0:c1 + 1] += frac * dynv[i]
 

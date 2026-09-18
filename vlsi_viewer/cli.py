@@ -53,6 +53,24 @@ def _add_pipeline(parser):
                         help="ignore cache and re-preprocess")
 
 
+def _add_json_fill(parser, netlist: bool = False):
+    """The `--json` fill, only for the subcommands whose inputs carry no attributes of their own.
+
+    ``json`` is left out because its files *are* the data, and ``metal`` because a `--j` there
+    would be an ambiguous abbreviation of `--jobs`.
+    """
+    parser.add_argument(
+        "--json", dest="json_files", nargs="+", metavar="JSON",
+        help="instance_info.json file(s) whose instance data is filled into the converted "
+             "design: leakage/dynamic power in practice, and any other attribute the input "
+             "itself does not give. The file's top_name names the block its keys are relative "
+             "to, so a flattened <top>.json and a per-block <sub>.json are both accepted, in "
+             "any order. The input's own values win, an instance it does not have is ignored, "
+             "and the run prints what was filled"
+             + ("; a netlist has no physical mode, so use --out to keep the data" if netlist
+                else ""))
+
+
 def _add_physical(parser):
     """Heat-map options, only for the subcommands that place instances."""
     parser.add_argument(
@@ -104,6 +122,7 @@ def parse_args(argv=None):
                    help="dump the converted JSON here as cell_info.json and "
                         "<top>.instance_info.json (.compare.json for the second design); "
                         "by default nothing is written")
+    _add_json_fill(p, netlist=True)
     _add_pipeline(p)
     _add_shared(p)
 
@@ -126,6 +145,7 @@ def parse_args(argv=None):
                    help="dump the converted JSON here as cell_info.json and "
                         "<top>.instance_info.json (.compare.json for the second design); "
                         "by default nothing is written")
+    _add_json_fill(p)
     _add_physical(p)
     _add_pipeline(p)
     _add_shared(p)
@@ -252,8 +272,8 @@ def resolve_inputs(args):
         return (args.cell_info, list(args.block_info),
                 list(args.compare_block_info) if args.compare_block_info else None, None)
 
-    from .parsers.convert import (cell_info_from_lef, instance_info_from_def,
-                                  instance_info_from_verilog)
+    from .parsers.convert import (cell_info_from_lef, fill_instances,
+                                  instance_info_from_def, instance_info_from_verilog)
 
     if args.cmd == "def":
         cells, pins = cell_info_from_lef(args.lef, with_pins=True)
@@ -272,6 +292,12 @@ def resolve_inputs(args):
         compare = ([instance_info_from_def(path, args.compare_top)
                     for path in args.compare_def] if args.compare_def else None)
 
+    # Filled before the dump, so `--out` writes what the run measured rather than what the
+    # converter alone could say - and the dump is then a perfectly ordinary input to the `json`
+    # subcommand, which is the whole point of keeping the two formats identical.
+    filled = (fill_instances(blocks, args.json_files)
+              if getattr(args, "json_files", None) else None)
+
     if args.out:
         # A block is named after its top cell, so the dump has to follow the conversion.
         written = set()
@@ -281,9 +307,35 @@ def resolve_inputs(args):
         for block in compare or []:
             _dump_json(_block_out_path(args, block, compare=True), block, written)
 
-    logger.warning("%s input carries no power data: the leakage and dynamic heat maps "
-                   "will be empty", args.cmd)
+    _report_fill(filled, args, compare)
     return cells, blocks, compare, pins
+
+
+def _report_fill(filled, args, compare) -> None:
+    """Say what `--json` filled, or - when it was not given - that there is no power data.
+
+    A partial fill is the normal case (one file per sub-block), so the counts are the answer and
+    nothing here is a warning except the things a user has to act on: a file whose records match
+    no instance at all, and the design's own attributes kept over the file's.
+    """
+    if filled is None:
+        logger.warning("%s input carries no power data: the leakage and dynamic heat maps "
+                       "will be empty", args.cmd)
+        return
+    logger.info("power: %d of %d design instance(s) filled from %d file(s)%s", filled.instances,
+                filled.total, filled.files,
+                f"; {filled.conflicts} value(s) ignored, the input had them"
+                if filled.conflicts else "")
+    if not filled.matched:
+        logger.warning("%s input still carries no power data: no --json record matched an "
+                       "instance, so the leakage and dynamic heat maps will be empty", args.cmd)
+    elif args.cmd == "verilog":
+        logger.info("power: a netlist has no physical mode, so use --out to keep the data")
+    if compare:
+        # Power is not rendered in the compare view at all, so a second design would silently
+        # carry data nothing can show - and the file may not even be about it.
+        logger.info("power: the --json file(s) filled the first design only; the compare design "
+                    "is not changed")
 
 
 def _run_metal(args):

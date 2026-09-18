@@ -399,3 +399,61 @@ def test_pin_density_under_a_rotated_sub_block(tmp_path):
     assert grid[0, 9] == 1.0            # (39.5, 1.0) on a 4 um grid
     x0, y0, x1, y1 = (float(v) for v in data.boxes_for("TOP")[0])
     assert (x0, y0, x1, y1) == (38.0, 0.0, 40.0, 4.0)
+
+
+def test_a_macro_apportions_its_power_like_a_std_cell(tmp_path):
+    """A macro's leakage and dynamic are spread over the bins it covers, by area - in full.
+
+    The macro patch is rasterised as an outer product, and the power weight was that patch
+    divided by the box area, which is a fraction *per bin*: it sums to 1/gs2 over the box, so a
+    macro's power came out divided by the grid area. At the default 2 um grid that is a factor
+    of four, and the sample's leakage map was 2 % light because of it.
+    """
+    cell = tmp_path / "cell.json"
+    _cell(cell, "MACRO", area=36, size_x=6, size_y=6, leakage=1.0, dynamic=2.0)
+    block = _block(tmp_path, "TOP",
+                   {"m": {"cell_name": "MACRO", "location_x": 0, "location_y": 0,
+                          "leakage_power": 3.0, "dynamic_power": 6.0}},
+                   boundary=[(0, 0), (20, 20)])
+    pd_ = build_physical([block], str(cell), grid_size=2.0)
+
+    # 6x6 at (0,0) covers a 3x3 patch of 2 um bins, and density is the covered fraction.
+    assert pd_.density[:3, :3].sum() == pytest.approx(36 / 4)
+    assert pd_.leakage.sum() == pytest.approx(3.0)
+    assert pd_.dynamic.sum() == pytest.approx(6.0)
+    # ... apportioned by area, so every bin of the patch carries the same 1/9 of it.
+    assert pd_.leakage[:3, :3] == pytest.approx(3.0 / 9)
+
+
+def test_filled_power_reaches_the_power_maps(tmp_path):
+    """One record for a sub-block's leaf, four placements, four times the power on the map.
+
+    The end of the whole path: `--json` fills the converted dicts, the physical walk places that
+    block at every instance the design gives it, and the leakage grid sums to what those
+    placements carry. It is also the proof that the fill's idea of an instance path and the
+    walk's are the same one - a record the walk did not read would leave the grid at zero.
+    """
+    from vlsi_viewer.parsers.convert import fill_instances
+
+    cell = tmp_path / "cell.json"
+    _cell(cell, "C1", area=4, size_x=2, size_y=2, leakage=1.0, dynamic=2.0)
+    sub = {"top_name": "SUB",
+           "boundary": [[0, 0], [4, 0], [4, 4], [0, 4]],
+           "instances": {"u1": {"cell_name": "C1", "location_x": 0, "location_y": 0},
+                         "u2": {"cell_name": "C1", "location_x": 2, "location_y": 0}}}
+    top = {"top_name": "TOP", "boundary": [[0, 0], [20, 0], [20, 20], [0, 20]],
+           "instances": {f"b{i}": {"cell_name": "SUB", "location_x": 4 * i,
+                                   "location_y": 0, "orient": "N"} for i in range(4)}}
+    power = tmp_path / "power.json"
+    power.write_text(json.dumps({"top_name": "SUB",
+                                 "instances": {"u1": {"leakage_power": 0.5,
+                                                      "dynamic_power": 0.25}}}))
+    summary = fill_instances([top, sub], [str(power)])
+    # SUB's two leaves, placed four times each - and the four SUB instances themselves are
+    # containers, so they are not design instances to fill.
+    assert (summary.instances, summary.total) == (4, 8)
+
+    pd_ = build_physical([top, sub], str(cell), grid_size=2.0)
+
+    assert pd_.leakage.sum() == pytest.approx(4 * 0.5)
+    assert pd_.dynamic.sum() == pytest.approx(4 * 0.25)

@@ -23,7 +23,7 @@ SAMPLE = os.path.join(HERE, "sample_data")
 SHORTCUTS = {
     "json": ("sample_data/*.json", "two-version compare"),
     "physical": ("sample_data/physical/*.json", "2-D density heat map"),
-    "def": ("sample_data/eda/core.def", "DEF + LEF, heat map"),
+    "def": ("sample_data/eda/core.def", "DEF + LEF + power JSON, heat map"),
     "verilog": ("sample_data/eda/core.v", "Verilog + LEF, tree only"),
     "metal": ("sample_data/metal/*.def", "DEF + tech LEF, metal density"),
 }
@@ -48,9 +48,11 @@ def argv_for(name):
     eda = os.path.join(SAMPLE, "eda")
     if name == "def":
         # DEF carries placement, so this flow gets the heat map; drop the flag for the
-        # tree on its own.
+        # tree on its own. The DEF itself carries no power, so --json fills it in and
+        # the leakage and dynamic maps have something to draw.
         return ["def", "--def", os.path.join(eda, "core.def"),
-                "--lef", os.path.join(eda, "cells.lef"), "--physical_mode"]
+                "--lef", os.path.join(eda, "cells.lef"),
+                "--json", os.path.join(eda, "core.power.json"), "--physical_mode"]
     if name == "verilog":
         return ["verilog", "--verilog", os.path.join(eda, "core.v"),
                 "--lef", os.path.join(eda, "cells.lef"), "--top", "core"]

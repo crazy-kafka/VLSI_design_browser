@@ -12,8 +12,8 @@ import logging
 import pytest
 
 from vlsi_viewer import schema
-from vlsi_viewer.parsers.convert import (cell_info_from_lef, instance_info_from_def,
-                                         instance_info_from_verilog)
+from vlsi_viewer.parsers.convert import (cell_info_from_lef, fill_instances,
+                                         instance_info_from_def, instance_info_from_verilog)
 
 SAMPLE = "sample_data/eda"
 
@@ -480,3 +480,162 @@ def test_a_duplicate_module_warns(tmp_path, capsys):
     (tmp_path / "b.v").write_text(text)
     instance_info_from_verilog([str(tmp_path / "a.v"), str(tmp_path / "b.v")], "core")
     assert "more than one file" in capsys.readouterr().out
+
+
+# -- the --json fill --------------------------------------------------------------
+
+METAL = "sample_data/metal"
+
+
+def _fill_file(tmp_path, name, top, instances):
+    path = tmp_path / name
+    path.write_text(json.dumps({"top_name": top, "instances": instances}))
+    return str(path)
+
+
+def _metal_design():
+    """The committed two-level sample: TOP places SUB four times, at four orientations."""
+    return [instance_info_from_def(f"{METAL}/top.def"),
+            instance_info_from_def(f"{METAL}/sub.def")]
+
+
+def test_fill_power_from_a_flattened_file(tmp_path):
+    """A file whose top_name is the design itself, keyed by the names the DEF writes.
+
+    That is this sample's own shape - its DEF flattens the hierarchy into the component names -
+    so every key is an instance key and nothing has to be descended.
+    """
+    block = instance_info_from_def(f"{SAMPLE}/core.def")
+    keys = sorted(block["instances"])[:2]
+    path = _fill_file(tmp_path, "core.power.json", "core", {
+        key: {"cell_name": block["instances"][key]["cell_name"],
+              "leakage_power": 0.1, "dynamic_power": 0.3} for key in keys})
+
+    summary = fill_instances([block], [path])
+
+    assert (summary.files, summary.records, summary.matched) == (1, 2, 2)
+    assert (summary.instances, summary.total) == (2, len(block["instances"]))
+    assert summary.conflicts == 0 and summary.unusable == 0
+    for key in keys:
+        assert block["instances"][key]["leakage_power"] == 0.1
+        assert block["instances"][key]["dynamic_power"] == 0.3
+
+
+@pytest.mark.parametrize("top, key", [
+    ("SUB", "r0_0"),                 # a sub-block's own file, keyed by its leaf names
+    ("TOP", "u0/r0_0"),              # one file for the whole design, flattened
+    ("TOP", "TOP/u0/r0_0"),          # ... with the absolute path the viewer shows
+])
+def test_the_same_record_is_found_however_it_is_addressed(tmp_path, top, key):
+    """The two accepted forms, and the path a user copies out of the tree.
+
+    All three name the same instance, and one record for a sub-block's leaf has to fill *every*
+    placement of that block - four here - because the fill happens before the hierarchy is
+    expanded, which is where the placements are made.
+    """
+    blocks = _metal_design()
+    assert len(blocks[0]["instances"]) == 4          # the four placements of SUB
+    leaf = sorted(blocks[1]["instances"])[0]
+    path = _fill_file(tmp_path, "power.json", top, {key.replace("r0_0", leaf):
+                                                    {"leakage_power": 0.5}})
+
+    summary = fill_instances(blocks, [path])
+
+    assert (summary.records, summary.matched) == (1, 1)
+    assert summary.instances == 4                    # one record, four design instances
+    assert summary.total == 4 * len(blocks[1]["instances"])
+    assert blocks[1]["instances"][leaf]["leakage_power"] == 0.5
+
+
+def test_the_input_wins_a_conflict_and_agreement_is_not_one(tmp_path, caplog):
+    """The input's own attributes are facts about the design, not gaps to fill.
+
+    A record restating them is counted only where it *disagrees*: a power file that repeats the
+    cell name it was written from is not a conflict, while one naming a different cell is the
+    strongest sign the file belongs to another version - and the run says so by name.
+    """
+    block = instance_info_from_def(f"{SAMPLE}/core.def")
+    keys = sorted(block["instances"])[:2]
+    same, other = block["instances"][keys[0]], block["instances"][keys[1]]
+    path = _fill_file(tmp_path, "power.json", "core", {
+        keys[0]: {"cell_name": same["cell_name"],          # agrees: nothing to report
+                  "location_x": same["location_x"], "leakage_power": 0.2},
+        keys[1]: {"cell_name": "NOT_" + other["cell_name"], "leakage_power": 0.2}})
+
+    with caplog.at_level(logging.WARNING, logger="vlsi_viewer.parsers.convert"):
+        summary = fill_instances([block], [path])
+
+    assert summary.conflicts == 1 and summary.mismatched_cells == 1
+    assert other["cell_name"] != "NOT_" + other["cell_name"]        # the design keeps its own
+    assert other["leakage_power"] == 0.2                            # ... and gains the power
+    assert "keeps its own" in caplog.text
+
+
+def test_records_that_match_nothing_are_reported(tmp_path, caplog):
+    """A wrong file, or a wrong block, has to be visible - and cheap to diagnose.
+
+    Three shapes at once: a file naming a block this design does not have, a record under a real
+    block that names no instance, and a record naming the sub-block itself rather than a leaf of
+    it. Nothing is fatal; the counts say what was used.
+    """
+    blocks = _metal_design()
+    unknown = _fill_file(tmp_path, "unknown.json", "NOPE", {"r0_0": {"leakage_power": 1.0}})
+    mixed = _fill_file(tmp_path, "mixed.json", "TOP", {"u0": {"leakage_power": 1.0},
+                                                       "nope": {"leakage_power": 1.0}})
+
+    with caplog.at_level(logging.WARNING, logger="vlsi_viewer.parsers.convert"):
+        summary = fill_instances(blocks, [unknown, mixed])
+
+    assert (summary.files, summary.matched, summary.instances) == (2, 0, 0)
+    assert summary.total == 4 * len(blocks[1]["instances"])          # the denominator is real
+    assert "which is no block of this design" in caplog.text
+    assert "filled no instance" in caplog.text
+    assert "sub-block rather than a leaf" in caplog.text
+
+
+def test_a_value_that_is_not_a_number_is_counted_not_crashed(tmp_path, caplog):
+    """One bad value must not cost the run the other one in the same record."""
+    block = instance_info_from_def(f"{SAMPLE}/core.def")
+    key = sorted(block["instances"])[0]
+    path = _fill_file(tmp_path, "power.json", "core",
+                      {key: {"leakage_power": "not a number", "dynamic_power": 0.4}})
+
+    with caplog.at_level(logging.WARNING, logger="vlsi_viewer.parsers.convert"):
+        summary = fill_instances([block], [path])
+
+    assert summary.unusable == 1 and summary.instances == 1
+    assert block["instances"][key]["dynamic_power"] == 0.4
+    assert "leakage_power" not in block["instances"][key]
+    assert "could not be used" in caplog.text
+
+
+def test_the_filled_data_survives_the_loader(tmp_path):
+    """Why the fill is a dict operation: after `load_block` an absent attribute is 0.0.
+
+    The loader fills every schema default, so a power of zero and a power nobody supplied are the
+    same value - which is precisely what a later merge could not act on.
+    """
+    from vlsi_viewer.loader import load_block
+
+    block = instance_info_from_def(f"{SAMPLE}/core.def")
+    key = sorted(block["instances"])[0]
+    power = _fill_file(tmp_path, "power.json", "core", {key: {"leakage_power": 0.25}})
+
+    fill_instances([block], [power])
+    _name, df, _boundary = load_block(block)
+
+    row = df[df["leaf_instance_name"] == key].iloc[0]
+    assert row["leakage_power"] == 0.25
+    assert row["dynamic_power"] == 0.0               # absent, so defaulted - not a value
+
+
+def test_the_committed_power_sample_still_matches_the_def():
+    """A stale sample would fill nothing and say so only in a warning, so it is pinned here."""
+    block = instance_info_from_def(f"{SAMPLE}/core.def")
+    with open(f"{SAMPLE}/core.power.json", encoding="utf-8") as fh:
+        power = json.load(fh)
+    assert power["top_name"] == block["top_name"]
+    assert set(power["instances"]) == set(block["instances"])
+    for key, record in power["instances"].items():
+        assert record["cell_name"] == block["instances"][key]["cell_name"], key
+        assert record["leakage_power"] > 0 and record["dynamic_power"] > 0, key

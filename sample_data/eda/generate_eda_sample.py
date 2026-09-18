@@ -19,6 +19,7 @@ density map at 100%).
 
 Run:  python sample_data/eda/generate_eda_sample.py
 """
+import json
 import math
 import os
 import random
@@ -308,15 +309,36 @@ def write_verilog(path, rows):
         fh.write("\n".join(out) + "\n")
 
 
+def write_power(path, placements):
+    """The leakage/dynamic power a DEF or netlist run fills in with ``--json``.
+
+    One record per component the DEF keeps, keyed by its component name - the flattened
+    ``u0/b0/x`` the DEF writes - with values from the same activity field the floorplan uses, so
+    the leakage and dynamic heat maps have the structure the density map has rather than one flat
+    colour. The ``top_name`` is what tells a run which block the keys are relative to, which is
+    how the same file fills either this design's DEF or its netlist.
+    """
+    instances = {}
+    for name, cell, x, y, _orient in placements:
+        if cell.startswith("FILL"):
+            continue            # the DEF converter drops filler, so a record for one is dead weight
+        instances[name] = {
+            "cell_name": cell,
+            "leakage_power": round(0.02 * _activity(x, y), 5),
+            "dynamic_power": round(0.05 * _activity(x, y), 5),
+        }
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"top_name": "core", "instances": instances}, fh)
+
+
 def verify():
     """Re-parse the generated files through the converters, then the real loaders."""
-    import json
     import tempfile
 
     from vlsi_viewer import schema
     from vlsi_viewer.loader import load_block, load_cell_info
-    from vlsi_viewer.parsers.convert import (cell_info_from_lef, instance_info_from_def,
-                                             instance_info_from_verilog)
+    from vlsi_viewer.parsers.convert import (cell_info_from_lef, fill_instances,
+                                             instance_info_from_def, instance_info_from_verilog)
     from vlsi_viewer.physical import build_physical
 
     lef = os.path.join(HERE, "cells.lef")
@@ -378,6 +400,40 @@ def verify():
         assert pin_grid.sum() == expected, (pin_grid.sum(), expected)
         print(f"  verify: pin-density grid {expected} pin point(s), max "
               f"{pin_grid.max():.0f} per 2 um bin")
+
+    # `--json` fills power into a DEF or netlist run, and the values have to reach the heat maps,
+    # which is what the flag is for. The fill mutates `block` in place, so the build below is the
+    # powered one.
+    power_path = os.path.join(HERE, "core.power.json")
+    with open(power_path, encoding="utf-8") as fh:
+        power = json.load(fh)
+    assert set(power["instances"]) == set(block["instances"]), \
+        "core.power.json is stale: its records are not this DEF's components"
+    summary = fill_instances([block], [power_path])
+    assert summary.instances == summary.total == len(block["instances"]), summary
+    assert summary.conflicts == 0 and summary.unusable == 0, summary
+    with tempfile.TemporaryDirectory() as tmp:
+        cpath = os.path.join(tmp, "cell_info.json")
+        with open(cpath, "w", encoding="utf-8") as fh:
+            json.dump(cells, fh)
+        powered = build_physical([block], cpath, grid_size=2.0)
+    # Every instance's box is apportioned across the bins it covers, so the grid sums to the
+    # power of the cells that count - physical-only ones are masked out of this map by design.
+    counted = sum(i["leakage_power"] for i in block["instances"].values()
+                  if not cells[i["cell_name"]]["is_physical_only"])
+    assert abs(powered.heat("leakage").sum() - counted) < 1e-6, \
+        (powered.heat("leakage").sum(), counted)
+    print(f"  verify: core.power.json fills {summary.instances} instance(s); the leakage grid "
+          f"sums to {powered.heat('leakage').sum():.3f}")
+
+    # The netlist is the same floorplan without the physical-only cells, so the same file fills
+    # every instance it has and reports the records that name cells it does not - the partial
+    # fill the summary exists for.
+    net_summary = fill_instances([netlist], [power_path])
+    assert net_summary.instances == net_summary.total == len(netlist["instances"]), net_summary
+    assert net_summary.matched < len(power["instances"]), net_summary
+    print(f"  verify: the same file fills the netlist's {net_summary.instances} instance(s); "
+          f"{len(power['instances']) - net_summary.matched} record(s) name cells it does not have")
     print("  verify: OK")
 
 
@@ -386,10 +442,11 @@ def main():
     write_lef(os.path.join(HERE, "cells.lef"))
     write_def(os.path.join(HERE, "core.def"), placements, die)
     write_verilog(os.path.join(HERE, "core.v"), rows)
+    write_power(os.path.join(HERE, "core.power.json"), placements)
 
     filler = sum(1 for _n, cell, _x, _y, _o in placements if cell.startswith("FILL"))
     print("wrote EDA sample:")
-    print("  files: cells.lef core.def core.v")
+    print("  files: cells.lef core.def core.v core.power.json")
     print(f"  components     : {len(placements)} "
           f"({len(placements) - filler} kept + {filler} filler)")
     print(f"  blocks         : {N_UNITS} units x {N_SUB} sub-blocks, {len(rows)} rows each")

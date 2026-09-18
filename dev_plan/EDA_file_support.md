@@ -17,6 +17,10 @@ Now there are three subparsers:
 3. Read DEF and and lef, which support both physical and non-physical mode. Incremental json file reading is supported.
 (2) and (3) will generated intermediate json file, which is actually the input of (1)
 
+As built: the intermediate JSON is opt-in (`--out`), and "incremental json file reading" is
+`--json FILE...` on both flows, which fills the attributes the input cannot carry (power in
+practice) into the converted design - see `dev_plan/power_json_fill.md`.
+
 ## Development Rule
 1. Read provided file and make plan first
 2. Evaluate the necessarity whether the provided code should be rewritten or the directory structure should be modified
