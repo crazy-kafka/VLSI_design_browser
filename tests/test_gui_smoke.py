@@ -291,6 +291,32 @@ def test_mainwindow_physical(app, design, tmp_path):
     assert w._hover_label is not None
 
 
+def test_the_last_column_is_fully_visible(app, design, tmp_path):
+    """Density% is the last column in physical mode, and it must not be the one that pays.
+
+    Qt's default for a tree view stretches the last section, and with that on Qt never shrinks it:
+    the column stayed at the width it was created with while the other twelve shared the rest, so
+    the header overflowed the pane by exactly that difference and the column's right edge - where
+    the value's tail is, the bar cells being right-aligned - sat behind the scrollbar. The pane
+    looks like it has room because the overflow went to the *other* stretch columns.
+    """
+    w = MainWindow(design, physical=_tiny_physical(tmp_path))
+    try:
+        w.resize(1920, 900)
+        w.show()
+        _pump_events(app)
+        w.centralWidget().setSizes([1130, 790])      # the pane width the report came from
+        _pump_events(app)
+
+        tree, header = w._tree, w._tree.header()
+        last = tree.columnCount() - 1
+        assert tree.topLevelItem(0).text(last).endswith("%")     # the column under test is there
+        assert tree.horizontalScrollBar().maximum() == 0
+        assert header.sectionPosition(last) + header.sectionSize(last) <= tree.viewport().width()
+    finally:
+        w.close()
+
+
 def test_layout_hover_reports_coords_and_grid(app, tmp_path):
     from PyQt5.QtCore import QPointF
     from vlsi_viewer.ui_layout import LayoutView

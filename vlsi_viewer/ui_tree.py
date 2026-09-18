@@ -185,6 +185,14 @@ class HierarchyTree(QTreeWidget):
         self.header().setSectionResizeMode(0, QHeaderView.Interactive)
         for ci in range(1, len(labels)):
             self.header().setSectionResizeMode(ci, QHeaderView.Stretch)
+        # ... and the last of them takes its share like the rest. Qt's default for a tree view is
+        # to stretch the last section, and with that on Qt never *shrinks* it: it stays at the
+        # width the column was created with while the other stretch columns share what is left, so
+        # the header overflows the viewport by exactly that difference and the last column -
+        # Density% in physical mode - loses its right edge, where the value's tail is, to the
+        # scrollbar that appears. Only a tree that is not populated yet has a single column, and
+        # that one does want the whole width.
+        self.header().setStretchLastSection(len(labels) == 1)
         for path in self._view.roots:
             self.addTopLevelItem(self._make_item(path))
         self.header().setSortIndicator(self._sort_column, self._sort_order)

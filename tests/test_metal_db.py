@@ -93,6 +93,17 @@ def _as_v1(path, **edits):
         np.savez_compressed(handle, **payload)
 
 
+@pytest.fixture(scope="module")
+def whole():
+    """One full build of both sample DEFs, shared by the tests that need a reference map.
+
+    It is the slow part of this file - a build is ~0.7 s, and seven tests wanted the same one and
+    threw it away. Nothing mutates it: every test that edits a DEF or a db edits a copy under
+    `tmp_path`, which is why one build can serve them all.
+    """
+    return _build([TOP, SUB])
+
+
 def _db_paths(directory):
     return [os.path.join(str(directory), name)
             for name in sorted(os.listdir(str(directory)))]
@@ -233,7 +244,7 @@ def test_a_layer_range_that_differs_refuses_the_db(tmp_path, caplog, dumped_rang
     assert again.totals == fresh.totals
 
 
-def test_the_sub_block_dump_workflow(tmp_path):
+def test_the_sub_block_dump_workflow(tmp_path, whole):
     """The parallel-dump path: a top-only dump, then each sub-block dumped against the parent's
     *db* rather than the parent's DEF - and the two together equal the one-shot build.
 
@@ -242,7 +253,6 @@ def test_the_sub_block_dump_workflow(tmp_path):
     happens here, when the sub-block's DEF arrives.
     """
     dbs = tmp_path / "dbs"
-    whole = _build([TOP, SUB])
     _build([TOP], dump_db=str(dbs))                       # the top alone: SUB is not a block yet
     assert sorted(os.listdir(str(dbs))) == ["top.def.db"]
 
@@ -259,7 +269,7 @@ def test_the_sub_block_dump_workflow(tmp_path):
     assert again.rows == whole.rows and again.cols == whole.cols
 
 
-def test_a_bare_sub_dump_is_placed_by_the_design_that_loads_it(tmp_path):
+def test_a_bare_sub_dump_is_placed_by_the_design_that_loads_it(tmp_path, whole):
     """The 09-17 workflow: a sub-block dumped with no parent at all, then assembled by a design.
 
     Its db records the placement the dumping run saw - its own origin - so its *grids* are
@@ -269,8 +279,16 @@ def test_a_bare_sub_dump_is_placed_by_the_design_that_loads_it(tmp_path):
     sub-block's wiring at (0, 0).
     """
     dbs = tmp_path / "dbs"
-    whole = _build([TOP, SUB])
     _build([SUB], dump_db=str(dbs))                       # no parent: SUB is its own root
+    # The premises, so the pass below cannot be vacuous: the dump really was written for one
+    # placement at the block's own origin, and it really holds fewer shapes than the design that
+    # places it four times. `emitted` and three layer columns are counted per *placement*, so a
+    # replay has to move them - and `_same_map` compares all of them against the one-shot parse,
+    # which is where a missing rescale would show as a summary saying one and a table saying four.
+    sub_db = metal_db.load(str(dbs / "sub.def.db"))
+    assert [tuple(frame)[0] for frame in sub_db.frames] == ["N"]
+    assert sub_db.header["totals"]["emitted"] < whole.totals["emitted"]
+
     again = _build([TOP], db_paths=_db_paths(dbs))
     assert again.reused == [] and again.replayed == ["SUB"]
     assert again.warnings == []
@@ -278,7 +296,7 @@ def test_a_bare_sub_dump_is_placed_by_the_design_that_loads_it(tmp_path):
     assert again.cell_detail(3, 3, whole.kinds()[0][0]) == whole.cell_detail(3, 3, whole.kinds()[0][0])
 
 
-def test_the_hierarchy_dumps_and_assembles_across_processes(tmp_path, monkeypatch):
+def test_the_hierarchy_dumps_and_assembles_across_processes(tmp_path, monkeypatch, whole):
     """The hierarchical case, end to end: two blocks, two independent dump jobs, each with a pool
     and neither naming a parent - then one run over the two dbs with no DEFs at all.
 
@@ -290,7 +308,6 @@ def test_the_hierarchy_dumps_and_assembles_across_processes(tmp_path, monkeypatc
     """
     _force_pool(monkeypatch)
     dbs = tmp_path / "dbs"
-    whole = _build([TOP, SUB])
     _build([SUB], dump_db=str(dbs), jobs=2)              # the sub-block alone, pooled
     assert sorted(os.listdir(str(dbs))) == ["sub.def.db"]
     _build([TOP], dump_db=str(dbs), jobs=2)              # the top alone, its own job
@@ -315,24 +332,6 @@ def test_the_hierarchy_dumps_and_assembles_across_processes(tmp_path, monkeypatc
     assert again.cell_detail(3, 3, kind) == whole.cell_detail(3, 3, kind)
 
 
-def test_the_replay_carries_the_placements_it_was_dumped_at(tmp_path):
-    """A block dumped on its own was placed once and is placed four times here.
-
-    Two things in a db are counted per placement rather than per parse - `emitted`, and the three
-    columns that count shapes in the layer table - so a replay into a different placement count has
-    to move them, or the summary says one and the table says four.
-    """
-    dbs = tmp_path / "dbs"
-    whole = _build([TOP, SUB])
-    _build([SUB], dump_db=str(dbs))
-    sub_db = metal_db.load(str(dbs / "sub.def.db"))
-    assert [tuple(frame)[0] for frame in sub_db.frames] == ["N"]   # one placement: its own origin
-    assert sub_db.header["totals"]["emitted"] < whole.totals["emitted"]
-
-    again = _build([TOP], db_paths=_db_paths(dbs))
-    assert again.totals["emitted"] == whole.totals["emitted"]
-
-
 def test_a_dump_passes_through_the_dbs_it_reused(tmp_path):
     """A dump directory holds one db per block, whichever way the block got there.
 
@@ -348,18 +347,6 @@ def test_a_dump_passes_through_the_dbs_it_reused(tmp_path):
     assert sorted(os.listdir(str(second))) == ["sub.def.db", "top.def.db"]
     for name in ("sub.def.db", "top.def.db"):
         assert (second / name).read_bytes() == (first / name).read_bytes(), name
-
-
-def test_an_unreadable_db_is_reported_and_ignored(tmp_path):
-    """A truncated or foreign file is a reason to parse, not a crash and not a silent skip."""
-    dbs = tmp_path / "dbs"
-    dbs.mkdir()
-    (dbs / "top.def.db").write_bytes(b"not an npz at all")
-    fresh = _build([TOP, SUB])
-    again = _build([TOP, SUB], db_paths=_db_paths(dbs))
-    assert again.reused == []
-    assert any("ignoring db" in warning for warning in again.warnings)
-    assert again.totals == fresh.totals
 
 
 def test_a_cancelled_build_writes_no_db(tmp_path, monkeypatch):
@@ -393,7 +380,7 @@ def test_a_version_from_another_build_is_refused(tmp_path):
     assert "TOP" not in again.reused and "SUB" in again.reused
 
 
-def test_an_old_style_db_still_loads_and_is_still_refused_by_placement(tmp_path):
+def test_an_old_style_db_still_loads_and_is_still_refused_by_placement(tmp_path, whole):
     """Both halves of keeping the v1 reader, on a v1 db.
 
     A db written before the geometry section is an npz with grids and no shapes, so every check it
@@ -402,7 +389,6 @@ def test_an_old_style_db_still_loads_and_is_still_refused_by_placement(tmp_path)
     the refusal the geometry section replaced for the container that has shapes in it.
     """
     dbs = tmp_path / "dbs"
-    whole = _build([TOP, SUB])
     _build([TOP, SUB], dump_db=str(dbs))
     for name in ("top.def.db", "sub.def.db"):
         _as_v1(dbs / name)
@@ -423,11 +409,16 @@ def test_an_old_style_db_still_loads_and_is_still_refused_by_placement(tmp_path)
     _same_map(partial, top_only)
 
 
-def test_a_truncated_db_is_reported_and_the_others_still_work(tmp_path):
-    """A file that stops half way is a reason to parse, not a crash and not a silent skip: the
-    reader finds no footer where it expects one and the caller re-reads that DEF."""
+def test_a_truncated_db_is_reported_and_the_others_still_work(tmp_path, whole):
+    """A file the reader cannot make sense of is a reason to parse, not a crash and not a silent
+    skip: it finds no footer where it expects one, says so by name, and that DEF is read again.
+
+    Truncation stands for the whole family - a foreign file and a half-written one fail in the
+    same place, on the header the reader looks for - so what is left to pin is the consequence,
+    which is why this test also checks the db *beside* the broken one still loads: a run handed a
+    directory of dbs parses only what it has to.
+    """
     dbs = tmp_path / "dbs"
-    fresh = _build([TOP, SUB])
     _build([TOP, SUB], dump_db=str(dbs))
     path = dbs / "top.def.db"
     data = path.read_bytes()
@@ -436,8 +427,8 @@ def test_a_truncated_db_is_reported_and_the_others_still_work(tmp_path):
     again = _build([TOP, SUB], db_paths=_db_paths(dbs))
     assert again.reused == ["SUB"]
     assert any("ignoring db top.def.db" in warning for warning in again.warnings)
-    assert again.totals == fresh.totals
-    for key, grid in fresh._grids.items():
+    assert again.totals == whole.totals
+    for key, grid in whole._grids.items():
         assert np.array_equal(np.asarray(again._grids[key]), np.asarray(grid)), key
 
 

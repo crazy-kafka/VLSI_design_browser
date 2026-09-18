@@ -97,3 +97,28 @@ exceeded a ~29ms tick gap (no sustained GUI stall).
   test.
 - Manual: physical mode -> click a core/sub-block -> dashed contour appears;
   click again hides it; "Density%" column shows the gradient bar.
+
+## Later: the Density% column was being cut off (2026-09-18)
+
+Reported from a screenshot: the last column rendered as `54` where `54.29%` should be, with the pane
+visibly holding empty space. Reproduced offscreen on the EDA sample at that pane's width (1126 px
+viewport, 13 columns): `header().length()` 1150, the last column 104 px wide where its share was 80,
+a 24 px horizontal scrollbar, and the value's tail behind it.
+
+Cause: `HierarchyTree.rebuild()` set column 0 `Interactive` and the metric columns `Stretch`, but
+never touched `stretchLastSection` — on by Qt's default for a tree view — and with it on Qt never
+*shrinks* the last section. That column stayed at the 104 px it was created with while the other
+twelve shared the rest, so the header overflowed the viewport by exactly the difference. The free
+space the report noticed went to the *other* stretch columns, which is why the pane could look empty
+while the last column was still cut.
+
+Fix: one line in `ui_tree.py:rebuild()`, `self.header().setStretchLastSection(len(labels) == 1)` —
+the last metric column takes its share like the rest, and only a not-yet-populated tree (a single
+column) stretches. It covers all four tables, since `ui_main.py:49` and `ui_compare.py:11-13` all
+build `HierarchyTree`. Content-sizing the columns instead would be O(rows x columns) per rebuild,
+which the earlier note in this file (`per-expand resizeColumnToContents` removed) is a standing
+reason to avoid.
+
+After: header 1126 = viewport, scrollbar 0, all 13 columns 80-81 px, `Density%` cell `60.49%` inside
+the viewport. `tests/test_gui_smoke.py::test_the_last_column_is_fully_visible` pins it; removing the
+line makes it fail with the measured 24 px scrollbar.
