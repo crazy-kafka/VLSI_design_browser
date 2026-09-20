@@ -703,6 +703,7 @@ def test_a_byte_range_pool_produces_the_same_map_as_one_process(monkeypatch):
     sequential = _build(1)
     strided = _build(3, monkeypatch)
     monkeypatch.setattr(parallel, "RANGE_WORK_UNITS", True)
+    monkeypatch.setattr(parallel, "RANGE_MIN_JOBS", 1)  # the tests run at jobs 2-3
     ranged = _build(3, monkeypatch)
     assert ranged.totals == sequential.totals == strided.totals
     assert ranged.stats["forms"] == sequential.stats["forms"]
@@ -723,6 +724,7 @@ def test_a_scan_that_miscounts_is_caught_rather_than_measured(monkeypatch):
     """
     _force_pool(monkeypatch, chunk=250)
     monkeypatch.setattr(parallel, "RANGE_WORK_UNITS", True)
+    monkeypatch.setattr(parallel, "RANGE_MIN_JOBS", 1)  # the tests run at jobs 2-3
     real = parallel.scan_work_units
 
     def lossy(path):
@@ -741,6 +743,7 @@ def test_a_gzipped_def_is_unpacked_once_and_removed_again(tmp_path, monkeypatch)
 
     _force_pool(monkeypatch, chunk=250)
     monkeypatch.setattr(parallel, "RANGE_WORK_UNITS", True)
+    monkeypatch.setattr(parallel, "RANGE_MIN_JOBS", 1)  # the tests run at jobs 2-3
     body = open(os.path.join(SAMPLE, "sub.def")).read()
     packed = tmp_path / "sub.def.gz"
     with gzip.open(str(packed), "wt", newline="\n") as handle:

@@ -88,11 +88,17 @@ BYTES_PER_WORKER = 8 << 20
 _CAP_A, _CAP_Z, _DASH, _SPACE = ord("A"), ord("Z"), ord("-"), (32, 9)
 # Whether the pool splits the file by byte range (one scan in the parent, each worker reading only
 # its own share) instead of by statement count (every worker scanning the whole file and keeping
-# one statement in `jobs`). Both produce the same map; the difference is what they cost. Off while
-# the change is being evaluated - see `dev_plan/metal_work_units_eval.md` - and a constant rather
-# than a flag so a test and the benchmark can run both splits in one process, the way
-# `BYTES_PER_WORKER` and `DEFAULT_CHUNK_STATEMENTS` are set.
-RANGE_WORK_UNITS = False
+# one statement in `jobs`). Both produce the same map; the difference is what they cost. The
+# evaluation (`dev_plan/metal_work_units_eval.md`) failed the pre-registered bar on the fixture
+# (1.19-1.23x at 8 workers, a regression at 2) but projects 1.67-1.9x on the real design, whose
+# imbalance is three times the fixture's - and its own guidance is "if it is enabled, do it for
+# jobs >= 4 only", which is what `RANGE_MIN_JOBS` does: at 2-3 workers the parent's serial scan
+# is not repaid (measured), at 4+ it is. Constants rather than flags so a test and the benchmark
+# can run both splits in one process, the way `BYTES_PER_WORKER` and `DEFAULT_CHUNK_STATEMENTS`
+# are set. The measurement that settles the projection is the next `--jobs 8` run on the real
+# design, compared against the 0915/0916 logs.
+RANGE_WORK_UNITS = True
+RANGE_MIN_JOBS = 4
 # How often the parent re-reads the caller's `cancel` while the workers run. The workers read the
 # shared byte themselves - once per input line - so this is only the delay between the caller's
 # flag going up and the byte moving, and it is already far inside the 30 s heartbeat the
@@ -213,8 +219,9 @@ def scan_work_units(path: str) -> WorkUnits:
                 # Capital-initial lines can end a statement early, open a section or extend the
                 # preamble; an indented line can open a statement, which real tools indent. Both
                 # are rare compared with the lines above, which is what makes decoding them here
-                # affordable.
-                line = raw.decode()
+                # affordable. Decoded lines are newline-normalised the way the text-mode readers'
+                # are, so a CRLF file records the same preamble/rules a reader would.
+                line = raw.decode().replace("\r\n", "\n")
                 name = line.split(maxsplit=1)[0] if line.strip() else ""
                 if line.startswith("END "):
                     if in_rules:
@@ -249,7 +256,7 @@ def scan_work_units(path: str) -> WorkUnits:
                 # Anything else capital-initial is either a continuation of an open statement or
                 # a line inside a section, and falls through to the same handling as any other.
             if in_rules:
-                rules.append(raw.decode())
+                rules.append(raw.decode().replace("\r\n", "\n"))
             elif section is not None:
                 if not open_statement:
                     # `- name`, or an indented one, which is how real tools write a net statement.
@@ -265,7 +272,7 @@ def scan_work_units(path: str) -> WorkUnits:
                     if is_net:
                         found[section] = found.get(section, 0) + 1
             elif not skipping:
-                preamble.append(raw.decode())
+                preamble.append(raw.decode().replace("\r\n", "\n"))
             offset += len(raw)
     info = os.stat(path)
     return WorkUnits(starts, sections, preamble, rules, design, declared, found, lines,
@@ -916,7 +923,7 @@ def parse_parallel(path: str, design: str, tech: TechRouting, frames, min_segmen
             watcher.start()
     # One scan here, or a scan in every worker: either way the workers read `read_path`.
     read_path, units, temporary = (path, None, None)
-    if RANGE_WORK_UNITS and jobs > 1:
+    if RANGE_WORK_UNITS and jobs >= RANGE_MIN_JOBS:
         read_path, units, temporary = _work_units(path, work_dir)
         if units.odd_endings:
             # A lone CR is a line ending to text mode and not to this binary scan, so the offsets

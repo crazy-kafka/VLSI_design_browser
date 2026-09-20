@@ -187,13 +187,15 @@ def parse_args(argv=None):
     p.add_argument("--min-segment-length", type=float, default=None, metavar="N",
                    help="drop non-preferred-direction jogs shorter than N um; default is "
                         "each layer's track pitch, 0 keeps every jog")
-    p.add_argument("--jobs", type=int, default=1, metavar="N",
-                   help="processes to use for the wiring pass (default: %(default)s). The pass "
+    p.add_argument("--jobs", type=int, default=None, metavar="N",
+                   help="processes to use for the wiring pass (default: min(cores, 8); "
+                        "--jobs 1 keeps everything in one process). The pass "
                         "is per-net work with no dependency between nets, so it scales nearly "
-                        "linearly with cores; 1 keeps everything in one process. It is a cap "
+                        "linearly with cores. It is a cap "
                         "rather than an instruction - a small DEF is parsed in one process "
-                        "whatever you ask for - and every worker re-reads the whole file, so "
-                        "match it to the cores you were allocated rather than to your host")
+                        "whatever you ask for - and from four workers up each one reads only "
+                        "its own byte range of the file. Match it to the cores you were "
+                        "allocated rather than to your host")
     p.add_argument("--profile", nargs="?", const="", metavar="PSTATS",
                    help="time the build with cProfile and print the top 15 by self time; "
                         "optionally write a .pstats file. The wall clock it reports is "
@@ -377,6 +379,9 @@ def _run_metal(args):
         print("error: --dump_only needs --dump-db DIR to write into", file=sys.stderr)
         return 1
     def_files = list(args.def_files or ())
+    # Auto: the pool pays off from a few cores up, and `effective_workers` caps it by
+    # input size, so a small DEF still parses in one process. --jobs 1 opts out.
+    jobs = args.jobs if args.jobs is not None else min(os.cpu_count() or 1, 8)
     logger.info("metal: reading %d DEF file(s)%s", len(def_files),
                 f" and {len(args.db_files)} db(s)" if args.db_files else "")
     try:
@@ -385,7 +390,7 @@ def _run_metal(args):
                            macro_block_layers=args.macro_block_layers,
                            min_segment=args.min_segment_length, top=args.top,
                            on_progress=lambda message: logger.info("metal: %s", message),
-                           cancel=stop.is_set, jobs=args.jobs,
+                           cancel=stop.is_set, jobs=jobs,
                            min_layer=args.min_layer, max_layer=args.max_layer,
                            db_paths=args.db_files, dump_db=args.dump_db)
     except Exception as exc:  # surface load errors on the CLI, no window needed
