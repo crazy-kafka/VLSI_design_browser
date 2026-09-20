@@ -218,6 +218,68 @@ def test_contour_stale_token_ignored(app, tmp_path):
     assert len(view._contour_items) == 1
 
 
+class _FakePhysical:
+    """Just enough of PhysicalData to run model jobs against."""
+
+    def __init__(self):
+        self.calls = []
+
+    def contour_for(self, path, abort_check=None):
+        self.calls.append(path)
+        return []
+
+    def density_for(self, path):
+        self.calls.append(path)
+        return 0.5
+
+
+def test_contour_worker_tracks_the_latest_token(app):
+    """request() records the newest token; is_stale answers for the rest."""
+    from vlsi_viewer.model import ContourWorker
+    worker = ContourWorker()
+    worker._pool.start = lambda job: None      # queue nowhere; test the bookkeeping
+    worker.request(object(), "TOP", 3)
+    assert worker._latest_token == 3
+    worker.request(object(), "TOP/a", 2)       # out of order: the max still wins
+    assert worker._latest_token == 3
+    assert worker.is_stale(2) and not worker.is_stale(3)
+
+
+def test_contour_job_drops_stale_before_computing(app):
+    """A superseded job never computes and never emits, not just never draws."""
+    from vlsi_viewer.model import ContourWorker, _ContourJob
+    worker = ContourWorker()
+    seen = []
+    worker.contour_ready.connect(lambda *args: seen.append(args))
+    worker._latest_token = 2                   # as if two requests had arrived
+    phys = _FakePhysical()
+    _ContourJob(phys, "TOP", 1, worker).run()  # the stale one, first in the FIFO
+    assert phys.calls == [] and seen == []
+    _ContourJob(phys, "TOP", 2, worker).run()
+    assert phys.calls == ["TOP"] and len(seen) == 1
+
+
+def test_density_job_waits_out_interaction(app):
+    """Background density computes after a quiet beat, never mid-gesture."""
+    import time
+    from PyQt5.QtCore import QThread
+    from vlsi_viewer import model
+    model._INTERACT_UNTIL = 0.0                # other tests' views bumped it
+    t0 = time.perf_counter()
+    model._wait_for_idle()                     # no interaction recorded: returns at once
+    assert time.perf_counter() - t0 < 0.1
+    lazy = model._LazyDensity(_FakePhysical())
+    model.note_interaction(hold_s=0.15)
+    t0 = time.perf_counter()
+    model._DensityJob(lazy._physical, "TOP", lazy).run()
+    try:
+        assert time.perf_counter() - t0 >= 0.12
+        assert lazy._cache["TOP"] == 0.5       # and the value still landed
+    finally:
+        # run() sets the current thread's priority; the tests share this thread.
+        QThread.currentThread().setPriority(QThread.NormalPriority)
+
+
 def test_layout_legend_overlay(app, tmp_path):
     from vlsi_viewer.ui_layout import LayoutView
     pd_ = _tiny_physical(tmp_path)

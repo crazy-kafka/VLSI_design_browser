@@ -91,3 +91,11 @@ def test_loops_are_closed():
     boxes = [(0.0, 0.0, 1.0, 1.0)]
     for loop in _loops(boxes, 0.0):
         assert loop[0] == loop[-1]          # first == last (closed ring)
+
+
+def test_contour_loops_abort_check():
+    """A superseded computation raises ContourAborted instead of producing loops."""
+    boxes = [(0.0, 0.0, 1.0, 1.0), (2.0, 0.0, 3.0, 1.0)]
+    with pytest.raises(C.ContourAborted):
+        C.contour_loops(boxes, 0.0, abort_check=lambda: True)
+    assert len(C.contour_loops(boxes, 0.0, abort_check=lambda: False)) == 2

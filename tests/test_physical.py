@@ -225,6 +225,41 @@ def test_boundary_polys_collected(tmp_path):
     assert min(x for x, _ in sub_poly) == 10.0
 
 
+def test_merged_sets_match_the_box_slice(tmp_path):
+    """The bottom-up cache is exact: every node's merged set spans its subtree's union."""
+    from vlsi_viewer import contour
+    cell = tmp_path / "cell.json"
+    _cell(cell, "C1", area=4, size_x=2, size_y=2)
+    top = _block(tmp_path, "TOP", {"a": {"cell_name": "C1", "location_x": 0, "location_y": 0},
+                                   "b": {"cell_name": "B", "location_x": 10, "location_y": 0}},
+                 boundary=[(0, 0), (20, 20)], fname="top.json")
+    sub = _block(tmp_path, "B", {"c": {"cell_name": "C1", "location_x": 0, "location_y": 0}},
+                 boundary=[(0, 0), (6, 6)], fname="sub.json")
+    pd_ = build_physical([top, sub], str(cell), grid_size=4.0)
+    for path in ("TOP", "TOP/b"):
+        assert contour.union_area(pd_._merged[path]) == pytest.approx(
+            contour.contour_area(pd_.boxes_for(path), pd_.contour_gap))
+        assert pd_._contour_area(path, pd_.contour_gap) == pytest.approx(
+            contour.contour_area(pd_.boxes_for(path), pd_.contour_gap))
+
+
+def test_contour_for_abort_is_not_cached(tmp_path):
+    """An aborted contour raises without poisoning the cache; the next call computes."""
+    from vlsi_viewer import contour
+    cell = tmp_path / "cell.json"
+    _cell(cell, "C1", area=4, size_x=2, size_y=2)
+    b = _block(tmp_path, "TOP",
+               {"c": {"cell_name": "C1", "location_x": 0, "location_y": 0,
+                      "leakage_power": 1.0, "dynamic_power": 2.0}},
+               boundary=[(0, 0), (20, 20)])
+    pd_ = build_physical([b], str(cell), grid_size=4.0)
+    with pytest.raises(contour.ContourAborted):
+        pd_.contour_for("TOP", abort_check=lambda: True)
+    assert ("loops", "TOP", pd_.contour_gap) not in pd_._contour_cache
+    assert pd_.contour_for("TOP")          # computes fresh, and caches
+    assert ("loops", "TOP", pd_.contour_gap) in pd_._contour_cache
+
+
 @pytest.mark.parametrize("where", ["cell", "instance"])
 def test_physical_only_is_density_only(tmp_path, where):
     """Physical-only area is real area: it raises density and nothing else.
