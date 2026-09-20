@@ -91,6 +91,17 @@ class CompiledRe:
         rf'{WIRE_VIRTUAL}|{WIRE_RECT}|{WIRE_POINT}|(?P<via>{NAME})'
         rf'(?:\s+(?P<via_orient>{ORIENT_CODE}))?')
 
+    # The point pattern alone, for tails that hold routing points and nothing else -
+    # via arrays and whole power nets are the bulk of a chip-level DEF's text, and the
+    # full token pattern pays for its via/RECT/VIRTUAL alternatives at every match.
+    # The parser substitutes every point away and falls back to `re_wire_token` when
+    # anything non-whitespace remains, so nothing is ever dropped silently.
+    re_points_tail = re.compile(WIRE_POINT)
+    # A character that cannot appear inside a routing point, so its presence means the
+    # tail holds a via name (or RECT/VIRTUAL/keywords) and the point-only scan has
+    # nothing to win. NAME's alphabet minus the digits: [_\w\d\/\[\]] - \d.
+    re_word_char = re.compile(r'[A-Za-z_/\[\]]')
+
     # A wiring form starts at its keyword and runs to the next form (or the next
     # non-wiring clause). Layer names may carry '[]' or '.'; widths are positive.
     WIRE_LAYER = r'[A-Za-z_][\w\[\]\/.]*'

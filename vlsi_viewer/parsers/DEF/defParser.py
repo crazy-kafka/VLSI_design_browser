@@ -461,6 +461,14 @@ class DefParser:
         # making (a regex call per form on every DEF costs more than the scan it guards).
         if '*' in tail:
             tail = CompiledRe.re_glued_star.sub(' ', tail)
+        if (len(tail) >= 48
+                and CompiledRe.re_word_char.search(tail) is None):
+            # A tail with no via-name character may be nothing but points - via
+            # arrays and whole power nets, the bulk of a chip-level DEF. Short
+            # tails do not repay the dispatch (measured); lettered ones cannot win.
+            pure = self.__points_only(tail, last)
+            if pure is not None:
+                return pure
         for token in CompiledRe.re_wire_token.finditer(tail):
             # One `group` call per token rather than one per field: `group` is a C method with
             # an argument parse and a return-tuple build, and a real design's read makes
@@ -501,6 +509,32 @@ class DefParser:
                     # per matched word. No metric path reads a via name.
                     continue
                 out.append(('via', name, orientation))
+        return out
+
+    def __points_only(self, tail: AnyStr, last: List) -> Union[List[Tuple], None]:
+        """The token list for a tail that holds routing points and nothing else.
+
+        Via arrays and whole power nets - the bulk of a chip-level DEF's text - have
+        tails like that, and the point pattern alone scans them ~1.2x cheaper than
+        the full tokeniser (no via/RECT/VIRTUAL alternatives, ``findall``'s C-level
+        extraction instead of a ``group()`` call per token). The substitution is the
+        coverage check: strip every point, and anything left that is not whitespace
+        means the tail held something else - a digit-named via, junk - and the caller
+        falls back to the full tokeniser, so nothing is ever dropped silently.
+        ``last`` is written back only on success: a fallback must see it untouched.
+        """
+        if CompiledRe.re_points_tail.sub('', tail).strip():
+            return None
+        local = [last[0], last[1]]
+        out = []
+        append = out.append
+        for xs, ys, exts in CompiledRe.re_points_tail.findall(tail):
+            x = self.__resolve_coord(xs, local, 0)
+            y = self.__resolve_coord(ys, local, 1)
+            local[0], local[1] = x, y
+            # findall answers '' where a group() would answer None.
+            append(('pt', x, y, int(exts) if exts else None))
+        last[0], last[1] = local
         return out
 
     @staticmethod
