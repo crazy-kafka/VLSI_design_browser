@@ -25,6 +25,14 @@ logger = logging.getLogger(__name__)
 logger.info("contour backend: shapely")
 
 
+class ContourAborted(Exception):
+    """An ``abort_check`` reported the work stale mid-computation.
+
+    Raised out of the union before any result is produced, so nothing caches or
+    emits a partial answer. Callers (the contour worker) treat it as "drop silently".
+    """
+
+
 def _expanded(boxes, gap):
     """Each box padded by ``gap/2`` so within-gap instances merge into one loop.
 
@@ -74,9 +82,16 @@ def merge_boxes(boxes):
     return list(merged[["x0", "y0", "x1", "y1"]].itertuples(index=False, name=None))
 
 
-def _union(boxes, gap):
-    """Union geometry of ``boxes`` padded by ``gap/2`` (pre-merged)."""
+def _union(boxes, gap, abort_check=None):
+    """Union geometry of ``boxes`` padded by ``gap/2`` (pre-merged).
+
+    ``abort_check`` is consulted once between the merge and the union - the two
+    expensive stages - and raises :class:`ContourAborted` when it reports the work
+    has been superseded.
+    """
     expanded = merge_boxes(_expanded(boxes, gap))
+    if abort_check is not None and abort_check():
+        raise ContourAborted
     return _unary_union([_sbox(*b) for b in expanded])
 
 
@@ -104,9 +119,13 @@ def contour_geometry(boxes, gap=0.0):
     return geom_loops_area(_union(boxes, gap))
 
 
-def contour_loops(boxes, gap=0.0):
-    """Closed outline loop(s) around ``boxes``, bridging gaps < ``gap``."""
-    return geom_loops_area(_union(boxes, gap))[0]
+def contour_loops(boxes, gap=0.0, abort_check=None):
+    """Closed outline loop(s) around ``boxes``, bridging gaps < ``gap``.
+
+    ``abort_check`` may raise :class:`ContourAborted` mid-computation; see
+    :func:`_union`.
+    """
+    return geom_loops_area(_union(boxes, gap, abort_check))[0]
 
 
 def contour_area(boxes, gap=0.0):

@@ -76,9 +76,12 @@ class LayoutView(QWidget):
         self._contour_items = []
         self._contour_path = None
         self._contour_token = 0
-        from .model import ContourWorker
+        from .model import ContourWorker, note_interaction
         self._contour_worker = ContourWorker()
         self._contour_worker.contour_ready.connect(self._on_contour_ready)
+        # Zoom/pan/fit all change the device range; background density waits out the
+        # interaction rather than competing with the repaint for the GIL.
+        self._view.sigDeviceRangeChanged.connect(lambda *_: note_interaction())
 
         root = QVBoxLayout(self)
         if not external_controls:

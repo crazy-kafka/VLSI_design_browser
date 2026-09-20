@@ -112,8 +112,12 @@ class PhysicalData:
         sl = self._slice_for(path)
         return self._geom[sl][~self._is_phys_only[sl]]
 
-    def _contour(self, path: str, gap: float):
-        """Cached contour loops for a path at a gap (thread-safe)."""
+    def _contour(self, path: str, gap: float, abort_check=None):
+        """Cached contour loops for a path at a gap (thread-safe).
+
+        ``abort_check`` is forwarded to the union; a :class:`contour.ContourAborted`
+        it triggers propagates without being cached.
+        """
         from . import contour
         key = ("loops", path, gap)
         with self._contour_lock:
@@ -122,7 +126,7 @@ class PhysicalData:
                 return cached
         boxes = self.boxes_for(path)
         t0 = time.perf_counter()
-        loops = contour.contour_loops(boxes, gap)
+        loops = contour.contour_loops(boxes, gap, abort_check=abort_check)
         with self._contour_lock:
             self._contour_cache[key] = loops
         logger.info("contour: %s (gap %g, %d boxes) -> %d loop(s) (%.1fs)",
@@ -146,9 +150,13 @@ class PhysicalData:
                     path, gap, len(boxes), area, time.perf_counter() - t0)
         return area
 
-    def contour_for(self, path: str):
-        """Closed contour loops for a hierarchy path (cached)."""
-        return self._contour(path, self.contour_gap)
+    def contour_for(self, path: str, abort_check=None):
+        """Closed contour loops for a hierarchy path (cached).
+
+        ``abort_check`` lets a caller (the contour worker) abandon a computation
+        that a newer request has superseded; see :func:`contour.contour_loops`.
+        """
+        return self._contour(path, self.contour_gap, abort_check=abort_check)
 
     def density_for(self, path: str) -> float:
         """Hierarchy density = non_macro_area / (contour_area - macro_area).

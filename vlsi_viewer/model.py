@@ -2,17 +2,40 @@
 import fnmatch
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Callable, List
 
 import numpy as np
 import pandas as pd
-from PyQt5.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
+from PyQt5.QtCore import QObject, QRunnable, QThread, QThreadPool, pyqtSignal
 
 from . import schema
 from .metrics import diff_table
 
 logger = logging.getLogger(__name__)
+
+# Interaction throttle for progressive background work. ``note_interaction`` is called
+# from GUI event handlers (zoom/pan/fit); density jobs wait for a quiet beat before
+# computing so a paint tick never competes with a pandas/GEOS call for the GIL. A plain
+# module attribute: there is one GUI thread writing it and workers only read it.
+_INTERACT_UNTIL = 0.0
+INTERACT_HOLD_S = 0.25
+
+
+def note_interaction(hold_s: float = INTERACT_HOLD_S) -> None:
+    """Record user interaction; background density waits ``hold_s`` past the last one."""
+    global _INTERACT_UNTIL
+    _INTERACT_UNTIL = time.perf_counter() + hold_s
+
+
+def _wait_for_idle() -> None:
+    """Block a worker thread until interaction has been quiet for ``INTERACT_HOLD_S``."""
+    while True:
+        remaining = _INTERACT_UNTIL - time.perf_counter()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.05, remaining))
 
 
 @dataclass
@@ -103,6 +126,10 @@ class _DensityJob(QRunnable):
         self._owner = owner
 
     def run(self):
+        # Below-normal priority: the GUI thread wins scheduling while this computes.
+        QThread.currentThread().setPriority(QThread.LowPriority)
+        # Density is progressive (nice-to-have); never let it fight a paint tick.
+        _wait_for_idle()
         try:
             value = self._physical.density_for(self._path)
         except Exception:  # a bad path must not kill the thread pool
@@ -159,8 +186,18 @@ class _ContourJob(QRunnable):
         self._owner = owner
 
     def run(self):
+        QThread.currentThread().setPriority(QThread.LowPriority)
+        # Single-threaded FIFO: a superseded request must not delay the fresh one,
+        # so staleness is checked *before* paying for the computation, not only at
+        # delivery, and again between the merge and the union (abort_check).
+        if self._owner.is_stale(self._token):
+            return
+        from .contour import ContourAborted
         try:
-            loops = self._physical.contour_for(self._path)
+            loops = self._physical.contour_for(
+                self._path, abort_check=lambda: self._owner.is_stale(self._token))
+        except ContourAborted:      # superseded mid-computation; deliver nothing
+            return
         except Exception:  # a bad path must not break the pool
             loops = []
         self._owner.contour_ready.emit(self._path, self._token, loops)
@@ -171,7 +208,9 @@ class ContourWorker(QObject):
 
     ``request(path, token)`` queues an exact-contour computation; results arrive
     on ``contour_ready(path, token, loops)``. A caller-supplied token lets the
-    receiver ignore stale results after a newer selection.
+    receiver ignore stale results after a newer selection, and the worker drops a
+    stale job before (and midway through) its computation rather than only at
+    delivery.
     """
 
     contour_ready = pyqtSignal(str, int, object)
@@ -180,9 +219,15 @@ class ContourWorker(QObject):
         super().__init__()
         self._pool = QThreadPool()
         self._pool.setMaxThreadCount(1)  # one exact contour at a time (priority)
+        self._latest_token = 0
 
     def request(self, physical, path, token):
+        self._latest_token = max(self._latest_token, token)
         self._pool.start(_ContourJob(physical, path, token, self))
+
+    def is_stale(self, token) -> bool:
+        """Whether a newer request has superseded ``token``."""
+        return token != self._latest_token
 
 
 def density_column(physical) -> Column:
