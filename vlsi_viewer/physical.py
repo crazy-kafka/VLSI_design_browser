@@ -31,7 +31,7 @@ class PhysicalData:
     def __init__(self, top_name, boundary_polys, grid_size,
                  extent, rows, cols, density, leakage, dynamic, ulvt,
                  geom, is_ulvt, is_macro, is_phys_only, leak, dyn, leaf_paths,
-                 contour_gap):
+                 contour_gap, merged_sets=None):
         self.top_name = top_name
         self.boundary_polys = boundary_polys   # list of (name, [(x, y), ...]) in global coords
         self.grid_size = grid_size
@@ -52,6 +52,12 @@ class PhysicalData:
         self._dyn = dyn                        # (N,) float32
         self._leaf_paths = leaf_paths          # (N,) object array, sorted lexicographically
         self.contour_gap = contour_gap
+        # path -> (k, 4) merged, gap-padded rectangles, built bottom-up at build
+        # time for every block-instance node (see ``_merged_node_sets``). Union is
+        # associative, so a node's set merges its children's sets exactly; with
+        # this, a density lookup is a sweep over a small set instead of a fresh
+        # union over the whole subtree.
+        self._merged = merged_sets or {}
         self._contour_cache = {}               # (path, gap) -> (loops, area)
         self._contour_lock = threading.Lock()
         # Pin density is the one grid that is not built from the box arrays: it needs every
@@ -112,11 +118,25 @@ class PhysicalData:
         sl = self._slice_for(path)
         return self._geom[sl][~self._is_phys_only[sl]]
 
+    def _merged_for(self, path: str, gap: float):
+        """(k, 4) merged, gap-padded rectangle set for ``path``.
+
+        The build-time hierarchy cache serves block-instance nodes at the build's
+        contour gap; anything else - a leaf-instance path, or a non-default gap -
+        is merged on demand from its box slice (small, so still cheap).
+        """
+        from . import contour
+        if gap == self.contour_gap:
+            merged = self._merged.get(path)
+            if merged is not None:
+                return merged
+        return contour.merged_boxes(self.boxes_for(path), gap)
+
     def _contour(self, path: str, gap: float, abort_check=None):
         """Cached contour loops for a path at a gap (thread-safe).
 
-        ``abort_check`` is forwarded to the union; a :class:`contour.ContourAborted`
-        it triggers propagates without being cached.
+        ``abort_check`` is consulted before the union; a
+        :class:`contour.ContourAborted` it triggers propagates without being cached.
         """
         from . import contour
         key = ("loops", path, gap)
@@ -124,13 +144,15 @@ class PhysicalData:
             cached = self._contour_cache.get(key)
             if cached is not None:
                 return cached
-        boxes = self.boxes_for(path)
+        merged = self._merged_for(path, gap)
+        if abort_check is not None and abort_check():
+            raise contour.ContourAborted
         t0 = time.perf_counter()
-        loops = contour.contour_loops(boxes, gap, abort_check=abort_check)
+        loops = contour.loops_from_merged(merged)
         with self._contour_lock:
             self._contour_cache[key] = loops
-        logger.info("contour: %s (gap %g, %d boxes) -> %d loop(s) (%.1fs)",
-                    path, gap, len(boxes), len(loops), time.perf_counter() - t0)
+        logger.info("contour: %s (gap %g, %d rect(s)) -> %d loop(s) (%.1fs)",
+                    path, gap, len(merged), len(loops), time.perf_counter() - t0)
         return loops
 
     def _contour_area(self, path: str, gap: float) -> float:
@@ -141,13 +163,13 @@ class PhysicalData:
             cached = self._contour_cache.get(key)
             if cached is not None:
                 return cached
-        boxes = self.boxes_for(path)
+        merged = self._merged_for(path, gap)
         t0 = time.perf_counter()
-        area = contour.contour_area(boxes, gap)
+        area = contour.union_area(merged)
         with self._contour_lock:
             self._contour_cache[key] = area
-        logger.info("contour area: %s (gap %g, %d boxes) -> %.0f (%.1fs)",
-                    path, gap, len(boxes), area, time.perf_counter() - t0)
+        logger.info("contour area: %s (gap %g, %d rect(s)) -> %.0f (%.1fs)",
+                    path, gap, len(merged), area, time.perf_counter() - t0)
         return area
 
     def contour_for(self, path: str, abort_check=None):
@@ -178,6 +200,57 @@ class PhysicalData:
         if not (den > 0 and non > 0):
             return float("nan")
         return min(1.0, non / den)
+
+
+def _merged_node_sets(geom_walk, phys_walk, children, span, top, gap):
+    """path -> (k, 4) merged, gap-padded rectangles, one per block-instance node.
+
+    Built bottom-up: a node's input is its own (direct) leaf boxes plus the merged
+    sets of its children, and ``merge_boxes`` of that is exact because union is
+    associative. ``geom_walk``/``phys_walk`` are in walk (pre-order DFS) order, so a
+    node's subtree is the contiguous ``span[path]`` and its direct leaves are the
+    span minus its children's spans; each leaf is gathered exactly once, at its
+    owner, which keeps the whole pass O(N). Physical-only boxes are excluded (they
+    belong to the density grid only, per ``boxes_for``).
+    """
+    from . import contour
+    h = gap / 2.0
+    merged = {}
+    # Reversed pre-order visits every descendant before its ancestors.
+    order = []
+    stack = [top]
+    while stack:
+        node = stack.pop()
+        order.append(node)
+        stack.extend(children[node])
+    empty = np.empty((0, 4))
+    for node in reversed(order):
+        s, e = span[node]
+        parts, masks = [], []
+        pos = s
+        for child in children[node]:
+            cs, ce = span[child]
+            if cs > pos:
+                parts.append(geom_walk[pos:cs])
+                masks.append(phys_walk[pos:cs])
+            pos = ce
+        if e > pos:
+            parts.append(geom_walk[pos:e])
+            masks.append(phys_walk[pos:e])
+        inputs = [merged[child] for child in children[node]]
+        if parts:
+            direct = np.concatenate(parts)
+            direct = direct[~np.concatenate(masks)]
+            if direct.size:
+                padded = direct.astype(np.float64)
+                padded[:, 0] -= h
+                padded[:, 1] -= h
+                padded[:, 2] += h
+                padded[:, 3] += h
+                inputs.insert(0, padded)
+        merged[node] = (contour.merge_boxes(np.concatenate(inputs)) if inputs
+                        else empty)
+    return merged
 
 
 def _oriented_extent(orient: str, w: float, h: float):
@@ -368,6 +441,9 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
     boundary_polys = []
     _xs0, _ys0, _xs1, _ys1 = [], [], [], []
     _leaks, _dyns, _ulvts, _macros, _phys_onlies, _paths = [], [], [], [], [], []
+    # Block-instance tree for the bottom-up contour cache: each node's children
+    # and its leaf span in walk (pre-order DFS) order.
+    _node_children, _node_span, _node_stack = {}, {}, []
 
     def _join(prefix, rel):
         return f"{prefix}/{rel}" if prefix else rel
@@ -394,6 +470,11 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
         df, boundary = blocks[name]
         if boundary:
             boundary_polys.append((name, [global_pt(p) for p in boundary]))
+        if _node_stack:
+            _node_children[_node_stack[-1]].append(prefix)
+        _node_children[prefix] = []
+        span_start = len(_paths)
+        _node_stack.append(prefix)
         for row in df.itertuples():
             cell = getattr(row, "cell_name")
             if cell in blocks:
@@ -440,6 +521,8 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
             _phys_onlies.append(bool(getattr(row, "is_physical_only"))
                                 or cell in phys_only_cells)
             _paths.append(_join(prefix, getattr(row, "leaf_instance_name")))
+        _node_stack.pop()
+        _node_span[prefix] = (span_start, len(_paths))
         visiting.discard(name)
 
     t_walk = time.perf_counter()
@@ -456,6 +539,13 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
     is_macro = np.asarray(_macros, dtype=bool)
     is_phys_only = np.asarray(_phys_onlies, dtype=bool)
     leaf_paths = np.asarray(_paths, dtype=object)
+    # Bottom-up merged contour sets, while the arrays are still in walk order
+    # (a node's subtree is a contiguous span only before the path sort).
+    t_merge = time.perf_counter()
+    merged_sets = _merged_node_sets(geom, is_phys_only, _node_children, _node_span,
+                                    top, contour_gap)
+    logger.info("physical: merged contour sets for %d node(s) (%.1fs)",
+                len(merged_sets), time.perf_counter() - t_merge)
     order = np.argsort(leaf_paths, kind="stable")
     geom, leak, dyn = geom[order], leak[order], dyn[order]
     is_ulvt, is_macro = is_ulvt[order], is_macro[order]
@@ -594,7 +684,7 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
     data = PhysicalData(top, boundary_polys, grid_size,
                         extent, rows, cols, density, leakage, dynamic, ulvt,
                         geom, is_ulvt, is_macro, is_phys_only, leak, dyn,
-                        leaf_paths, contour_gap)
+                        leaf_paths, contour_gap, merged_sets=merged_sets)
     if pins:
         # Retained rather than consumed: the pin-density grid is built on first use, so a
         # run that never opens that map pays neither the time nor the memory for it.

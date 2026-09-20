@@ -106,14 +106,14 @@ class TreeView:
 
 
 def _bounded_threads():
-    """Bound background density CPU so it can't starve the GUI thread.
+    """One density thread.
 
-    Density is progressive (nice-to-have), so cap concurrency well below the
-    core count; the exact-contour worker has its own single thread.
+    With the build-time merged-rectangle cache a density job is a sweep over a
+    small rectangle set (~ms), so extra threads only add GIL contention with the
+    GUI. (It used to be ``min(cpus // 2, 4)``, back when a job re-unioned a whole
+    subtree and throughput mattered more than smoothness.)
     """
-    import os
-    cpus = max(1, os.cpu_count() or 1)
-    return max(1, min(cpus // 2, 4))
+    return 1
 
 
 class _DensityJob(QRunnable):
@@ -143,9 +143,10 @@ class _LazyDensity(QObject):
 
     ``get(path)`` returns the cached value, or ``default`` while the computation
     is in flight and emits ``ready(path, value)`` on the main thread when done.
-    The pool is capped at ~half the cores so background density can't saturate
-    the machine and starve the GUI thread. ``status`` reports the number of
-    pending jobs.
+    The pool is a single low-priority thread that waits out active GUI
+    interaction: per-job cost is ~ms off the merged-rectangle cache, so one
+    thread is both fast enough and the smoothest option. ``status`` reports the
+    number of pending jobs.
     """
 
     ready = pyqtSignal(str, float)
