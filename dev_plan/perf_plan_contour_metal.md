@@ -195,3 +195,32 @@ worker thread with progress + cancel (UX debt already recorded in `cli.py`), and
 Each phase ships independently with before/after numbers from the repo's own harnesses
 and `pytest -q` green; stop when the targets (GUI worst tick gap < 30 ms; routing read ≤
 15 min on the real design) are met.
+
+## As built (branch `performance_dev`, 2026-09-21)
+
+Landed: **P1** (threading), **P2** (physical algorithm), **M1** (parallel default +
+byte ranges), **M2** (point-only tokeniser fast path). Full suite 651/651 on Windows,
+including the previously-failing CRLF preamble test (fixed by newline-normalising the
+scan's decoded header lines). Measured on this machine:
+
+| change | before | after |
+|---|---|---|
+| `merge_boxes`, 1M boxes | 0.397 s (pandas) | 0.111 s (numpy, 3.6x) |
+| `density_for`, bundled sample per node | a fresh subtree union each | **1-9 ms** (sweep over cached merged set) |
+| `contour_for`, bundled sample per node | merge + union + loops | 1.7-295 ms (shapely over ≤6.6k merged rects) |
+| build_physical overhead for the merged cache | - | +0.1 s on 108k boxes, offline |
+| `--jobs` default | 1 | min(cores, 8), size-gated (2 MB sample → 1 worker, verified) |
+| byte ranges | off | on at `jobs >= 4`; jobs=4 build == sequential exactly (counters, grids allclose) |
+| tokeniser, 512-pt via arrays | 52 ns/char | 44 ns/char (1.18x); gcd tails 1.01x (no regression) |
+| end-to-end, 45 MB via-array DEF | 6.54 s | 6.42 s (~2%; diluted by `__split_points`' per-point loop - M3's business) |
+
+Not landed, with the reason: **M3** (single-pass scanner) - the structural parser
+rewrite; needs the differential harness run and belongs in its own change. **M4/M5** -
+only if the next real Linux run misses the target. The Windows-specific trap to
+remember when benchmarking the pool: the caller needs the `__main__` guard
+(spawn re-imports the entry module), and `generate_metal.py --out` is a *directory*.
+
+Open verification for the real Linux design (`lx956c_ioe`): `--jobs 8` against
+`dev_plan/issue/real_design_log_0915.md` settles the byte-range projection
+(1.67-1.9x); watch the parent scan (~105 s projected) and the giant-statement
+ceiling, which Phase 6 (splitting it) would address next.
