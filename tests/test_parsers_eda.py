@@ -639,3 +639,78 @@ def test_the_committed_power_sample_still_matches_the_def():
     for key, record in power["instances"].items():
         assert record["cell_name"] == block["instances"][key]["cell_name"], key
         assert record["leakage_power"] > 0 and record["dynamic_power"] > 0, key
+
+
+def test_the_instance_table_is_built_once_not_per_record():
+    """The regression for a fill that took days: one table per block, and no copy when there is
+    nothing to merge.
+
+    Resolving a record used to rebuild the block's whole dict, so a flat 3.35M-instance design
+    copied 3.35M entries for each of its 3.35M records (measured 74.8 us per call at 1k entries,
+    growing linearly, i.e. days in total). The table for a single-block design is now the block's
+    own dict, so a lookup is one hash probe.
+    """
+    from vlsi_viewer.parsers.convert import _block_instances
+
+    block = {"top_name": "TOP", "instances": {"a": {"cell_name": "C1"}}}
+    tables = _block_instances([block])
+    assert tables["TOP"] is block["instances"]          # no copy: the entries are the objects
+
+    # Two blocks sharing a top_name are still merged, earlier file winning a duplicate leaf -
+    # the rule `metrics._merge_blocks` applies to the same case.
+    first = {"top_name": "TOP", "instances": {"a": {"cell_name": "C1"}, "b": {"cell_name": "C1"}}}
+    second = {"top_name": "TOP", "instances": {"a": {"cell_name": "OTHER"}, "c": {"cell_name": "C1"}}}
+    tables = _block_instances([first, second])
+    assert set(tables["TOP"]) == {"a", "b", "c"}
+    assert tables["TOP"]["a"] is first["instances"]["a"]
+
+
+def test_a_flat_fill_scales_linearly(tmp_path):
+    """8k instances with 8k records: ~40 ms now, ~5 s while the lookup rebuilt the block's dict.
+
+    The bound is loose on purpose - it is a shape check, not a benchmark - and it is set an order
+    of magnitude above the measured cost and an order below the quadratic one.
+    """
+    import time
+
+    n = 8_000
+    block = {"top_name": "TOP",
+             "instances": {f"u0/b0/i{k}": {"cell_name": "INV_X1_SVT"} for k in range(n)}}
+    path = tmp_path / "power.json"
+    path.write_text(json.dumps({"top_name": "TOP", "instances": {
+        key: {"leakage_power": 0.01} for key in block["instances"]}}))
+
+    started = time.perf_counter()
+    summary = fill_instances([block], [str(path)])
+    elapsed = time.perf_counter() - started
+
+    assert summary.instances == n and summary.conflicts == 0
+    assert elapsed < 1.0, f"{elapsed:.1f}s for {n} records - the lookup is quadratic again"
+
+
+def test_the_fill_reports_progress(tmp_path, caplog, monkeypatch):
+    """A record loop that can run for minutes says where it is, and the summary says how long.
+
+    Silence is half of why a slow fill was reported as a hang: the file is read without a word and
+    the first line came after the whole loop.
+    """
+    import logging
+
+    from vlsi_viewer.parsers import convert
+
+    monkeypatch.setattr(convert, "FILL_PROGRESS_RECORDS", 2)
+    block = instance_info_from_def(f"{SAMPLE}/core.def")
+    keys = sorted(block["instances"])[:5]
+    path = _fill_file(tmp_path, "power.json", "core",
+                      {key: {"leakage_power": 0.1} for key in keys})
+
+    with caplog.at_level(logging.INFO, logger="vlsi_viewer.parsers.convert"):
+        summary = fill_instances([block], [path])
+
+    said = [record.getMessage() for record in caplog.records]
+    assert any(text.startswith("power: reading ") for text in said)
+    progress = [text for text in said if "record(s) read" in text]
+    assert [text.split(": ")[2].split(" of ")[0] for text in progress] == ["2", "4"]
+    summary_line = next(text for text in said if "record(s) filled" in text)
+    assert summary_line.endswith(")") and "s)" in summary_line
+    assert summary.matched == len(keys)

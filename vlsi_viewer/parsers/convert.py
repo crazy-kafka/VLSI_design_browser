@@ -11,6 +11,7 @@ import gzip
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import AnyStr, Dict, List, Sequence
 
@@ -287,6 +288,13 @@ def instance_info_from_def(def_path, top=None) -> dict:
 # `physical.walk` both expand these same dicts later, each of them reading power off the entry.
 
 
+# How often the record loop says how far it has read. A chip-level power file is millions of
+# records, and the loop is otherwise silent from the first record to the per-file summary - which
+# is exactly how one 3.35M-instance run came to be reported as a hang. A count rather than a clock,
+# so the lines are reproducible in a test.
+FILL_PROGRESS_RECORDS = 1_000_000
+
+
 @dataclass
 class FillSummary:
     """What one fill did, for the summary `cli` prints and for the tests.
@@ -328,28 +336,36 @@ def _read_instance_json(path) -> dict:
     return data
 
 
-def _index_blocks(blocks) -> Dict[str, List[dict]]:
-    """``top_name -> the blocks with that name``, in input order.
+def _block_instances(blocks) -> Dict[str, dict]:
+    """One instance table per block name, built once for the whole fill.
 
-    Several blocks can share a name (``metrics._merge_blocks`` unions them, earlier file winning a
-    duplicate leaf), so every lookup goes through `_instances` and takes the earlier entry.
+    A design normally holds one block per name, and then that block's own dict *is* the table: the
+    entries are the objects the fill writes into, so nothing is copied. Two files sharing a
+    ``top_name`` are merged the way ``metrics._merge_blocks`` merges them, the earlier file's entry
+    for a duplicate leaf winning.
+
+    Built once, and that is the whole point of it existing: resolving a record used to rebuild the
+    block's dict per lookup, so a flat 3.35M-instance design copied 3.35M entries for *each* of its
+    3.35M records - days of CPU for a fill that should take seconds (see
+    ``dev_plan/power_json_fill.md``).
     """
-    index: Dict[str, List[dict]] = {}
+    groups: Dict[str, List[dict]] = {}
     for block in blocks:
-        index.setdefault(str(block.get("top_name") or ""), []).append(block)
-    return index
+        groups.setdefault(str(block.get("top_name") or ""), []).append(block)
+    tables: Dict[str, dict] = {}
+    for name, group in groups.items():
+        if len(group) == 1:
+            tables[name] = group[0]["instances"]
+            continue
+        merged: dict = {}
+        for block in group:
+            for leaf, entry in block["instances"].items():
+                merged.setdefault(leaf, entry)       # earlier file wins, as `_merge_blocks` does
+        tables[name] = merged
+    return tables
 
 
-def _instances(index: Dict[str, List[dict]], name: str) -> dict:
-    """The instances of the block called ``name``, with the group's duplicates merged."""
-    merged: dict = {}
-    for block in index.get(name, ()):
-        for leaf, entry in block["instances"].items():
-            merged.setdefault(leaf, entry)           # earlier file wins, as `_merge_blocks` does
-    return merged
-
-
-def _resolve(index: Dict[str, List[dict]], name: str, key: str, seen=frozenset()):
+def _resolve(tables: Dict[str, dict], name: str, key: str, seen=frozenset()):
     """The instance entry ``key`` names, relative to the block called ``name``, or ``None``.
 
     The key is tried whole first: a DEF that flattens its hierarchy into the component names
@@ -359,9 +375,9 @@ def _resolve(index: Dict[str, List[dict]], name: str, key: str, seen=frozenset()
     `metrics.load_blocks` and `physical.walk` use to expand the hierarchy - so an entry this
     accepts is one both of them will place and read power off.
     """
-    if name not in index or name in seen:
+    if name not in tables or name in seen:
         return None
-    instances = _instances(index, name)
+    instances = tables[name]                         # already merged, and only read here
     if key in instances:
         return instances[key]
     head, sep, tail = key.partition("/")
@@ -369,25 +385,25 @@ def _resolve(index: Dict[str, List[dict]], name: str, key: str, seen=frozenset()
         return None
     entry = instances.get(head) or {}
     child = str(entry.get("cell_name") or "")
-    if child in index:
-        return _resolve(index, child, tail, seen | {name})
+    if child in tables:
+        return _resolve(tables, child, tail, seen | {name})
     return None
 
 
-def _target(index: Dict[str, List[dict]], top: str, raw_key):
+def _target(tables: Dict[str, dict], top: str, raw_key):
     """`_resolve` for one record, tolerating the absolute path a user may have exported.
 
     The hierarchy paths the viewer shows and ``--out`` writes start with the top name
     (``core/u0/b0/x``), so a leading ``<top>/`` is stripped and the key retried.
     """
     key = str(raw_key).replace("\\", "/").strip("/")
-    found = _resolve(index, top, key)
+    found = _resolve(tables, top, key)
     if found is None and key.startswith(top + "/"):
-        found = _resolve(index, top, key[len(top) + 1:])
+        found = _resolve(tables, top, key[len(top) + 1:])
     return found
 
 
-def _shape(index: Dict[str, List[dict]], wanted) -> List[int]:
+def _shape(tables: Dict[str, dict], wanted) -> List[int]:
     """``[design instances, the ones carrying a filled attribute]``.
 
     The same walk the hierarchy does, counting rather than placing: a block nothing instantiates
@@ -395,14 +411,12 @@ def _shape(index: Dict[str, List[dict]], wanted) -> List[int]:
     its leaves K times - which is what makes "N of M instance(s)" mean instances on screen.
     """
     referenced = {str(entry.get("cell_name") or "")
-                  for group in index.values() for block in group
-                  for entry in block["instances"].values()}
-    tops = [name for name in index if name not in referenced] or list(index)
+                  for entries in tables.values() for entry in entries.values()}
+    tops = [name for name in tables if name not in referenced] or list(tables)
     leaves, filled = {}, {}
-    for name in index:
-        entries = _instances(index, name)
+    for name, entries in tables.items():
         keep = [entry for entry in entries.values()
-                if str(entry.get("cell_name") or "") not in index]
+                if str(entry.get("cell_name") or "") not in tables]
         leaves[name] = len(keep)
         filled[name] = sum(1 for entry in keep if any(spec in entry for spec in wanted))
     counts = [0, 0]
@@ -414,9 +428,9 @@ def _shape(index: Dict[str, List[dict]], wanted) -> List[int]:
         visiting.add(name)
         counts[0] += leaves[name]
         counts[1] += filled[name]
-        for entry in _instances(index, name).values():
+        for entry in tables[name].values():
             child = str(entry.get("cell_name") or "")
-            if child in index:
+            if child in tables:
                 walk(child)
         visiting.discard(name)
 
@@ -439,17 +453,21 @@ def fill_instances(blocks, json_paths) -> FillSummary:
     record naming an instance the design does not have is ignored and counted. Nothing here is
     fatal, because a partial fill is the normal case - one file per sub-block is exactly that.
     """
-    index = _index_blocks(blocks)
+    tables = _block_instances(blocks)
     summary = FillSummary(files=len(json_paths))
     wanted = set()
     for path in json_paths:
+        # The file can be hundreds of megabytes and takes a while to load, so say so before the
+        # wait rather than after it: everything here is silent otherwise.
+        logger.info("power: reading %s", path)
+        started = time.perf_counter()
         data = _read_instance_json(path)
         top = str(data.get("top_name") or "")
         records = data.get("instances")
-        if top not in index:
+        if top not in tables:
             logger.warning(
                 "power: %s names '%s', which is no block of this design (%s); its %d record(s) "
-                "are unused", path, top or "<no top_name>", _names(index),
+                "are unused", path, top or "<no top_name>", _names(tables),
                 len(records) if isinstance(records, dict) else 0)
             continue
         if not isinstance(records, dict):
@@ -460,15 +478,21 @@ def fill_instances(blocks, json_paths) -> FillSummary:
         mismatched: List[tuple] = []
         unusable = applied = 0
         offered = filled_records = 0
-        for raw_key, record in records.items():
+        total_records = len(records)
+        for read, (raw_key, record) in enumerate(records.items(), 1):
+            if read % FILL_PROGRESS_RECORDS == 0:
+                # A record loop that can run for minutes says where it is: a silent one is
+                # indistinguishable from a hung job, which is how one run was reported.
+                logger.info("power: %s: %d of %d record(s) read (%.0fs)", path, read,
+                            total_records, time.perf_counter() - started)
             if not isinstance(record, dict):
                 unusable += 1
                 continue
-            entry = _target(index, top, raw_key)
+            entry = _target(tables, top, raw_key)
             if entry is None:
                 unmatched.append(str(raw_key))
                 continue
-            if str(entry.get("cell_name") or "") in index:
+            if str(entry.get("cell_name") or "") in tables:
                 containers.append(str(raw_key))      # a sub-block's own instance, not a leaf
                 continue
             summary.matched += 1
@@ -504,7 +528,9 @@ def fill_instances(blocks, json_paths) -> FillSummary:
             if wrote:
                 filled_records += 1
         summary.unusable += unusable
-        logger.info("power: %s -> %d of %d record(s) filled", path, filled_records, offered)
+        # The seconds cover the load and the loop together, which is what the user waited for.
+        logger.info("power: %s -> %d of %d record(s) filled (%.1fs)", path, filled_records,
+                    offered, time.perf_counter() - started)
         if unmatched or containers:
             logger.warning(
                 "power: %s: %d of %d record(s) filled no instance of '%s'%s (e.g. %s)", path,
@@ -525,5 +551,5 @@ def fill_instances(blocks, json_paths) -> FillSummary:
 
     # Counted even when nothing was filled, so "0 of N instance(s)" is a real denominator: the
     # number to read next to the warning that says no record matched.
-    summary.total, summary.instances = _shape(index, wanted)
+    summary.total, summary.instances = _shape(tables, wanted)
     return summary

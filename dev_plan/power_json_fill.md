@@ -49,7 +49,8 @@ Values go through `loader._coerce`, so a value the fill accepts is a value the l
 ## What a run prints
 
 ```
-power: core.power.json -> 3994 of 3994 record(s) filled
+power: reading core.power.json
+power: core.power.json -> 3994 of 3994 record(s) filled (0.0s)
 power: 3994 of 3994 design instance(s) filled from 1 file(s)
 ```
 
@@ -114,3 +115,46 @@ built the heavy metal fixtures aborting when it later creates offscreen Qt windo
 test that "crashes" passes on its own, in its module, and serially, and nothing in this feature
 touches Qt. So the README now recommends `-n 4` or `-n 8 --dist loadfile`, both of which are 27 s —
 the per-test mode was never faster, it was only luckier with the scheduling.
+
+## Later: the fill was O(N²), and one run hung for days (2026-09-22)
+
+Reported in `dev_plan/issue/real_design_log_0921.md`: a `def` run with `--json` on a 3,347,979
+instance design (`job 1657044030`) printed the DEF summary and then nothing for hours. The fill was
+quadratic.
+
+`_resolve` called `_instances`, which **rebuilt the block's whole instance dict** on every call, and
+`_resolve` is reached once per JSON record. For a flat design - one block holding all 3.35M
+instances, which is what that DEF is (`dropped 0 filler`) - every record copied 3.35M entries.
+Measured through the real `_resolve` on synthetic flat blocks: 74.8 us per call at 1k entries, 315 us
+at 4k, 1,395 us at 16k, 5,579 us at 64k - exactly linear in N, so quadratic in total. Fitted at
+3,347,979 records that is ~10 days of CPU; the run was inside this loop, not dead. The new inner
+loop measures **0.045 us per record**, i.e. **0.15 s** for the same 3.35M records.
+
+Measured after the fix, end to end through `fill_instances` on a synthetic flat design with a
+matching record per instance:
+
+| records | now | the old per-record rebuild |
+|---|---|---|
+| 50,000 | 0.25 s | ~5 min |
+| 200,000 | 1.11 s | ~0.8 h |
+| 3,347,979 | ~20 s, dominated by the JSON load | ~10 days |
+
+What changed, all in `parsers/convert.py`:
+
+- `_index_blocks` + `_instances` became **`_block_instances`**, which builds one table per block name
+  - once, before the record loop. A single-block group keeps *the block's own dict* (no copy: the
+  entries are the objects the fill writes into, so the in-place semantics are unchanged), and only a
+  duplicate `top_name` builds a merged dict, earlier file winning, as `metrics._merge_blocks` does.
+- `_resolve`, `_target`, `_shape` and the "names no block" warning take that table instead of
+  re-deriving it. The container test (`child in index`) reads `child in tables`: same keys, one
+  structure. This also removes the same pattern from `_shape`'s walk, which called `_instances` per
+  visited block.
+- The loop now says what it is doing: `power: reading <file>` before the load (the load alone is
+  ~15 s and ~1.7 GB at 3.35M records, measured 4.47 us and 505 B per record), a
+  `power: <file>: N of M record(s) read (Xs)` line every `FILL_PROGRESS_RECORDS` (1M) records, and
+  the per-file summary now carries its elapsed time. The silence is half of why the run above was
+  reported as a hang rather than as slow.
+
+Tests added: the table is built once and is the block's own dict (plus the duplicate-name merge),
+a flat fill of 8k records must finish inside a second (it took ~5 s before, ~40 ms now), and the
+progress lines appear with the summary's timing. **655 tests pass.**
