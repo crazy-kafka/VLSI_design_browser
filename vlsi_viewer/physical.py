@@ -55,17 +55,16 @@ class PhysicalData:
         self._contour_cache = {}               # (path, gap) -> (loops, area)
         self._contour_lock = threading.Lock()
         # Pin density is the one grid that is not built from the box arrays: it needs every
-        # placement's frame and its cell's pin geometry, so ``build_physical`` hands the source
-        # here and the grid is made on first use. ``None`` for a source with no pins at all
-        # (the json path), which is what keeps the map out of the selector there.
-        self._pin_source = None
+        # placement's frame and its cell's pin geometry, so ``build_physical`` computes it
+        # alongside the others, before the window exists - and hands it over here. ``None`` for
+        # a source with no pins at all (the json path), which is what keeps the map out of the
+        # selector there.
         self._pins = None
-        self._pin_lock = threading.Lock()
 
     @property
     def has_pins(self) -> bool:
-        """Whether a pin-density grid can be built for this layout."""
-        return self._pin_source is not None
+        """Whether this layout carries a pin-density grid."""
+        return self._pins is not None
 
     @property
     def boxes(self):
@@ -79,21 +78,9 @@ class PhysicalData:
 
     def heat(self, kind: str) -> np.ndarray:
         if kind == "pins" and self.has_pins:
-            return self._pin_grid()
+            return self._pins
         return {"density": self.density, "leakage": self.leakage,
                 "dynamic": self.dynamic, "ulvt": self.ulvt}[kind]
-
-    def _pin_grid(self) -> np.ndarray:
-        """Pin counts, one point per signal pin of every placed instance (built once)."""
-        with self._pin_lock:
-            if self._pins is None:
-                blocks, cells, pins = self._pin_source
-                t0 = time.perf_counter()
-                self._pins = _pin_density(blocks, self.top_name, cells, pins,
-                                          self.extent, self.rows, self.cols, self.grid_size)
-                logger.info("physical: pin density over %d cell(s), max %g pin(s) per grid cell "
-                            "(%.1fs)", len(cells), self._pins.max(), time.perf_counter() - t0)
-        return self._pins
 
     def _slice_for(self, path: str):
         """Slice of the sorted arrays covering ``path`` and its descendants."""
@@ -434,6 +421,10 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
             _paths.append(_join(prefix, getattr(row, "leaf_instance_name")))
         visiting.discard(name)
 
+    # Every phase below announces itself before it runs: on a chip-level design the walk and the
+    # pin grid are seconds each, and the window does not exist yet, so the log is the only thing
+    # that can say what the run is doing.
+    logger.info("physical: walking %d block(s) for instance geometry", len(blocks))
     t_walk = time.perf_counter()
     walk(top, top, set())
     n = len(_paths)
@@ -472,6 +463,8 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
     # A box's contribution to its cell patch is separable (outer(oy, ox)/gs2),
     # so std cells (<= 2x2 patch) accumulate via bincount and macros via a
     # per-box outer-product update.
+    logger.info("physical: computing density, leakage, dynamic and ULVT grids over %d box(es) "
+                "on a %d x %d grid", n, rows, cols)
     bx0 = np.maximum(geom[:, 0], x0)
     by0 = np.maximum(geom[:, 1], y0)
     bx1 = np.minimum(geom[:, 2], x1)
@@ -588,7 +581,17 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
                         geom, is_ulvt, is_macro, is_phys_only, leak, dyn,
                         leaf_paths, contour_gap)
     if pins:
-        # Retained rather than consumed: the pin-density grid is built on first use, so a
-        # run that never opens that map pays neither the time nor the memory for it.
-        data._pin_source = (blocks, cells, pins)
+        # Built here with the other grids, and before the window exists: it needs every
+        # placement's frame and its cell's pin geometry rather than the box arrays, but a
+        # chip-level design costs seconds (0.25-0.34 us per pin point, ~3 s for 3.36M
+        # instances) and building it on first use froze the window for that whole time when
+        # the map was selected. The trade is the one the four grids above already make: paid
+        # up front, whether or not the map is ever opened.
+        logger.info("physical: computing pin density for %d cell(s)", len(cells))
+        t0 = time.perf_counter()
+        data._pins = _pin_density(blocks, top, cells, pins, extent, rows, cols, grid_size)
+        # The point count and the grid are already reported by `_pin_density`, so this adds only
+        # what it cannot: how long the phase took, and how dense it came out.
+        logger.info("physical: pin density computed in %.1fs (max %g pin(s) per grid cell)",
+                    time.perf_counter() - t0, data._pins.max())
     return data

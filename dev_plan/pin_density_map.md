@@ -174,3 +174,42 @@ density* and renders the fifth.
 wrong for S/W/E/FN/FS/FW, and would put a rotated macro's obstruction geometry one macro-extent away
 from the same macro's footprint. Nothing in this change touches it, and the pin pass must not inherit
 it. Worth a separate check against a rotated macro in a real design.
+
+## Later: the pin grid moved out of the map switch (2026-09-22)
+
+Reported: selecting **Pin density** in physical mode froze the window for a while. Cause, measured:
+it was the one grid built lazily, and the build ran **on the GUI thread**, inside the map selector's
+own signal handler (`ui_layout._on_type` -> `set_kind` -> `_autoset_range`/`refresh` ->
+`PhysicalData.heat("pins")` -> `_pin_grid` -> `_pin_density`). The cost is linear in the pin-point
+count (`sum of pins(cell)` over placements) at **0.25-0.34 us per point**: 11,424 points on
+`sample_data/eda` (5.8 ms, invisible), 10 M points on a synthetic design (3.35 s). The reported
+`lx956c` design has 3,355,697 instances, so about 9.6 M points and **~2.5-3.5 s** of unresponsive
+window - no repaint, no hover, no cancel, and "Not responding" past ~5 s. The rest of the switch was
+milliseconds; the four other grids are computed in `build_physical`, before `MainWindow` exists.
+
+What changed in `physical.py`, and nothing else:
+
+- `build_physical` now computes the pin grid where it used to retain the source for a later build,
+  with the CLI's physical-mode call still landing before the window (`cli.py:447`). The source tuple
+  is no longer held, so steady-state memory goes *down*; the grid is 0.4 MB at the 09-17 run's
+  189x253.
+- `PhysicalData` lost `_pin_source`, `_pin_lock` and `_pin_grid`: with one builder there is one
+  lifetime, `has_pins` is `_pins is not None`, and `heat("pins")` returns that array. `_kinds_for`
+  is unchanged, so the json path still offers no such map.
+- Every phase now announces itself *before* it runs - the walk, the four grids, and the pin grid -
+  because the window does not exist yet and a chip-level run was otherwise minutes of silence
+  followed by results. The notices pair with the result lines that follow them, and each names what
+  is being computed. `_pin_density`'s own point-count line already reports the points and the grid,
+  so the wrapper's line was reduced to the two things it alone knows: the elapsed time and the peak
+  bin.
+
+Measured after, offscreen on `sample_data/eda` at the same grid: the combo switch to Pin density is
+**0.36 ms** (was 6.4 ms, with the build inside it), switching back 0.27 ms, and the whole
+`build_physical` - pin grid included - is 0.032 s. On the reported design the ~3 s moved into the
+pre-window phase, which is the trade the other four grids already make: paid whether or not the map
+is ever opened.
+
+Tests: `test_pin_density_counts_one_point_per_placed_pin` asserted the old lazy contract
+(`data._pins is None`) and now asserts the new one (built, and `heat("pins") is data._pins`);
+`test_the_build_says_what_it_is_computing` pins each notice ahead of its result line, by index in
+the captured records. **652 tests pass.**

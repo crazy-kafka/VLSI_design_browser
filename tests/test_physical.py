@@ -325,10 +325,13 @@ def test_pin_density_counts_one_point_per_placed_pin(tmp_path):
     b, cell, pins = _pin_design(tmp_path)
     data = build_physical([b], cell, grid_size=4.0, pins=pins)
     assert data.has_pins
-    assert data._pins is None            # built on first use, not while loading
+    # Built with the other grids, before any window exists. It used to be built on first use,
+    # and that first use was the map selector's own signal handler: on a chip-level design the
+    # window froze for the whole build (0.25-0.34 us per pin point, ~3 s at 3.36M instances).
+    assert data._pins is not None
 
     grid = data.heat("pins")
-    assert data._pins is not None        # ... and kept
+    assert grid is data._pins            # the same array, nothing built here
     assert grid.sum() == 8               # one point per placement, in every orientation
 
     # Every counted point falls inside the box the density map draws for its own instance.
@@ -457,3 +460,26 @@ def test_filled_power_reaches_the_power_maps(tmp_path):
 
     assert pd_.leakage.sum() == pytest.approx(4 * 0.5)
     assert pd_.dynamic.sum() == pytest.approx(4 * 0.25)
+
+
+def test_the_build_says_what_it_is_computing(tmp_path, caplog):
+    """Every phase announces itself before it runs, and its result line follows.
+
+    The window does not exist during this build, so the log is the only thing that can say what
+    a long run is doing - and a notice that arrives after the work is not a notice.
+    """
+    import logging
+
+    b, cell, pins = _pin_design(tmp_path)
+    with caplog.at_level(logging.INFO, logger="vlsi_viewer.physical"):
+        data = build_physical([b], cell, grid_size=4.0, pins=pins)
+
+    said = [record.getMessage() for record in caplog.records]
+
+    def first(fragment):
+        return next(i for i, text in enumerate(said) if fragment in text)
+
+    assert first("walking") < first("walked")                          # the box pass
+    assert first("computing density") < first("cell box(es), grid")    # the four grids
+    assert first("computing pin density") < first("pin density computed")   # the fifth
+    assert data.heat("pins").sum() == 8
