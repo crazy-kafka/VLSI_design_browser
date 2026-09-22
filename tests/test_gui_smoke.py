@@ -104,6 +104,58 @@ def test_search_dialog_compare(app, design):
     assert dlg.tables["v1"].columnCount() == 1 + 11
 
 
+def _sortable_view():
+    """A view whose column sorts differently by value than by text.
+
+    30,000 / 1,000 / 200 formatted with thousands separators read "1,000" < "200" < "30,000" as
+    text, which is the mistake the search table has to avoid; the fourth path has no value at all.
+    """
+    import pandas as pd
+
+    from vlsi_viewer.model import Column, TreeView
+
+    paths = ["TOP/a", "TOP/b", "TOP/c", "TOP/d"]
+    values = pd.Series([30_000.0, 1_000.0, 200.0, float("nan")], index=paths)
+    return TreeView(roots=["TOP"], children={}, counts=pd.Series(1.0, index=paths),
+                    columns=[Column("Area", values, lambda v: "—" if v != v else f"{v:,.2f}")],
+                    paths=paths)
+
+
+def test_the_search_table_sorts_by_value_not_by_text(app):
+    """Clicking a header must order by the number, and open in path order like it always did.
+
+    The value is formatted by the time it reaches the cell, so the raw one travels in
+    ``Qt.UserRole`` for the comparison - and a missing value sorts first, which is the rule the
+    hierarchy tree already applies to the same case.
+    """
+    dlg = SearchDialog(_sortable_view(), None, "TOP/*", "wildcard")
+    table = dlg.tables["v1"]
+    assert table.isSortingEnabled()
+    assert [table.item(r, 0).text() for r in range(4)] == ["TOP/a", "TOP/b", "TOP/c", "TOP/d"]
+
+    table.sortItems(1, Qt.AscendingOrder)
+    assert [table.item(r, 0).text() for r in range(4)] == ["TOP/d", "TOP/c", "TOP/b", "TOP/a"]
+    table.sortItems(1, Qt.DescendingOrder)
+    assert [table.item(r, 0).text() for r in range(4)] == ["TOP/a", "TOP/b", "TOP/c", "TOP/d"]
+
+
+def test_a_sorted_row_jumps_to_the_path_it_shows(app):
+    """The regression: the jump used to be `matches[row]`, which is only the row while unsorted.
+
+    Sorting the smallest first puts a different hierarchy on row 0, and a double-click there has
+    to follow what is on screen.
+    """
+    dlg = SearchDialog(_sortable_view(), None, "TOP/*", "wildcard")
+    jumps = []
+    dlg.selected.connect(lambda path, version: jumps.append(path))
+    table = dlg.tables["v1"]
+    table.sortItems(1, Qt.AscendingOrder)
+
+    table.cellDoubleClicked.emit(0, 1)
+    table.cellDoubleClicked.emit(3, 1)
+    assert jumps == ["TOP/d", "TOP/a"]          # the rows as shown, not matches[0] and matches[3]
+
+
 def test_jump_to_switches_compare_tab(app, design):
     w = MainWindow(design, design, threshold=0)
     assert w._compare.currentIndex() == 0  # V1 tab
