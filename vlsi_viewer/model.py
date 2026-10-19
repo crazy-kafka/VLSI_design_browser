@@ -1,6 +1,7 @@
 """Column/view abstractions bridging :class:`DesignData` to the Qt tree widgets."""
 import fnmatch
 import logging
+import math
 import re
 from dataclasses import dataclass
 from typing import Callable, List
@@ -42,15 +43,21 @@ def bar_series(values: pd.Series, roots, kind: str) -> pd.Series:
         return (values / total).clip(0.0, 1.0)
 
 
+def _column(spec, series, bar=None, fmt=None) -> Column:
+    """Build one display column; shared by the main and region trees."""
+    if fmt is None:
+        fmt = (lambda v, k=spec.kind: schema.format_metric(k, v))
+    return Column(spec.label, series, fmt, bar=bar, is_macro=spec.is_macro,
+                  gradient=spec.gradient, key=spec.key)
+
+
 def metric_columns(design, include_macros: bool = False) -> List[Column]:
     mv = design.metric_values(include_macros)
     metrics = schema.METRICS if include_macros else schema.STD_METRICS
     cols = []
     for m in metrics:
-        fmt = (lambda v, k=m.kind: schema.format_metric(k, v))
         bar = None if m.gradient else bar_series(mv[m.key], design.roots, m.kind)
-        cols.append(Column(m.label, mv[m.key], fmt, bar=bar, is_macro=m.is_macro,
-                           gradient=m.gradient, key=m.key))
+        cols.append(_column(m, mv[m.key], bar))
     return cols
 
 
@@ -159,10 +166,16 @@ class _ContourJob(QRunnable):
         self._owner = owner
 
     def run(self):
+        # A superseded request is already discarded by the GUI token check; skip
+        # the geometry entirely so rapid clicks cannot queue stale unions.
+        if not self._owner.is_current(self._token, self._path):
+            return
         try:
             loops = self._physical.contour_for(self._path)
         except Exception:  # a bad path must not break the pool
             loops = []
+        if not self._owner.is_current(self._token, self._path):
+            return
         self._owner.contour_ready.emit(self._path, self._token, loops)
 
 
@@ -180,9 +193,18 @@ class ContourWorker(QObject):
         super().__init__()
         self._pool = QThreadPool()
         self._pool.setMaxThreadCount(1)  # one exact contour at a time (priority)
+        self._latest = None              # (token, path) of the newest request
 
     def request(self, physical, path, token):
+        self._latest = (token, path)
         self._pool.start(_ContourJob(physical, path, token, self))
+
+    def is_current(self, token, path) -> bool:
+        return self._latest == (token, path)
+
+    def invalidate(self):
+        """Make every queued request stale (used when the contour is cleared)."""
+        self._latest = None
 
 
 def density_column(physical) -> Column:
@@ -203,6 +225,126 @@ def view_for_single(design, include_macros: bool = False) -> TreeView:
         counts=design.hier["count"],
         columns=metric_columns(design, include_macros),
         paths=list(design.hier.index),
+    )
+
+
+def _format_region_metric(kind: str, value) -> str:
+    """Region formatter: apportioned bit counts may be fractional, so round them.
+
+    Every other kind delegates to ``schema.format_metric``; changing global
+    formatting would affect the main tree's integer-only metrics for no reason.
+    """
+    if kind == "count":
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            return schema.format_metric(kind, value)
+        if not (math.isnan(f) or math.isinf(f)):
+            return f"{int(round(f)):,}"
+    return schema.format_metric(kind, value)
+
+
+class _RegionSeries:
+    """Lazy ``Column.series`` backed by one RegionData."""
+
+    def __init__(self, region, key: str):
+        self._region = region
+        self._key = key
+
+    def get(self, path, default=None):
+        values = self._region.metric_values(path)
+        if not values:
+            return default
+        return values.get(self._key, default)
+
+
+class _RegionBar:
+    """Bar ratio normalized by the selected region's root total."""
+
+    def __init__(self, region, roots, key: str, kind: str):
+        self._region = region
+        self._roots = roots
+        self._key = key
+        self._kind = kind
+        self._total = None
+
+    def _region_total(self):
+        if self._total is None:
+            total = 0.0
+            for root in self._roots:
+                values = self._region.metric_values(root)
+                if values:
+                    total += float(values.get(self._key, 0.0))
+            self._total = total
+        return self._total
+
+    def get(self, path, default=None):
+        values = self._region.metric_values(path)
+        if not values:
+            return default
+        value = values.get(self._key, None)
+        if value is None:
+            return default
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            return default
+        if math.isnan(f) or math.isinf(f):
+            return default
+        if self._kind == "percent":
+            return max(0.0, min(1.0, f))
+        total = self._region_total()
+        if not total or math.isnan(total):
+            return default
+        return max(0.0, min(1.0, f / total))
+
+
+class _RegionChildren:
+    """Lazy ``TreeView.children``: keep only branches with selected instances."""
+
+    def __init__(self, region):
+        self._region = region
+
+    def get(self, parent, default=None):
+        kids = self._region.children.get(parent, [])
+        kept = [child for child in kids if self._region.any_selected(child)]
+        self._region.prefetch(kept)
+        return kept
+
+
+class _RegionCounts:
+    """Lazy ``TreeView.counts`` (the region tree is shown with threshold 0)."""
+
+    def __init__(self, region):
+        self._region = region
+
+    def get(self, path, default=None):
+        stats = self._region.stats(path)
+        return 0 if stats is None else stats["count"]
+
+
+def region_columns(region, roots, include_macros: bool = False) -> List[Column]:
+    """Columns for the region tree, driven by the same registry as the main tree."""
+    metrics = schema.METRICS if include_macros else schema.STD_METRICS
+    cols = []
+    for m in metrics:
+        series = _RegionSeries(region, m.key)
+        bar = (None if m.gradient
+               else _RegionBar(region, roots, m.key, m.kind))
+        fmt = (lambda v, k=m.kind: _format_region_metric(k, v))
+        cols.append(_column(m, series, bar, fmt))
+    return cols
+
+
+def view_for_region(region, include_macros: bool = False) -> TreeView:
+    """A TreeView restricted to branches with selected, non-physical instances."""
+    roots = [root for root in region.roots if region.any_selected(root)]
+    return TreeView(
+        roots=roots,
+        children=_RegionChildren(region),
+        counts=_RegionCounts(region),
+        columns=region_columns(region, roots, include_macros),
+        paths=[],
     )
 
 

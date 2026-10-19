@@ -69,6 +69,10 @@ It has been run on real designs, and the numbers are on record rather than asser
 
 - **10 standard-cell metrics + macro columns** — computed per hierarchy via
   flattened (all-descendants) aggregation.
+- **Metrics menu** — the toolbar's **Metrics** menu toggles any metric column on/off
+  without rebuilding the tree. The choice survives threshold/macro rebuilds and also
+  applies to the selected-region tree; macro entries appear when *Include macros* is
+  on, and Density% in physical mode. Compare mode keeps its fixed V1/V2/Δ columns.
 - **Data bars** — background progress bars in metric cells: count/area scale to the
   top-level total; ULVT%/MB%/D1D2% are color-coded red→green (bad→good) over a
   configurable min–max range.
@@ -517,6 +521,19 @@ yellow → red → near-white, matching the INNOVUS ramp) shows the current rang
 0/25/50/75/100% value ticks. Pan/zoom with the mouse wheel, press **`F`** to fit,
 and hover to read the cursor coordinates and grid value in the bottom-right status
 bar.
+
+#### Selected region tree
+
+Left-drag on the heat map to select a rectangle of grid tiles. The release snaps to
+tile edges and outlines the region; a second hierarchy tree appears below the main
+one with the same columns, restricted to instances whose boxes overlap the selection.
+Area, ULVT/ B/I / macro area and bit counts are apportioned by the overlap fraction;
+counts count each intersecting instance once. **Filler, tap and decap
+(`is_physical_only`) instances are excluded** from the region tree. The region tree
+ignores the toolbar Min threshold, follows `schema.METRICS` automatically, and uses
+the same expand/collapse/sort/click-to-contour behavior. Middle-drag still pans,
+a click selects one tile, and **Esc** or a click outside the die clears the selection.
+Selections can be made in physical mode only; metal mode is unchanged.
 
 #### Hierarchy contours & density
 

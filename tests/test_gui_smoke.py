@@ -4,6 +4,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PyQt5 import QtCore
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
 
@@ -257,6 +258,40 @@ def test_layout_contour_toggle(app, tmp_path):
     assert view._contour_items == []
 
 
+def test_stale_contour_job_is_skipped_before_compute(app):
+    """A queued job that already lost the race must not run the geometry."""
+    from vlsi_viewer.model import ContourWorker, _ContourJob
+
+    class FakePhysical:
+        def __init__(self):
+            self.calls = []
+
+        def contour_for(self, path):
+            self.calls.append(path)
+            return []
+
+    worker = ContourWorker()
+    ready = []
+    worker.contour_ready.connect(lambda *args: ready.append(args))
+    physical = FakePhysical()
+
+    worker._latest = (2, "B")
+    _ContourJob(physical, "A", 1, worker).run()
+    assert physical.calls == [] and ready == []
+
+    worker._latest = (1, "A")
+    _ContourJob(physical, "A", 1, worker).run()
+    assert physical.calls == ["A"] and ready == [("A", 1, [])]
+
+
+def test_clearing_the_contour_invalidates_pending_work(app, tmp_path):
+    view = _tiny_layout(tmp_path)
+    view.toggle_contour("TOP")
+    assert view._contour_worker._latest is not None
+    view.toggle_contour("TOP")          # same path -> clear
+    assert view._contour_worker._latest is None
+
+
 def test_contour_stale_token_ignored(app, tmp_path):
     """A stale background result must not overwrite a newer selection."""
     view = _tiny_layout(tmp_path)
@@ -385,6 +420,380 @@ def test_layout_hover_reports_coords_and_grid(app, tmp_path):
     # out-of-die hover reports coordinates only
     view._on_hover(QPointF(50.0, 50.0))
     assert "x=50.00" in msgs[-1] and "density" not in msgs[-1]
+
+
+def _mouse(kind, x, y, button, buttons):
+    from PyQt5.QtCore import QPointF
+    from PyQt5.QtGui import QMouseEvent
+    return QMouseEvent(kind, QPointF(x, y), button, buttons, Qt.NoModifier)
+
+
+def test_left_drag_emits_select_area_not_a_click(app):
+    """The release rect must be press->release, not release->release.
+
+    The old code derived both corners from the release position, so `sigSelectArea` could
+    never fire and every drag looked like a click at the press point.
+    """
+    from vlsi_viewer.genericView import GenericGraphicsView
+
+    view = GenericGraphicsView()
+    areas, positions, drags = [], [], []
+    view.sigSelectArea.connect(areas.append)
+    view.sigSelectPos.connect(positions.append)
+    view.sigSelectDragged.connect(drags.append)
+
+    from PyQt5.QtCore import QEvent
+    view.mousePressEvent(_mouse(QEvent.MouseButtonPress, 10, 10,
+                                Qt.LeftButton, Qt.LeftButton))
+    view.mouseMoveEvent(_mouse(QEvent.MouseMove, 50, 50,
+                               Qt.NoButton, Qt.LeftButton))
+    view.mouseReleaseEvent(_mouse(QEvent.MouseButtonRelease, 50, 50,
+                                  Qt.LeftButton, Qt.NoButton))
+
+    assert drags == areas == [QtCore.QRect(QtCore.QPoint(10, 10),
+                                            QtCore.QPoint(50, 50))]
+    assert positions == []
+
+
+def test_left_click_emits_select_pos(app):
+    from vlsi_viewer.genericView import GenericGraphicsView
+
+    view = GenericGraphicsView()
+    areas, positions = [], []
+    view.sigSelectArea.connect(areas.append)
+    view.sigSelectPos.connect(positions.append)
+
+    from PyQt5.QtCore import QEvent
+    view.mousePressEvent(_mouse(QEvent.MouseButtonPress, 10, 10,
+                                Qt.LeftButton, Qt.LeftButton))
+    view.mouseReleaseEvent(_mouse(QEvent.MouseButtonRelease, 11, 11,
+                                  Qt.LeftButton, Qt.NoButton))
+
+    assert areas == []
+    assert positions == [QtCore.QPoint(10, 10)]
+
+
+def test_middle_drag_does_not_emit_selection(app):
+    from vlsi_viewer.genericView import GenericGraphicsView
+
+    view = GenericGraphicsView()
+    drags = []
+    view.sigSelectDragged.connect(drags.append)
+
+    from PyQt5.QtCore import QEvent
+    view.mousePressEvent(_mouse(QEvent.MouseButtonPress, 10, 10,
+                                Qt.MiddleButton, Qt.MiddleButton))
+    view.mouseMoveEvent(_mouse(QEvent.MouseMove, 50, 50,
+                               Qt.NoButton, Qt.MiddleButton))
+
+    assert drags == []
+
+
+def _vp_for_physical(view, px, py):
+    """Viewport point for a physical coordinate in a LayoutView."""
+    from PyQt5.QtCore import QPointF
+    _x0, y0, _x1, y1 = view._physical.extent
+    return view._view.mapFromScene(QPointF(px, y0 + y1 - py))
+
+
+def test_layout_drag_emits_a_snapped_selection(app, tmp_path):
+    from vlsi_viewer.ui_layout import LayoutView
+
+    view = LayoutView(_tiny_physical(tmp_path))   # extent 20x20, grid 4 -> 5x5
+    got = []
+    view.region_selected.connect(got.append)
+
+    p0 = _vp_for_physical(view, 0.5, 0.5)
+    p1 = _vp_for_physical(view, 3.5, 3.5)
+    view._on_select_dragged(QtCore.QRect(p0, p1).normalized())
+    assert got == []                       # preview only, no region yet
+    assert view._rubber_item is not None
+
+    view._on_select_area(QtCore.QRect(p0, p1).normalized())
+    assert view._rubber_item is None
+    assert len(got) == 1
+    sel = got[0]
+    assert sel.rect == (0.0, 0.0, 4.0, 4.0)
+    assert (sel.col0, sel.row0, sel.col1, sel.row1) == (0, 0, 0, 0)
+    assert view._sel_item is not None
+    assert view._sel_item.zValue() == 30
+    assert view._sel_item.acceptedMouseButtons() == Qt.NoButton
+
+
+def test_layout_click_selects_one_tile(app, tmp_path):
+    from vlsi_viewer.ui_layout import LayoutView
+
+    view = LayoutView(_tiny_physical(tmp_path))
+    got = []
+    view.region_selected.connect(got.append)
+    view._on_select_pos(_vp_for_physical(view, 1.5, 1.5))
+    assert got and got[-1].rect == (0.0, 0.0, 4.0, 4.0)
+
+    # A click outside the tile grid clears.
+    view._on_select_pos(_vp_for_physical(view, 25.0, 25.0))
+    assert got[-1] is None
+    assert view._sel_item is None
+
+
+def test_layout_clear_selection_emits_none(app, tmp_path):
+    from vlsi_viewer.ui_layout import LayoutView
+
+    view = LayoutView(_tiny_physical(tmp_path))
+    got = []
+    view.region_selected.connect(got.append)
+    view._on_select_pos(_vp_for_physical(view, 1.5, 1.5))
+    view.clear_selection()
+    assert got[-1] is None
+    assert view._sel_item is None and view._rubber_item is None
+
+
+def test_layout_selection_disabled_when_not_selectable(app, tmp_path):
+    from vlsi_viewer.ui_layout import LayoutView
+
+    view = LayoutView(_tiny_physical(tmp_path), selectable=False)
+    got = []
+    view.region_selected.connect(got.append)
+    p = _vp_for_physical(view, 1.5, 1.5)
+    view._on_select_pos(p)
+    view._on_select_area(QtCore.QRect(p, p))
+    assert got == []
+    assert view._sel_item is None
+
+
+def test_clear_view_restores_an_empty_single_column_tree(app, design):
+    tree = HierarchyTree()
+    tree.set_view(view_for_single(design))
+    assert tree.topLevelItemCount() == 1
+    tree.clear_view()
+    assert tree.topLevelItemCount() == 0
+    assert tree.columnCount() == 1
+    assert tree.headerItem().text(0) == "Hierarchy"
+
+
+def test_reset_first_population_expands_the_root_again(app, design):
+    tree = HierarchyTree()
+    tree.set_view(view_for_single(design))
+    tree.topLevelItem(0).setExpanded(False)
+    tree.set_view(view_for_single(design))       # preserves the collapsed root
+    assert not tree.topLevelItem(0).isExpanded()
+    tree.reset_first_population()
+    tree.set_view(view_for_single(design))       # first population again
+    assert tree.topLevelItem(0).isExpanded()
+
+
+def test_copy_full_name_handles_the_root(app):
+    assert HierarchyTree._full_name("TOP") == "TOP"
+    assert HierarchyTree._full_name("TOP/MACROA") == "MACROA"
+
+
+def _region_fixture(tmp_path):
+    """A nested design/physical pair with a selection covering only TOP/u1."""
+    import json
+    from vlsi_viewer.metrics import build_design
+    from vlsi_viewer.physical import build_physical
+    from vlsi_viewer.region import RegionData, selection_from_points
+
+    cell = tmp_path / "rcell.json"
+    cell.write_text(json.dumps({
+        "C1": {"area": 4, "size_x": 2, "size_y": 2,
+               "is_inverter": True, "drive_size": 1},
+    }))
+    top = tmp_path / "rtop.json"
+    top.write_text(json.dumps({
+        "top_name": "TOP", "boundary": [[0, 0], [8, 8]],
+        "instances": {
+            "u1": {"cell_name": "SUB", "location_x": 0, "location_y": 0},
+            "u2": {"cell_name": "SUB", "location_x": 4, "location_y": 0},
+        },
+    }))
+    sub = tmp_path / "rsub.json"
+    sub.write_text(json.dumps({
+        "top_name": "SUB", "boundary": [[0, 0], [4, 4]],
+        "instances": {
+            "a": {"cell_name": "C1", "location_x": 0, "location_y": 0},
+            "b": {"cell_name": "C1", "location_x": 1, "location_y": 0},
+        },
+    }))
+    paths = [str(top), str(sub)]
+    design = build_design(paths, str(cell))
+    physical = build_physical(paths, str(cell), grid_size=4.0)
+    selection = selection_from_points(0, 0, 3, 3, physical.extent, 4.0,
+                                      physical.rows, physical.cols)
+    return design, physical, RegionData(physical, design, selection)
+
+
+def test_region_panel_shows_and_clears(app, tmp_path):
+    from vlsi_viewer.ui_region import RegionPanel
+
+    _design, _physical, region = _region_fixture(tmp_path)
+    panel = RegionPanel()
+    assert panel.isHidden()                 # nothing selected yet
+    assert "Drag" in panel.summary.text()
+    panel.show_region(region, include_macros=False)
+    assert not panel.isHidden()
+    assert panel.tree.topLevelItemCount() == 1
+    assert "tiles" in panel.summary.text()
+    panel.clear()
+    assert panel.isHidden()
+    assert panel.tree.topLevelItemCount() == 0
+    assert "Drag" in panel.summary.text()
+
+
+def test_mainwindow_region_tree_wiring(app, tmp_path):
+    design, physical, region = _region_fixture(tmp_path)
+    w = MainWindow(design, physical=physical)
+    try:
+        assert w._region_panel is not None
+        assert w._region_tree is w._region_panel.tree
+        assert w._region_panel.isHidden()   # nothing selected at start
+        assert "Drag" in w._region_panel.summary.text()
+
+        w._on_region_selected(region.selection)
+        assert w._region is not None
+        assert not w._region_panel.isHidden()
+        assert w._region_tree.topLevelItemCount() == 1
+
+        # The main tree's Min threshold must not filter or rebuild the region tree.
+        w.min_spin.setValue(100000)
+        assert w._region_tree.topLevelItemCount() == 1
+
+        # Include macros adds the two macro columns to both trees.
+        before = w._region_tree.columnCount()
+        w.macro_check.setChecked(True)
+        assert w._region_tree.columnCount() == before + 2
+
+        # A region-tree node click uses the same contour toggle as the main tree.
+        w._region_tree.node_clicked.emit("TOP")
+        assert w._layout._contour_path == "TOP"
+
+        w._layout.clear_selection()
+        assert w._region is None
+        assert w._region_tree.topLevelItemCount() == 0
+        assert w._region_panel.isHidden()
+    finally:
+        w.close()
+
+
+def test_threshold_change_rebuilds_the_tree_once(app, design, tmp_path):
+    w = MainWindow(design, physical=_tiny_physical(tmp_path))
+    try:
+        calls = []
+        original = w._tree.rebuild
+
+        def counted():
+            calls.append(1)
+            return original()
+
+        w._tree.rebuild = counted
+        w.min_spin.setValue(0)
+        assert len(calls) == 1
+    finally:
+        w.close()
+
+
+def test_macro_toggle_rebuilds_the_tree_once(app, design, tmp_path):
+    w = MainWindow(design, physical=_tiny_physical(tmp_path))
+    try:
+        calls = []
+        original = w._tree.rebuild
+
+        def counted():
+            calls.append(1)
+            return original()
+
+        w._tree.rebuild = counted
+        w.macro_check.setChecked(True)
+        assert len(calls) == 1
+    finally:
+        w.close()
+
+
+def _action(menu, label):
+    return next(action for action in menu.actions() if action.text() == label)
+
+
+def test_metrics_menu_hides_and_shows_a_column(app, design):
+    w = MainWindow(design)
+    try:
+        labels = [action.text() for action in w.metrics_menu.actions()]
+        assert "Area" in labels and "Count" in labels
+        action = _action(w.metrics_menu, "Area")
+        assert action.isCheckable() and action.isChecked()
+
+        action.trigger()
+        assert not action.isChecked()
+        column = w._tree.column_index("area")
+        assert column is not None and w._tree.isColumnHidden(column)
+
+        action.trigger()
+        assert action.isChecked()
+        assert not w._tree.isColumnHidden(column)
+    finally:
+        w.close()
+
+
+def test_hidden_metric_survives_a_rebuild(app, design):
+    w = MainWindow(design)
+    try:
+        _action(w.metrics_menu, "Area").trigger()
+        column = w._tree.column_index("area")
+        assert w._tree.isColumnHidden(column)
+        w.min_spin.setValue(0)
+        assert w._tree.isColumnHidden(column)
+    finally:
+        w.close()
+
+
+def test_metrics_menu_follows_include_macros(app, design):
+    w = MainWindow(design)
+    try:
+        labels = [action.text() for action in w.metrics_menu.actions()]
+        assert "Macro Cnt" not in labels
+        w.macro_check.setChecked(True)
+        labels = [action.text() for action in w.metrics_menu.actions()]
+        assert "Macro Cnt" in labels and "Macro Area" in labels
+    finally:
+        w.close()
+
+
+def test_metrics_menu_offers_density_in_physical_mode(app, design, tmp_path):
+    w = MainWindow(design, physical=_tiny_physical(tmp_path))
+    try:
+        labels = [action.text() for action in w.metrics_menu.actions()]
+        assert "Density%" in labels
+        _action(w.metrics_menu, "Density%").trigger()
+        column = w._tree.column_index("density")
+        assert column is not None and w._tree.isColumnHidden(column)
+    finally:
+        w.close()
+
+
+def test_region_tree_follows_hidden_metrics(app, tmp_path):
+    design, physical, region = _region_fixture(tmp_path)
+    w = MainWindow(design, physical=physical)
+    try:
+        _action(w.metrics_menu, "Area").trigger()
+        w._on_region_selected(region.selection)
+        column = w._region_tree.column_index("area")
+        assert column is not None and w._region_tree.isColumnHidden(column)
+    finally:
+        w.close()
+
+
+def test_compare_mode_has_no_metrics_menu(app, design):
+    w = MainWindow(design, design, threshold=0)
+    try:
+        assert w.metrics_button is None and w.metrics_menu is None
+    finally:
+        w.close()
+
+
+def test_mainwindow_tree_only_has_no_region_panel(app, design):
+    w = MainWindow(design)
+    try:
+        assert w._region_panel is None
+    finally:
+        w.close()
 
 
 def test_diff_view(app, design):

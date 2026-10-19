@@ -8,15 +8,27 @@ placement frame using :mod:`vlsi_viewer.coordinateProcess`.
 import logging
 import threading
 import time
+from collections import OrderedDict
 
 import numpy as np
 
-from . import config, schema
+from . import config, contour, schema
 from .assembly import HierarchyAssembler, _ORIENT_MATRIX
 from .coordinateProcess import CoordinateProcess, Orient
 from .loader import load_block, load_cell_info
 
 logger = logging.getLogger(__name__)
+
+
+class _ContourEntry:
+    """Lazily computed products for one ``(path, gap)`` pair."""
+
+    __slots__ = ("rects", "loops", "area")
+
+    def __init__(self):
+        self.rects = None
+        self.loops = None
+        self.area = None
 
 
 class PhysicalData:
@@ -52,14 +64,32 @@ class PhysicalData:
         self._dyn = dyn                        # (N,) float32
         self._leaf_paths = leaf_paths          # (N,) object array, sorted lexicographically
         self.contour_gap = contour_gap
-        self._contour_cache = {}               # (path, gap) -> (loops, area)
+        self._contour_cache = {}               # (path, gap) -> _ContourEntry
         self._contour_lock = threading.Lock()
+        self._product_locks = {}               # (path, gap, product) -> Lock
+        self._slice_cache = {}                 # path -> slice
+        self._slice_cache_limit = 4096
+        # Heavy products (merged rects, loop points) are bounded; areas are tiny
+        # and stay cached even when their entry's heavy payload is evicted.
+        self._heavy_order = OrderedDict()      # (path, gap) -> None, LRU
+        self._heavy_rects = 0
+        self._heavy_points = 0
+        self._max_cached_rects = 500_000
+        self._max_cached_points = 100_000
+        # Same float32 expression density_for used to recompute per path.
+        self._box_area = ((self._geom[:, 2] - self._geom[:, 0])
+                          * (self._geom[:, 3] - self._geom[:, 1])).astype(np.float32)
         # Pin density is the one grid that is not built from the box arrays: it needs every
         # placement's frame and its cell's pin geometry, so ``build_physical`` computes it
         # alongside the others, before the window exists - and hands it over here. ``None`` for
         # a source with no pins at all (the json path), which is what keeps the map out of the
         # selector there.
         self._pins = None
+        # Per-box cell code + a small per-cell attribute table, filled by
+        # ``build_physical`` after construction (like ``_pins``). The region tree
+        # needs them to reproduce the hierarchy metrics from the box slices.
+        self._cell_codes = None
+        self._cell_attrs = None
 
     @property
     def has_pins(self) -> bool:
@@ -84,11 +114,23 @@ class PhysicalData:
 
     def _slice_for(self, path: str):
         """Slice of the sorted arrays covering ``path`` and its descendants."""
+        cached = self._slice_cache.get(path)
+        if cached is not None:
+            return cached
         # The upper bound includes the path separator so a sibling whose name
         # merely extends the queried path (TOP/cpu vs TOP/cpu_aux) is excluded.
         left = int(np.searchsorted(self._leaf_paths, path, side="left"))
         right = int(np.searchsorted(self._leaf_paths, path + "/￿", side="left"))
-        return slice(left, right)
+        cached = slice(left, right)
+        if len(self._slice_cache) < self._slice_cache_limit:
+            self._slice_cache[path] = cached
+        return cached
+
+    def _boxes_for_slice(self, sl):
+        """Filtered view/copy of one slice; physical-only boxes are dropped."""
+        mask = self._is_phys_only[sl]
+        boxes = self._geom[sl]
+        return boxes[~mask] if mask.any() else boxes
 
     def boxes_for(self, path: str):
         """(k, 4) float32 box array for ``path`` and its descendants.
@@ -96,42 +138,113 @@ class PhysicalData:
         Physical-only boxes are dropped here: they exist for the density grid alone, so
         they must not reach the contour or the Density% metric.
         """
-        sl = self._slice_for(path)
-        return self._geom[sl][~self._is_phys_only[sl]]
+        return np.array(self._boxes_for_slice(self._slice_for(path)), copy=True)
+
+    def _lock_for(self, key):
+        """Per-product lock; only same-key work serializes, not other paths."""
+        with self._contour_lock:
+            lock = self._product_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._product_locks[key] = lock
+            return lock
+
+    def _account_heavy(self, key, rects_delta=0, points_delta=0):
+        """Track cached rectangles/points and evict the least-recently-used entry."""
+        with self._contour_lock:
+            self._heavy_order[key] = None
+            self._heavy_order.move_to_end(key)
+            self._heavy_rects += rects_delta
+            self._heavy_points += points_delta
+            while ((self._heavy_rects > self._max_cached_rects
+                    or self._heavy_points > self._max_cached_points)
+                   and len(self._heavy_order) > 1):
+                old_key, _ = self._heavy_order.popitem(last=False)
+                old = self._contour_cache.get(old_key)
+                if old is None:
+                    continue
+                if old.rects is not None:
+                    self._heavy_rects -= len(old.rects)
+                    old.rects = None
+                if old.loops is not None:
+                    self._heavy_points -= sum(len(loop) for loop in old.loops)
+                    old.loops = None
+
+    def clear_contour_cache(self):
+        """Drop all cached contours/areas and the heavy-payload accounting."""
+        with self._contour_lock:
+            self._contour_cache.clear()
+            self._heavy_order.clear()
+            self._heavy_rects = 0
+            self._heavy_points = 0
+
+    def _ensure_rects(self, path: str, gap: float, sl=None):
+        """Merged rectangles for one path, computed once across threads."""
+        key = (path, gap)
+        with self._lock_for((key, "rects")):
+            with self._contour_lock:
+                entry = self._contour_cache.get(key)
+                if entry is not None and entry.rects is not None:
+                    if key in self._heavy_order:
+                        self._heavy_order.move_to_end(key)
+                    return entry.rects
+            if sl is None:
+                sl = self._slice_for(path)
+            boxes = self._boxes_for_slice(sl)
+            t0 = time.perf_counter()
+            rects = contour.merge_rects(boxes, gap)
+            with self._contour_lock:
+                entry = self._contour_cache.setdefault(key, _ContourEntry())
+                entry.rects = rects
+            self._account_heavy(key, rects_delta=len(rects))
+            logger.info("contour: %s (gap %g, %d boxes) -> %d merged rect(s) (%.1fs)",
+                        path, gap, len(boxes), len(rects), time.perf_counter() - t0)
+            return rects
+
+    def _ensure_area(self, path: str, gap: float, sl=None) -> float:
+        key = (path, gap)
+        with self._lock_for((key, "area")):
+            with self._contour_lock:
+                entry = self._contour_cache.get(key)
+                if entry is not None and entry.area is not None:
+                    return entry.area
+            rects = self._ensure_rects(path, gap, sl)
+            t0 = time.perf_counter()
+            area = contour.rect_union_area(rects)
+            with self._contour_lock:
+                entry = self._contour_cache.setdefault(key, _ContourEntry())
+                entry.area = area
+            logger.info("contour area: %s (gap %g, %d rect(s)) -> %.0f (%.1fs)",
+                        path, gap, len(rects), area, time.perf_counter() - t0)
+            return area
+
+    def _ensure_loops(self, path: str, gap: float):
+        key = (path, gap)
+        with self._lock_for((key, "loops")):
+            with self._contour_lock:
+                entry = self._contour_cache.get(key)
+                if entry is not None and entry.loops is not None:
+                    if key in self._heavy_order:
+                        self._heavy_order.move_to_end(key)
+                    return entry.loops
+            rects = self._ensure_rects(path, gap)
+            t0 = time.perf_counter()
+            loops = contour.loops_from_rects(rects)
+            with self._contour_lock:
+                entry = self._contour_cache.setdefault(key, _ContourEntry())
+                entry.loops = loops
+            self._account_heavy(key, points_delta=sum(len(loop) for loop in loops))
+            logger.info("contour: %s (gap %g) -> %d loop(s) (%.1fs)",
+                        path, gap, len(loops), time.perf_counter() - t0)
+            return loops
 
     def _contour(self, path: str, gap: float):
         """Cached contour loops for a path at a gap (thread-safe)."""
-        from . import contour
-        key = ("loops", path, gap)
-        with self._contour_lock:
-            cached = self._contour_cache.get(key)
-            if cached is not None:
-                return cached
-        boxes = self.boxes_for(path)
-        t0 = time.perf_counter()
-        loops = contour.contour_loops(boxes, gap)
-        with self._contour_lock:
-            self._contour_cache[key] = loops
-        logger.info("contour: %s (gap %g, %d boxes) -> %d loop(s) (%.1fs)",
-                    path, gap, len(boxes), len(loops), time.perf_counter() - t0)
-        return loops
+        return self._ensure_loops(path, gap)
 
     def _contour_area(self, path: str, gap: float) -> float:
         """Cached contour area for a path at a gap (thread-safe)."""
-        from . import contour
-        key = ("area", path, gap)
-        with self._contour_lock:
-            cached = self._contour_cache.get(key)
-            if cached is not None:
-                return cached
-        boxes = self.boxes_for(path)
-        t0 = time.perf_counter()
-        area = contour.contour_area(boxes, gap)
-        with self._contour_lock:
-            self._contour_cache[key] = area
-        logger.info("contour area: %s (gap %g, %d boxes) -> %.0f (%.1fs)",
-                    path, gap, len(boxes), area, time.perf_counter() - t0)
-        return area
+        return self._ensure_area(path, gap)
 
     def contour_for(self, path: str):
         """Closed contour loops for a hierarchy path (cached)."""
@@ -147,10 +260,10 @@ class PhysicalData:
         Physical-only boxes are ignored entirely, so filler area neither raises the
         numerator nor distorts the macro term.
         """
-        area = self._contour_area(path, self.contour_gap)
         sl = self._slice_for(path)
+        area = self._ensure_area(path, self.contour_gap, sl)
         phys = self._is_phys_only[sl]
-        box_area = (self._geom[sl, 2] - self._geom[sl, 0]) * (self._geom[sl, 3] - self._geom[sl, 1])
+        box_area = self._box_area[sl]
         mac = float(box_area[self._is_macro[sl] & ~phys].sum())
         non = float(box_area[~self._is_macro[sl] & ~phys].sum())
         den = area - mac
@@ -192,6 +305,28 @@ def _pin_offsets(sizes_x, sizes_y):
         offx[i] = -np.minimum.reduce(xs)
         offy[i] = -np.minimum.reduce(ys)
     return offx, offy
+
+
+def _cell_attr_arrays(cells):
+    """Cell attributes indexed by the same code as ``PhysicalData._cell_codes``.
+
+    ``metrics._flatten`` reads the library's ``area``, register bits and cell-class
+    flags for each counted leaf; the region tree carries the same facts as small
+    arrays so a selected box can be aggregated without retaining a second leaf frame.
+    """
+    reg_bits = np.where(cells["is_register_cell"].to_numpy(dtype=bool),
+                        cells["register_bit_count"].to_numpy(dtype=np.float64), 0.0)
+    return {
+        "area": cells["area"].to_numpy(dtype=np.float64),
+        "reg_bits": reg_bits,
+        "mb_bits": np.where(reg_bits > 1, reg_bits, 0.0),
+        "drive_size": cells["drive_size"].to_numpy(dtype=np.int64),
+        "is_bi": (cells["is_buffer"].to_numpy(dtype=bool)
+                  | cells["is_inverter"].to_numpy(dtype=bool)),
+        "is_pulse": cells["is_pulse_latch"].to_numpy(dtype=bool),
+        "is_clock": cells["is_clock_cell"].to_numpy(dtype=bool),
+        "is_icg": cells["is_integrated_clock_gating_cell"].to_numpy(dtype=bool),
+    }
 
 
 def _pin_table(cells, pins):
@@ -338,6 +473,7 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
 
     sizes = {name: (row["size_x"], row["size_y"])
              for name, row in cells.iterrows()}
+    code_of = {name: i for i, name in enumerate(cells.index)}
     is_ulvt = {name: bool(row["is_ULVT"]) for name, row in cells.iterrows()}
     is_macro = {name: bool(row["is_macro"]) for name, row in cells.iterrows()}
     phys_only_cells = {name for name, row in cells.iterrows()
@@ -347,6 +483,7 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
     boundary_polys = []
     _xs0, _ys0, _xs1, _ys1 = [], [], [], []
     _leaks, _dyns, _ulvts, _macros, _phys_onlies, _paths = [], [], [], [], [], []
+    _codes = []
 
     def _join(prefix, rel):
         return f"{prefix}/{rel}" if prefix else rel
@@ -419,6 +556,7 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
             _phys_onlies.append(bool(getattr(row, "is_physical_only"))
                                 or cell in phys_only_cells)
             _paths.append(_join(prefix, getattr(row, "leaf_instance_name")))
+            _codes.append(code_of[cell])
         visiting.discard(name)
 
     # Every phase below announces itself before it runs: on a chip-level design the walk and the
@@ -443,7 +581,8 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
     geom, leak, dyn = geom[order], leak[order], dyn[order]
     is_ulvt, is_macro = is_ulvt[order], is_macro[order]
     is_phys_only, leaf_paths = is_phys_only[order], leaf_paths[order]
-    del _xs0, _ys0, _xs1, _ys1, _leaks, _dyns, _ulvts, _macros, _phys_onlies, _paths
+    cell_codes = np.asarray(_codes, dtype=np.int32)[order]
+    del _xs0, _ys0, _xs1, _ys1, _leaks, _dyns, _ulvts, _macros, _phys_onlies, _paths, _codes
 
     bx = [p[0] for p in top_boundary]
     by = [p[1] for p in top_boundary]
@@ -580,6 +719,8 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
                         extent, rows, cols, density, leakage, dynamic, ulvt,
                         geom, is_ulvt, is_macro, is_phys_only, leak, dyn,
                         leaf_paths, contour_gap)
+    data._cell_codes = cell_codes
+    data._cell_attrs = _cell_attr_arrays(cells)
     if pins:
         # Built here with the other grids, and before the window exists: it needs every
         # placement's frame and its cell's pin geometry rather than the box arrays, but a

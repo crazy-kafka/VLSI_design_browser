@@ -17,6 +17,7 @@ class GenericGraphicsView(QtWidgets.QGraphicsView):
     sigSceneMouseMoved = QtCore.pyqtSignal(QtCore.QPointF)
     sigSelectPos = QtCore.pyqtSignal(QtCore.QPoint)
     sigSelectArea = QtCore.pyqtSignal(QtCore.QRect)
+    sigSelectDragged = QtCore.pyqtSignal(QtCore.QRect)
     sigScaleChanged = QtCore.pyqtSignal(QtCore.QObject)
     lastFileDir = None
 
@@ -221,21 +222,14 @@ class GenericGraphicsView(QtWidgets.QGraphicsView):
             y1 = self.zoomBoxLastPos.y()
             scene_rect = QtCore.QRectF(min(x0, x1), min(y0, y1), abs(x0 - x1), abs(y0 - y1))
         elif ev.button() == QtCore.Qt.LeftButton:
-            cur_pos = ev.pos()
-            x0 = cur_pos.x()
-            y0 = cur_pos.y()
+            press = self.mousePressPos if self.mousePressPos is not None else ev.pos()
             self.mouseReleasePos = ev.pos()
-            x1 = self.mouseReleasePos.x()
-            y1 = self.mouseReleasePos.y()
+            rect = QtCore.QRect(press, self.mouseReleasePos).normalized()
 
-            width = abs(x0 - x1)
-            height = abs(y0 - y1)
-            if width > 3 and height > 3:
-                aleft = min(x0, x1)
-                atop = min(y0, y1)
-                self.sigSelectArea.emit(QtCore.QRect(aleft, atop, width, height))
+            if rect.width() > 3 or rect.height() > 3:
+                self.sigSelectArea.emit(rect)
             else:
-                self.sigSelectPos.emit(self.mousePressPos)
+                self.sigSelectPos.emit(press)
 
         super().mouseReleaseEvent(ev)
         return
@@ -250,6 +244,11 @@ class GenericGraphicsView(QtWidgets.QGraphicsView):
             super().mouseMoveEvent(ev)
 
             self.sigSceneMouseMoved.emit(self.mapToScene(lpos))
+
+            if ev.buttons() & QtCore.Qt.LeftButton and self.mousePressPos is not None:
+                rect = QtCore.QRect(self.mousePressPos, lpos).normalized()
+                if rect.width() > 3 or rect.height() > 3:
+                    self.sigSelectDragged.emit(rect)
 
             if ev.buttons() in [QtCore.Qt.MiddleButton]:
                 px = self.pixelSize()

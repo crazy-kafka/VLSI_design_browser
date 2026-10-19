@@ -138,6 +138,7 @@ class HierarchyTree(QTreeWidget):
         self._populated_once = False
         self._path_items = {}   # hierarchy path -> item (for lazy density updates)
         self._density_col = None
+        self._hidden_keys = set()  # metric keys hidden from the table
         self.setAlternatingRowColors(True)
         self.setUniformRowHeights(True)
         self.setItemDelegate(BarDelegate(self))
@@ -162,6 +163,47 @@ class HierarchyTree(QTreeWidget):
     def set_view(self, view: TreeView):
         self._view = view
         self.rebuild()
+
+    def column_index(self, key: str):
+        """1-based tree column for a metric key, or None when not in this view."""
+        if self._view is None:
+            return None
+        for index, column in enumerate(self._view.columns, start=1):
+            if column.key == key:
+                return index
+        return None
+
+    def set_metric_hidden(self, key: str, hidden: bool = True):
+        """Hide/show one metric column; the choice survives rebuilds."""
+        if hidden:
+            self._hidden_keys.add(key)
+        else:
+            self._hidden_keys.discard(key)
+        self._apply_hidden_columns()
+
+    def _apply_hidden_columns(self):
+        if self._view is None:
+            return
+        for index, column in enumerate(self._view.columns, start=1):
+            self.setColumnHidden(index, column.key in self._hidden_keys)
+
+    def reset_first_population(self):
+        """Make the next rebuild treat the tree as freshly populated.
+
+        ``rebuild()`` otherwise preserves the previous expansion state, which would
+        leave the root of a new region selection collapsed.
+        """
+        self._populated_once = False
+
+    def clear_view(self):
+        """Empty the tree and restore the single-column header."""
+        self._view = None
+        self.clear()
+        self._path_items = {}
+        self._density_col = None
+        self._populated_once = False
+        self.setColumnCount(1)
+        self.setHeaderLabels(["Hierarchy"])
 
     def set_threshold(self, n: int, rebuild: bool = True):
         self._threshold = n
@@ -206,6 +248,7 @@ class HierarchyTree(QTreeWidget):
             # preserve the previously expanded nodes
             for path in expanded:
                 self._locate_and_expand(path)
+        self._apply_hidden_columns()
         self.resizeColumnToContents(0)
 
     def _passes_threshold(self, path: str) -> bool:
@@ -325,9 +368,14 @@ class HierarchyTree(QTreeWidget):
         if path is None:
             return
         menu = QMenu(self)
-        menu.addAction("Copy full name", lambda: self._copy(path.split('/', 1)[1]))
+        menu.addAction("Copy full name", lambda: self._copy(self._full_name(path)))
         menu.addAction("Copy base name", lambda: self._copy(path.rsplit("/", 1)[-1]))
         menu.exec_(self.viewport().mapToGlobal(pos))
+
+    @staticmethod
+    def _full_name(path: str) -> str:
+        """Path without its top-level prefix; a root such as ``TOP`` is unchanged."""
+        return path.partition("/")[2] or path
 
     def _on_header_context_menu(self, pos):
         col_idx = self.header().logicalIndexAt(pos)

@@ -1,16 +1,20 @@
 """Main window: toolbar (search / threshold / macros); designs injected by the CLI."""
 import logging
 
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
-    QAction, QCheckBox, QComboBox, QLabel, QLineEdit, QMainWindow, QSpinBox,
-    QSplitter, QStackedWidget, QToolBar,
+    QAction, QCheckBox, QComboBox, QLabel, QLineEdit, QMainWindow, QMenu,
+    QShortcut, QSpinBox, QSplitter, QStackedWidget, QToolBar, QToolButton,
 )
 
-from . import config
+from . import config, schema
 from .model import view_for_single
+from .region import RegionData
 from .ui_compare import CompareWidget
 from .ui_layout import LayoutView
 from .ui_metal import CellDetailPanel, MetalPanel
+from .ui_region import RegionPanel
 from .ui_search import SearchDialog
 from .ui_tree import HierarchyTree
 
@@ -44,6 +48,15 @@ class MainWindow(QMainWindow):
         self._panel = None
         self._detail = None
         self._density = None
+        self._region_panel = None
+        self._region_tree = None
+        self._region = None
+        self._region_include_macros = None
+        self._escape = None
+        self._hidden_metrics = set()
+        self.metrics_button = None
+        self.metrics_menu = None
+        self._metrics_menu_include_macros = None
 
         self._stack = QStackedWidget()
         self._tree = HierarchyTree()
@@ -52,7 +65,7 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._compare)
 
         if metal is not None:
-            self._layout = LayoutView(metal, external_controls=True)
+            self._layout = LayoutView(metal, external_controls=True, selectable=False)
             self._panel = MetalPanel(metal, self._layout)
             # The readout is its own pane on the other side of the map: in one column the
             # layer list and the cell detail competed for the same height, and whichever lost
@@ -83,8 +96,22 @@ class MainWindow(QMainWindow):
             self._panel.selection_changed.connect(self._detail.refresh)
         elif physical is not None:
             self._layout = LayoutView(physical)
+            self._region_panel = RegionPanel()
+            self._region_tree = self._region_panel.tree
+            self._region_panel.node_clicked.connect(self._on_node_clicked)
+            self._region_panel.sort_changed.connect(self._on_sort_changed)
+            self._layout.region_selected.connect(self._on_region_selected)
+
+            left = QSplitter(Qt.Vertical)
+            left.addWidget(self._stack)
+            left.addWidget(self._region_panel)
+            left.setStretchFactor(0, 3)
+            left.setStretchFactor(1, 2)
+            left.setSizes([480, 260])
+            left.setChildrenCollapsible(False)
+
             splitter = QSplitter()
-            splitter.addWidget(self._stack)
+            splitter.addWidget(left)
             splitter.addWidget(self._layout)
             splitter.setStretchFactor(0, 3)
             splitter.setStretchFactor(1, 4)
@@ -93,6 +120,8 @@ class MainWindow(QMainWindow):
             self.statusBar().addPermanentWidget(self._hover_label)
             self._layout.hover_changed.connect(self._hover_label.setText)
             self._layout.status_message.connect(self._on_physical_status)
+            self._escape = QShortcut(QKeySequence(Qt.Key_Escape), self)
+            self._escape.activated.connect(self._layout.clear_selection)
             from .model import density_column
             self._density = density_column(physical)
             self._density.series.ready.connect(self._on_density_ready)
@@ -150,6 +179,17 @@ class MainWindow(QMainWindow):
         self.macro_check.stateChanged.connect(self._apply_settings)
         tb.addWidget(self.macro_check)
 
+        # Compare mode has three differently shaped trees (V1/V2/Δ); the metric
+        # switch is for the single-design tree and its selected-region tree.
+        if self._design2 is None:
+            tb.addSeparator()
+            self.metrics_button = QToolButton()
+            self.metrics_button.setText("Metrics")
+            self.metrics_button.setPopupMode(QToolButton.InstantPopup)
+            self.metrics_menu = QMenu(self.metrics_button)
+            self.metrics_button.setMenu(self.metrics_menu)
+            tb.addWidget(self.metrics_button)
+
     def _build_metal_toolbar(self):
         """Metal mode's toolbar: the map's value range, and nothing about hierarchy.
 
@@ -192,7 +232,9 @@ class MainWindow(QMainWindow):
         threshold = self.min_spin.value()
         include_macros = self.macro_check.isChecked()
         if self._design2 is None:
-            self._tree.set_threshold(threshold)
+            # set_view's rebuild applies the new threshold; rebuilding here too
+            # would reconstruct every expanded row twice.
+            self._tree.set_threshold(threshold, rebuild=False)
             if self._design1 is not None:
                 view = view_for_single(self._design1, include_macros)
                 if self._density is not None:
@@ -201,6 +243,46 @@ class MainWindow(QMainWindow):
         else:
             self._compare.configure(threshold, include_macros)
 
+        if (self._region is not None
+                and include_macros != self._region_include_macros):
+            self._region_include_macros = include_macros
+            self._region_panel.show_region(self._region, include_macros,
+                                           reset_expansion=False)
+
+        if (self.metrics_menu is not None
+                and include_macros != self._metrics_menu_include_macros):
+            self._rebuild_metrics_menu()
+
+    def _rebuild_metrics_menu(self):
+        """Rebuild the Metrics menu for the current macro/density columns."""
+        if self.metrics_menu is None:
+            return
+        include_macros = self.macro_check.isChecked()
+        entries = [(m.key, m.label) for m in schema.STD_METRICS]
+        if include_macros:
+            entries += [(m.key, m.label) for m in schema.MACRO_METRICS]
+        if self._physical is not None:
+            entries.append(("density", "Density%"))
+
+        self.metrics_menu.clear()
+        for key, label in entries:
+            action = self.metrics_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(key not in self._hidden_metrics)
+            action.triggered.connect(
+                lambda checked, k=key: self._on_metric_toggled(k, checked))
+        self._metrics_menu_include_macros = include_macros
+
+    def _on_metric_toggled(self, key: str, checked: bool):
+        hidden = not checked
+        if hidden:
+            self._hidden_metrics.add(key)
+        else:
+            self._hidden_metrics.discard(key)
+        self._tree.set_metric_hidden(key, hidden)
+        if self._region_tree is not None:
+            self._region_tree.set_metric_hidden(key, hidden)
+
     def _on_sort_changed(self, msg: str):
         self.statusBar().showMessage(msg)
 
@@ -208,6 +290,22 @@ class MainWindow(QMainWindow):
         """Clicking a hierarchy node toggles its contour in the layout view."""
         if getattr(self, "_layout", None) is not None:
             self._layout.toggle_contour(path)
+
+    def _on_region_selected(self, selection):
+        """A tile selection was made in the heat map (or cleared)."""
+        if self._region_panel is None:
+            return
+        if selection is None:
+            self._region = None
+            self._region_include_macros = None
+            self._region_panel.clear()
+            return
+        if self._physical is None or self._design1 is None:
+            return
+        include_macros = self.macro_check.isChecked()
+        self._region = RegionData(self._physical, self._design1, selection)
+        self._region_include_macros = include_macros
+        self._region_panel.show_region(self._region, include_macros)
 
     def _on_density_ready(self, path: str, value: float):
         """A background density computation finished -> refresh that tree row."""

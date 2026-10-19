@@ -1,17 +1,23 @@
 """Layout view: 2-D heat map + boundary outlines, driven by GenericGraphicsView."""
-from PyQt5.QtCore import QEvent, QPointF, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QPointF, QRectF, Qt, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QPolygonF
 from PyQt5.QtWidgets import (
     QComboBox, QDoubleSpinBox, QGraphicsPixmapItem, QGraphicsPolygonItem,
-    QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
+    QGraphicsRectItem, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
 
 from .genericView import GenericGraphicsView
 from .heatmap import grid_to_image, thermal_color
 from .physical import PhysicalData
+from .region import selection_from_points
 
 HEAT_TYPES = [("density", "Cell density"), ("leakage", "Leakage power"),
               ("dynamic", "Dynamic power"), ("ulvt", "ULVT density")]
+
+# Magenta is deliberately outside the navy/blue/cyan/green/yellow/red thermal ramp,
+# so the selection boundary stays readable over every tile colour.
+_SELECTION_COLOR = QColor(0xFF, 0x2D, 0xE0)
+_SELECTION_FILL = QColor(0xFF, 0x2D, 0xE0, 35)
 
 
 def _kinds_for(physical):
@@ -36,8 +42,10 @@ class LayoutView(QWidget):
     hover_changed = pyqtSignal(str)
     status_message = pyqtSignal(str)  # transient status (e.g. "computing contour")
     cell_hovered = pyqtSignal(int, int)   # grid cell under the cursor, or (-1, -1)
+    region_selected = pyqtSignal(object)  # RegionSelection, or None when cleared
 
-    def __init__(self, physical: PhysicalData, parent=None, external_controls=False):
+    def __init__(self, physical: PhysicalData, parent=None, external_controls=False,
+                 selectable=True):
         """``physical`` is any render source, not just :class:`PhysicalData`.
 
         It must expose ``extent``, ``grid_size``, ``rows``, ``cols``, ``boundary_polys`` and
@@ -66,9 +74,16 @@ class LayoutView(QWidget):
         self._last_scene_pt = None
 
         self._build_controls()
+        self._selectable = selectable
+        self._sel_item = None
+        self._rubber_item = None
         self._view = GenericGraphicsView(self)
         self._view.enableFitKet(Qt.Key_F)
         self._view.sigSceneMouseMoved.connect(self._on_hover)
+        if selectable:
+            self._view.sigSelectDragged.connect(self._on_select_dragged)
+            self._view.sigSelectArea.connect(self._on_select_area)
+            self._view.sigSelectPos.connect(self._on_select_pos)
         scene = self._view.scene()
         self._pix_item = QGraphicsPixmapItem()
         scene.addItem(self._pix_item)
@@ -240,6 +255,85 @@ class LayoutView(QWidget):
             self.hover_changed.emit(f"x={px:.2f}  y={py:.2f}")
             self.cell_hovered.emit(-1, -1)
 
+    def _viewport_point_to_physical(self, pt):
+        x0, y0, _x1, y1 = self._physical.extent
+        scene_pt = self._view.mapToScene(pt)
+        return scene_pt.x(), y0 + y1 - scene_pt.y()
+
+    def _selection_from_viewport_rect(self, rect):
+        p0 = self._viewport_point_to_physical(rect.topLeft())
+        p1 = self._viewport_point_to_physical(rect.bottomRight())
+        return selection_from_points(
+            p0[0], p0[1], p1[0], p1[1], self._physical.extent,
+            self._physical.grid_size, self._physical.rows, self._physical.cols)
+
+    def _scene_rect_for(self, physical_rect):
+        x0, y0, _x1, y1 = self._physical.extent
+        rx0, ry0, rx1, ry1 = physical_rect
+        return QRectF(rx0, y0 + y1 - ry1, rx1 - rx0, ry1 - ry0).normalized()
+
+    def _remove_rubber(self):
+        if self._rubber_item is not None:
+            self._view.scene().removeItem(self._rubber_item)
+            self._rubber_item = None
+
+    def _on_select_dragged(self, rect):
+        """Update the rubber band during a left drag; no statistics yet."""
+        if not self._selectable:
+            return
+        scene_rect = self._view.mapToScene(rect).boundingRect()
+        if self._rubber_item is None:
+            pen = QPen(_SELECTION_COLOR, 2)
+            pen.setStyle(Qt.DashLine)
+            pen.setCosmetic(True)
+            self._rubber_item = QGraphicsRectItem(scene_rect)
+            self._rubber_item.setPen(pen)
+            self._rubber_item.setBrush(QBrush(Qt.NoBrush))
+            self._rubber_item.setZValue(29)
+            self._rubber_item.setAcceptedMouseButtons(Qt.NoButton)
+            self._view.scene().addItem(self._rubber_item)
+        else:
+            self._rubber_item.setRect(scene_rect)
+
+    def _on_select_area(self, rect):
+        if not self._selectable:
+            return
+        self._remove_rubber()
+        self._set_selection(self._selection_from_viewport_rect(rect))
+
+    def _on_select_pos(self, pt):
+        if not self._selectable:
+            return
+        self._remove_rubber()
+        px, py = self._viewport_point_to_physical(pt)
+        self._set_selection(selection_from_points(
+            px, py, px, py, self._physical.extent,
+            self._physical.grid_size, self._physical.rows, self._physical.cols))
+
+    def _set_selection(self, selection):
+        """Draw the persistent outline and notify the window; None clears."""
+        if self._sel_item is not None:
+            self._view.scene().removeItem(self._sel_item)
+            self._sel_item = None
+        if selection is not None:
+            pen = QPen(_SELECTION_COLOR, 2)
+            pen.setCosmetic(True)
+            item = QGraphicsRectItem(self._scene_rect_for(selection.rect))
+            item.setPen(pen)
+            item.setBrush(QBrush(_SELECTION_FILL))
+            item.setZValue(30)   # above contours (20)
+            item.setAcceptedMouseButtons(Qt.NoButton)
+            self._view.scene().addItem(item)
+            self._sel_item = item
+        self.region_selected.emit(selection)
+
+    def clear_selection(self):
+        """Clear the selected region, if this view is selectable."""
+        if not self._selectable:
+            return
+        self._remove_rubber()
+        self._set_selection(None)
+
     def _flip_y(self, x, y):
         x0, y0, _x1, y1 = self._physical.extent
         return QPointF(x, y0 + y1 - y)
@@ -303,6 +397,7 @@ class LayoutView(QWidget):
         self.status_message.emit(f"Contour: {path}")
 
     def _clear_contour(self):
+        self._contour_worker.invalidate()
         for it in self._contour_items:
             self._view.scene().removeItem(it)
         self._contour_items = []

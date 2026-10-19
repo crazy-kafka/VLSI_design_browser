@@ -1,7 +1,10 @@
 import json
+import threading
+import time
 
 import pytest
 
+from vlsi_viewer import contour
 from vlsi_viewer.physical import build_physical
 
 
@@ -115,6 +118,42 @@ def test_ulvt_density_grid(tmp_path):
     assert pd_.ulvt[0, 2] == 0.0                        # SVT excluded from ulvt
 
 
+def test_cell_codes_and_attrs_align_with_sorted_boxes(tmp_path):
+    """The region tree needs a per-box cell code plus a tiny library-side attribute table."""
+    cell = tmp_path / "cell.json"
+    cell.write_text(json.dumps({
+        "INV": {"area": 1.0, "size_x": 2, "size_y": 1,
+                "is_inverter": True, "drive_size": 1},
+        "DFF": {"area": 3.0, "size_x": 2, "size_y": 2, "is_register_cell": True,
+                "register_bit_count": 2, "drive_size": 4},
+        "SRAM": {"area": 100.0, "size_x": 10, "size_y": 10, "is_macro": True},
+    }))
+    b = _block(tmp_path, "TOP", {
+        "a": {"cell_name": "INV", "location_x": 0, "location_y": 0},
+        "b": {"cell_name": "DFF", "location_x": 4, "location_y": 0},
+        "m": {"cell_name": "SRAM", "location_x": 10, "location_y": 10},
+    }, boundary=[(0, 0), (30, 30)])
+    pd_ = build_physical([b], str(cell), grid_size=5.0)
+
+    expected = {
+        "TOP/a": dict(area=1.0, reg_bits=0.0, drive=1, bi=True, macro=False),
+        "TOP/b": dict(area=3.0, reg_bits=2.0, drive=4, bi=False, macro=False),
+        "TOP/m": dict(area=100.0, reg_bits=0.0, drive=0, bi=False, macro=True),
+    }
+    assert pd_._cell_codes is not None
+    assert len(pd_._cell_codes) == len(pd_._leaf_paths) == len(pd_._geom)
+    for i, path in enumerate(pd_._leaf_paths):
+        code = int(pd_._cell_codes[i])
+        want = expected[str(path)]
+        assert pd_._cell_attrs["area"][code] == pytest.approx(want["area"])
+        assert pd_._cell_attrs["reg_bits"][code] == pytest.approx(want["reg_bits"])
+        assert pd_._cell_attrs["mb_bits"][code] == pytest.approx(
+            want["reg_bits"] if want["reg_bits"] > 1 else 0.0)
+        assert int(pd_._cell_attrs["drive_size"][code]) == want["drive"]
+        assert bool(pd_._cell_attrs["is_bi"][code]) is want["bi"]
+        assert bool(pd_._is_macro[i]) is want["macro"]
+
+
 def test_path_tagging_and_hierarchy_density(tmp_path):
     import json as _json
     cell = tmp_path / "cell.json"
@@ -138,6 +177,134 @@ def test_path_tagging_and_hierarchy_density(tmp_path):
     # density = non_macro_area / (contour_area - macro_area); both in [0,1]
     d = pd_.density_for("TOP")
     assert 0.0 <= d <= 1.0
+
+
+def test_density_and_contour_share_one_merge(tmp_path, monkeypatch):
+    """The area and loop products share the same merged rectangles."""
+    cell = tmp_path / "cell.json"
+    _cell(cell, "C1", area=4, size_x=2, size_y=2)
+    b = _block(tmp_path, "TOP",
+               {"a": {"cell_name": "C1", "location_x": 0, "location_y": 0},
+                "b": {"cell_name": "C1", "location_x": 5, "location_y": 0}},
+               boundary=[(0, 0), (20, 20)])
+    pd_ = build_physical([b], str(cell), grid_size=4.0)
+
+    calls = []
+    real = contour.merge_rects
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(contour, "merge_rects", counted)
+    pd_.density_for("TOP")
+    pd_.contour_for("TOP")
+    assert len(calls) == 1
+
+    # The other order reuses the same entry too.
+    pd_.clear_contour_cache()
+    pd_.contour_for("TOP")
+    pd_.density_for("TOP")
+    assert len(calls) == 2
+
+
+def test_slice_for_is_cached(tmp_path):
+    cell = tmp_path / "cell.json"
+    _cell(cell, "C1", area=4, size_x=2, size_y=2)
+    b = _block(tmp_path, "TOP",
+               {"a": {"cell_name": "C1", "location_x": 0, "location_y": 0}},
+               boundary=[(0, 0), (20, 20)])
+    pd_ = build_physical([b], str(cell), grid_size=4.0)
+    assert pd_._slice_for("TOP") is pd_._slice_for("TOP")
+
+
+def test_density_matches_the_manual_formula(tmp_path):
+    cell = tmp_path / "cell.json"
+    cell.write_text(json.dumps({
+        "M": {"area": 4, "size_x": 2, "size_y": 2, "is_macro": True},
+        "S": {"area": 4, "size_x": 2, "size_y": 2},
+        "T": {"area": 1, "size_x": 1, "size_y": 1, "is_physical_only": True},
+    }))
+    b = _block(tmp_path, "TOP",
+               {"m": {"cell_name": "M", "location_x": 0, "location_y": 0},
+                "s": {"cell_name": "S", "location_x": 5, "location_y": 0},
+                "t": {"cell_name": "T", "location_x": 10, "location_y": 10}},
+               boundary=[(0, 0), (20, 20)])
+    pd_ = build_physical([b], str(cell), grid_size=4.0)
+
+    sl = pd_._slice_for("TOP")
+    area = contour.contour_area(pd_.boxes_for("TOP"), pd_.contour_gap)
+    phys = pd_._is_phys_only[sl]
+    box_area = ((pd_._geom[sl, 2] - pd_._geom[sl, 0])
+                * (pd_._geom[sl, 3] - pd_._geom[sl, 1]))
+    mac = float(box_area[pd_._is_macro[sl] & ~phys].sum())
+    non = float(box_area[~pd_._is_macro[sl] & ~phys].sum())
+    expected = min(1.0, non / (area - mac))
+    assert pd_.density_for("TOP") == pytest.approx(expected)
+
+
+def test_concurrent_density_single_flight(tmp_path, monkeypatch):
+    """Eight threads asking for the same density must merge only once."""
+    cell = tmp_path / "cell.json"
+    _cell(cell, "C1", area=4, size_x=2, size_y=2)
+    b = _block(tmp_path, "TOP",
+               {"a": {"cell_name": "C1", "location_x": 0, "location_y": 0},
+                "b": {"cell_name": "C1", "location_x": 5, "location_y": 0}},
+               boundary=[(0, 0), (20, 20)])
+    pd_ = build_physical([b], str(cell), grid_size=4.0)
+
+    calls = []
+    real = contour.merge_rects
+
+    def slow(*args, **kwargs):
+        calls.append(1)
+        time.sleep(0.05)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(contour, "merge_rects", slow)
+    barrier = threading.Barrier(8)
+    results, errors = [], []
+
+    def work():
+        try:
+            barrier.wait()
+            results.append(pd_.density_for("TOP"))
+        except Exception as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert len(calls) == 1
+    assert all(value == results[0] for value in results)
+
+
+def test_heavy_contour_cache_is_bounded(tmp_path):
+    """Evicting heavy payloads keeps areas and rematerializes identical loops."""
+    cell = tmp_path / "cell.json"
+    _cell(cell, "C1", area=4, size_x=2, size_y=2)
+    b = _block(tmp_path, "TOP",
+               {"a": {"cell_name": "C1", "location_x": 0, "location_y": 0},
+                "b": {"cell_name": "C1", "location_x": 5, "location_y": 0}},
+               boundary=[(0, 0), (20, 20)])
+    pd_ = build_physical([b], str(cell), grid_size=4.0)
+    pd_._max_cached_rects = 1
+    pd_._max_cached_points = 1
+
+    pd_.density_for("TOP")                 # area for TOP
+    loops_before = pd_.contour_for("TOP")  # rects + loops for TOP
+    pd_.contour_for("TOP/a")               # pushes TOP out of the LRU
+
+    entry = pd_._contour_cache[("TOP", pd_.contour_gap)]
+    assert entry.area is not None          # area survives eviction
+    assert entry.rects is None and entry.loops is None
+    assert pd_._heavy_rects <= 1 or len(pd_._heavy_order) == 1
+    assert pd_._heavy_points <= 1 or len(pd_._heavy_order) == 1
+
+    assert pd_.contour_for("TOP") == loops_before
 
 
 def test_slice_for_excludes_path_extending_sibling(tmp_path):
