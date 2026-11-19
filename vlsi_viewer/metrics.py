@@ -17,14 +17,15 @@ logger = logging.getLogger(__name__)
 RAW_COLS = [
     "count", "area", "ulvt_area", "reg_bits", "mb_bits",
     "d1d2_count", "bi_count", "bi_area", "pul_count", "ckb_count", "icg_count",
-    "macro_count", "macro_area",
+    "macro_count", "macro_area", "leakage_power", "dynamic_power",
 ]
 _COUNT_COLS = ["count", "d1d2_count", "bi_count", "pul_count", "ckb_count",
                "icg_count", "macro_count"]
 _STD_COLS = ["count", "area", "ulvt_area", "reg_bits", "mb_bits",
              "d1d2_count", "bi_count", "bi_area", "pul_count", "ckb_count", "icg_count"]
 _MACRO_COLS = ["macro_count", "macro_area"]
-CACHE_VERSION = "2"  # bump to invalidate stale pickles when RAW_COLS / metrics change
+_POWER_COLS = ["leakage_power", "dynamic_power"]
+CACHE_VERSION = "3"  # bump to invalidate stale pickles when RAW_COLS / metrics change
 
 
 def _parent_of(path: str) -> str:
@@ -49,7 +50,11 @@ def _merge_blocks(earlier: pd.DataFrame, later: pd.DataFrame) -> pd.DataFrame:
     a = earlier.set_index("leaf_instance_name")
     b = later.set_index("leaf_instance_name")
     merged = a.combine_first(b)  # a (earlier) takes precedence
-    return merged.reset_index()
+    merged = merged.reset_index()
+    # combine_first drops DataFrame.attrs; presence is OR-ed rather than "earlier wins".
+    merged.attrs["has_power"] = (bool(earlier.attrs.get("has_power", False))
+                                 or bool(later.attrs.get("has_power", False)))
+    return merged
 
 
 def load_blocks(block_paths) -> pd.DataFrame:
@@ -108,6 +113,9 @@ def load_blocks(block_paths) -> pd.DataFrame:
 
     columns = ["leaf_instance_name"] + [s.name for s in schema.INSTANCE_ATTRS]
     merged = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=columns)
+    # concat only propagates attrs when every input agrees; OR them explicitly.
+    merged.attrs["has_power"] = any(
+        bool(df.attrs.get("has_power", False)) for df in blocks.values())
     logger.info("merged %d leaf instance(s)", len(merged))
     return merged
 
@@ -190,6 +198,16 @@ def _flatten(leaves: pd.DataFrame) -> pd.DataFrame:
     })
     macro = macro.groupby("parent_path", sort=False).sum()
 
+    # --- power contributions: every logic instance, macros included ---
+    # Physical-only and missing leaves carry no power (the heat maps mask them too).
+    powered = leaves[~leaves["is_missing"] & ~leaves["is_physical_only"]]
+    power = pd.DataFrame({
+        "parent_path": powered["parent_path"].to_numpy(dtype=str),
+        "leakage_power": powered["leakage_power"].to_numpy(dtype="float64"),
+        "dynamic_power": powered["dynamic_power"].to_numpy(dtype="float64"),
+    })
+    power = power.groupby("parent_path", sort=False).sum()
+
     # --- full hierarchy node set: all prefixes of all parent paths ---
     nodes = set(std.index) | set(macro.index)
     frontier = set(nodes)
@@ -203,7 +221,7 @@ def _flatten(leaves: pd.DataFrame) -> pd.DataFrame:
         frontier = nxt
 
     agg = pd.DataFrame(0.0, index=pd.Index(sorted(nodes)), columns=RAW_COLS)
-    for src, cols in ((std, _STD_COLS), (macro, _MACRO_COLS)):
+    for src, cols in ((std, _STD_COLS), (macro, _MACRO_COLS), (power, _POWER_COLS)):
         if len(src):
             agg.loc[src.index, cols] = src[cols].values
 
@@ -232,12 +250,14 @@ def _flatten(leaves: pd.DataFrame) -> pd.DataFrame:
 class DesignData:
     """Preprocessed design data for one version."""
 
-    def __init__(self, hier, missing_cells, children, instance_paths, cell_path):
+    def __init__(self, hier, missing_cells, children, instance_paths, cell_path,
+                 has_power=False):
         self.hier = hier              # DataFrame indexed by path (RAW_COLS+parent+depth)
         self.missing_cells = missing_cells   # sorted list of unique cell_name str
         self.children = children      # dict: parent path -> sorted list of child paths
         self.instance_paths = instance_paths  # list of block file paths
         self.cell_path = cell_path
+        self.has_power = bool(has_power)     # the input actually carried power data
 
     @property
     def roots(self):
@@ -259,6 +279,7 @@ def build_design(block_paths, cell_path: str) -> DesignData:
     """Load all blocks, merge into one hierarchy, and build the preprocessed design."""
     t0 = time.perf_counter()
     inst = load_blocks(block_paths)
+    has_power = bool(inst.attrs.get("has_power", False))
     logger.info("tree: loaded %d leaf instance(s) (%.1fs)", len(inst),
                 time.perf_counter() - t0)
     t0 = time.perf_counter()
@@ -285,7 +306,8 @@ def build_design(block_paths, cell_path: str) -> DesignData:
     logger.info("built hierarchy: %d node(s), max depth %d, %d leaf instance(s)",
                 hier.shape[0], depth, len(leaves))
 
-    return DesignData(hier, missing, _children_map(hier), list(block_paths), cell_path)
+    return DesignData(hier, missing, _children_map(hier), list(block_paths), cell_path,
+                      has_power=has_power)
 
 
 def _source_key(paths) -> str:
@@ -326,8 +348,10 @@ def load_or_build(block_paths, cell_path,
         try:
             with open(cache_file, "rb") as f:
                 data = pickle.load(f)
-            if not set(RAW_COLS).issubset(data.hier.columns):
-                logger.warning("cached data schema is stale (missing columns); rebuilding")
+            if (not set(RAW_COLS).issubset(data.hier.columns)
+                    or not hasattr(data, "has_power")):
+                logger.warning("cached data schema is stale (missing columns or fields); "
+                               "rebuilding")
             else:
                 logger.info("pickle cache hit: %s", cache_file)
                 return data

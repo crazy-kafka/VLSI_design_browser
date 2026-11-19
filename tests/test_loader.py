@@ -104,3 +104,16 @@ def test_load_cell_info_accepts_already_parsed_data(sample_dir):
         data = json.load(fh)
 
     pd.testing.assert_frame_equal(load_cell_info(path), load_cell_info(data))
+
+
+def test_load_block_records_whether_power_was_supplied(tmp_path):
+    """After loading, 0.0 means both "zero" and "absent", so presence is recorded here."""
+    def attrs(instances):
+        path = tmp_path / "block.json"
+        path.write_text(json.dumps({"top_name": "T", "instances": instances}))
+        return load_block(str(path))[1].attrs
+
+    assert attrs({"a": {"cell_name": "C", "leakage_power": 0.0}})["has_power"]
+    assert attrs({"a": {"cell_name": "C", "dynamic_power": 1.5}})["has_power"]
+    assert not attrs({"a": {"cell_name": "C"}})["has_power"]
+    assert not attrs({"a": {"cell_name": "C", "leakage_power": None}})["has_power"]

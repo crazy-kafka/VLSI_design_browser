@@ -282,8 +282,8 @@ LAYER_COLUMNS = ("shapes", "vias", "jogs", "diagonals", "degenerate", "unusable"
 # The columns the caller scales by the placement count, and the rest are counted per placement here.
 # This is `PER_PLACEMENT_COUNTERS` in another shape, and it has to stay that way: a block placed
 # more than once is parsed once, so a column counted per *parse* would move the summary and leave
-# the table behind - which is exactly what a four-placement fixture showed: 135 jogs in the rows
-# against 540 in the totals.
+# the table behind - which is exactly what the six-placement sample showed: 135 jogs in the rows
+# against 810 in the totals.
 PER_PLACEMENT_COLUMNS = (L_VIAS, L_JOGS, L_DIAGONALS, L_DEGENERATE, L_UNUSABLE)
 
 
@@ -339,7 +339,7 @@ class ShapeStream:
         self.sink = sink
         # Where this block's wiring ends up. A *list*, because a block can be placed more than
         # once: the text is parsed once and placed under each of its instance frames, which is
-        # what keeps a design that instantiates a block four times from parsing it four times.
+        # what keeps a design that instantiates a block many times from parsing it as often.
         # Two instances at the same orientation and position are two placements, so this cannot
         # be a set of frames.
         self.frames = tuple(frames or ())

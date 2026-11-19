@@ -56,8 +56,8 @@ def find_single_top(blocks: Dict[AnyStr, tuple]) -> AnyStr:
 #
 # Composing these as matrices is not the same as merging the orientation *names*. The
 # tempting shortcut is `Orient.mergeOrient`, which combines mirrors by XOR-ing global X and Y
-# flags - but a child's mirror axis rotates with a rotated parent, so that is wrong for
-# every (rotated parent, mirrored child) pair. The 64-pair test exists because of it.
+# flags - but a parent's mirror is expressed in the child's rotated axes, so that is wrong
+# for every (mirrored parent, quarter-turn child) pair. The 64-pair test exists because of it.
 _ORIENT_MATRIX = {
     "N": ((1, 0), (0, 1)),
     "S": ((-1, 0), (0, -1)),
@@ -155,6 +155,32 @@ class Frame:
         return f"Frame({self.orient or '?'}, {self.origin})"
 
 
+def boundary_bounds(boundary):
+    """``((bx, by), (width, height))`` of a block outline, or ``None`` when it has none."""
+    if not boundary:
+        return None
+    xs = [float(p[0]) for p in boundary]
+    ys = [float(p[1]) for p in boundary]
+    bx, by = min(xs), min(ys)
+    return (bx, by), (max(xs) - bx, max(ys) - by)
+
+
+def placement_origin(orient, location, bounds):
+    """The frame translation for a DEF placement.
+
+    ``PLACED (x y)`` is the lower-left corner of the instance's *oriented* bounding box,
+    not the image of the local origin. ``bounds`` is ``((bx, by), (w, h))`` in the child's
+    frame, so the translation is ``location - min(M_orient * bbox)``; without bounds the raw
+    location is all there is to go on.
+    """
+    if bounds is None:
+        return float(location[0]), float(location[1])
+    (bx, by), (w, h) = bounds
+    lo_x, lo_y, _hi_x, _hi_y = Frame(orient, (0.0, 0.0)).apply_rect(
+        [bx], [by], [bx + w], [by + h])
+    return float(location[0]) - float(lo_x[0]), float(location[1]) - float(lo_y[0])
+
+
 class HierarchyAssembler:
     """Walks a merged block table, handing each block its global frame.
 
@@ -205,8 +231,11 @@ class HierarchyAssembler:
         for row in instances.itertuples():
             model = str(getattr(row, "cell_name"))
             if model in known:
-                yield model, frame.compose(getattr(row, "orient", "N") or "N",
-                                           (getattr(row, "location_x", 0.0),
-                                            getattr(row, "location_y", 0.0)))
+                orient = getattr(row, "orient", "N") or "N"
+                location = (getattr(row, "location_x", 0.0),
+                            getattr(row, "location_y", 0.0))
+                yield model, frame.compose(
+                    orient, placement_origin(orient, location,
+                                             boundary_bounds(self.boundary(model))))
             elif self.cells is not None and model not in self.cells.index:
                 self.missing.append(model)

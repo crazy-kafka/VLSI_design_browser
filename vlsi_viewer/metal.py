@@ -54,7 +54,7 @@ import numpy as np
 import pandas as pd
 
 from . import __version__, config, metal_db
-from .assembly import Frame, HierarchyAssembler, find_single_top
+from .assembly import Frame, HierarchyAssembler, find_single_top, placement_origin
 from .loader import load_block, load_cell_info
 from .parsers import Cancelled
 from .parsers.convert import cell_info_from_lef, instance_info_from_def
@@ -1505,11 +1505,12 @@ def _macro_blockage(assembler, blocks, cells, obstructions, tech, extent, grid_s
     layers arrive resolved in ``fallback`` rather than being sliced here, because the count is
     a position in the tech LEF's whole stack rather than in the part being measured.
 
-    The instance's own orientation is composed with its block's frame, so the blockage lands
-    where the cell's geometry actually is. That is the same transform the *wiring* goes
-    through (`Frame.compose`, both of them), which is what matters here: an obstruction that
-    does not sit exactly where the wires the DEF placed around it are is worse than no model
-    at all.
+    The instance's own orientation is composed with its block's frame, and its placement
+    point is the lower-left of the oriented bbox - the same rule block frames use - so the
+    blockage lands where the cell's geometry actually is. That is the same transform the
+    *wiring* goes through (`Frame.compose`, both of them), which is what matters here: an
+    obstruction that does not sit exactly where the wires the DEF placed around it are is
+    worse than no model at all.
     """
     if cells is None:
         return {}, {}
@@ -1612,16 +1613,17 @@ def _macro_blockage(assembler, blocks, cells, obstructions, tech, extent, grid_s
                 picked = picked_cell & (orientations == orientation)
                 # A macro-local point goes through the cell's orientation, then its placement,
                 # then the block's frame:
-                #     p_global = M_block (M_orient p + loc) + t_block
-                # so the matrix mapping obstruction geometry is M_block M_orient, and the
-                # offset is M_block loc + t_block. Subtle, and only visible on a rotated cell:
-                # applying the *composed* matrix to the location as well would put the
-                # obstruction where a second rotation of the placement says, not where the
-                # cell is.
+                #     p_global = M_block (M_orient p + t_macro) + t_block
+                # DEF puts the lower-left of the oriented bbox at the placement, so
+                #     t_macro = loc - min(M_orient bbox) = loc + off.
+                # The matrix mapping obstruction geometry is M_block M_orient, and the
+                # translation is M_block (loc + off) + t_block. Subtle, and only visible on a
+                # rotated cell: applying the *composed* matrix to the location as well would
+                # put the obstruction where a second rotation of the placement says.
                 (a, b), (c, d) = frame.compose(str(orientation), (0.0, 0.0)).matrix
-                (ea, eb), (ec, ed) = frame.matrix
-                tx = ea * x[picked] + eb * y[picked] + frame.origin[0]
-                ty = ec * x[picked] + ed * y[picked] + frame.origin[1]
+                off_x, off_y = placement_origin(str(orientation), (0.0, 0.0),
+                                                ((0.0, 0.0), size))
+                tx, ty = frame.apply_points(x[picked] + off_x, y[picked] + off_y)
                 if by_layer is None:
                     # Nothing declared, so nothing to trust: the cell's whole footprint, on
                     # the bottom `macro_block_layers` layers of the stack the LEF declares.
@@ -1686,7 +1688,7 @@ def _boundary_polys(assembler, blocks, root):
 
     A sub-block's boundary is written in its own frame, exactly as its wiring is, so it has
     to go through the same placement. Returning it raw - which this did - draws the outline
-    at the origin instead of where the block sits, and a block placed four times shows one
+    at the origin instead of where the block sits, and a block placed many times shows one
     rectangle in the wrong corner. ``physical.py`` maps them the same way.
     """
     polygons = []

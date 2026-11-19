@@ -10,10 +10,15 @@ rebuilds.
   (`MainWindow._build_toolbar`, `self._design2 is None`). Compare mode has three
   differently shaped trees (V1 / V2 / Δ) and keeps its fixed columns; the button and menu
   are `None` there. Metal mode has no hierarchy tree and uses its own toolbar.
-- **Entries** are built from `schema.STD_METRICS` (Area through B/I Area), plus
-  `schema.MACRO_METRICS` (Macro Cnt, Macro Area) when **Include macros** is checked, plus
-  `Density%` in physical mode. The menu is rebuilt when *Include macros* changes; hidden
-  macro keys are remembered while their columns are temporarily absent.
+- **Entries** are built from `schema.STD_METRICS` (Area through B/I Area, plus Leakage
+  Power and Dynamic Power), plus `schema.MACRO_METRICS` (Macro Cnt, Macro Area) when
+  **Include macros** is checked, plus `Density%` in physical mode. The menu is rebuilt when
+  *Include macros* changes; hidden macro keys are remembered while their columns are
+  temporarily absent.
+- **Power entries default hidden.** When the loaded design carried no power data, Leakage
+  Power and Dynamic Power start unchecked and their columns are hidden. The menu still
+  lists them, so the user can show them. When the input supplied power keys they start
+  checked.
 - **No rebuild on toggle.** `HierarchyTree.set_metric_hidden(key, hidden)` stores the key
   and calls `setColumnHidden` for the matching column; expansion, sorting, scroll and the
   lazy density jobs are untouched. `_apply_hidden_columns()` reapplies the set at the end

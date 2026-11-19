@@ -26,17 +26,22 @@ def _design_and_physical(tmp_path):
         "instances": {
             "u1": {"cell_name": "SUB", "location_x": 0, "location_y": 0},
             "u2": {"cell_name": "SUB", "location_x": 10, "location_y": 0},
-            "edge": {"cell_name": "C1", "location_x": 4, "location_y": 0},
-            "m": {"cell_name": "M1", "location_x": 12, "location_y": 12},
-            "t": {"cell_name": "TAP", "location_x": 5, "location_y": 5},
+            "edge": {"cell_name": "C1", "location_x": 4, "location_y": 0,
+                     "leakage_power": 5.0, "dynamic_power": 6.0},
+            "m": {"cell_name": "M1", "location_x": 12, "location_y": 12,
+                  "leakage_power": 7.0, "dynamic_power": 8.0},
+            "t": {"cell_name": "TAP", "location_x": 5, "location_y": 5,
+                  "leakage_power": 100.0, "dynamic_power": 200.0},
         },
     }))
     sub = tmp_path / "sub.json"
     sub.write_text(json.dumps({
         "top_name": "SUB", "boundary": [[0, 0], [10, 10]],
         "instances": {
-            "a": {"cell_name": "C1", "location_x": 0, "location_y": 0},
-            "b": {"cell_name": "C2", "location_x": 3, "location_y": 0},
+            "a": {"cell_name": "C1", "location_x": 0, "location_y": 0,
+                  "leakage_power": 1.0, "dynamic_power": 2.0},
+            "b": {"cell_name": "C2", "location_x": 3, "location_y": 0,
+                  "leakage_power": 3.0, "dynamic_power": 4.0},
         },
     }))
     paths = [str(top), str(sub)]
@@ -111,6 +116,9 @@ def test_region_stats_intersect_and_apportion(tmp_path):
     assert got["d1d2_count"] == 1
     assert got["macro_count"] == 0
     assert got["macro_area"] == pytest.approx(0.0)
+    # Power follows the area overlap: u1/a is full, u1/b straddles the edge.
+    assert got["leakage_power"] == pytest.approx(1.0 + 3.0 * 0.5)
+    assert got["dynamic_power"] == pytest.approx(2.0 + 4.0 * 0.5)
 
 
 def test_region_excludes_boxes_that_only_touch_the_edge(tmp_path):

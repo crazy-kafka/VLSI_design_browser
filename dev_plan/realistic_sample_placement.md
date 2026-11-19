@@ -57,6 +57,9 @@ No geometry changes were needed: the die stays 510x510, the instance count stays
 CPU-cluster sample" and the 90k-110k bound both still hold. (The central cross is 60
 wide, derived as `die - 2*margin - 2*core`; an earlier estimate of 40 was wrong.)
 
+*That was the four-core sample. It later grew to six cores in a 3x2 array (750x495,
+153,650 boxes, density ~0.597) so the quickstart also demonstrates the FN/FS flips.*
+
 ## Guarding the distribution
 
 `verify()` now asserts the *shape* of the occupied-bin histogram, not just its extremes:

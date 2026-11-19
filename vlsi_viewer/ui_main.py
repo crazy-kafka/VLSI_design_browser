@@ -54,6 +54,10 @@ class MainWindow(QMainWindow):
         self._region_include_macros = None
         self._escape = None
         self._hidden_metrics = set()
+        if design1 is not None and not getattr(design1, "has_power", False):
+            # No power data was read: keep the columns out of the way, but the Metrics
+            # menu can still bring them back.
+            self._hidden_metrics.update(schema.POWER_METRIC_KEYS)
         self.metrics_button = None
         self.metrics_menu = None
         self._metrics_menu_include_macros = None
@@ -128,6 +132,13 @@ class MainWindow(QMainWindow):
             self._density.series.status.connect(self._on_density_status)
         else:
             self.setCentralWidget(self._stack)
+
+        # Apply the default-hidden power columns to both trees before the first settings
+        # pass, so the initial menu check state and the tables agree.
+        for key in self._hidden_metrics:
+            self._tree.set_metric_hidden(key)
+            if self._region_tree is not None:
+                self._region_tree.set_metric_hidden(key)
 
         self._tree.sort_changed.connect(self._on_sort_changed)
         self._tree.node_clicked.connect(self._on_node_clicked)

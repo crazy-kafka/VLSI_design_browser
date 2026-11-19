@@ -35,6 +35,10 @@ from PyQt5.QtGui import QFont, QFontDatabase  # noqa: E402  - after the offscree
 from PyQt5.QtWidgets import QApplication, QSplitter  # noqa: E402
 
 SIZE = (1600, 900)
+# The physical tree now carries 15 columns (including power and Density%); at 1600 px the
+# widest values lose their leading digits, so that capture gets a wider window. Its 750x495
+# die is landscape, so the window is shorter too, or the map letterboxes in black bars.
+SIZES = {"physical": (1920, 650)}
 # Which shortcut each image is: compare = the two-version diff, physical = the heat map, metal =
 # the per-layer routing map.
 CAPTURES = [("compare", "json"), ("physical", "physical"), ("metal", "metal")]
@@ -42,7 +46,7 @@ CAPTURES = [("compare", "json"), ("physical", "physical"), ("metal", "metal")]
 # tree only the sum of its columns and they came out 3-22 px wide, every value clipped to "1.60",
 # "68%". Metal mode sets its own pane widths (ui_main.py); this is the one the physical window
 # needs to stay legible next to the map at this size.
-PANE_SIZES = {"physical": [700, 900]}
+PANE_SIZES = {"physical": [1200, 720]}
 # The density column and the first heat map are computed on a background thread, and the tree's
 # columns are laid out on the first resize: the window is shown and the loop spun before it is
 # grabbed, or the capture is a half-drawn window.
@@ -99,7 +103,7 @@ def _window(mod, argv):
 def capture(app, mod, name, argv):
     with contextlib.redirect_stdout(io.StringIO()):
         window = _window(mod, argv)
-    window.resize(*SIZE)
+    window.resize(*SIZES.get(name, SIZE))
     window.show()
     central = window.centralWidget()
     if isinstance(central, QSplitter) and name in PANE_SIZES:

@@ -71,6 +71,21 @@ def test_whitespace_is_inside_rows_not_one_stripe(gp):
     assert interior_holes > 300, f"only {interior_holes} whitespace holes inside rows"
 
 
+def test_the_committed_sample_shows_all_block_orientations():
+    """The quickstart demo must keep both axis flips (FN/FS) and all four rotations."""
+    import json
+
+    path = os.path.join(os.path.dirname(_GEN), "instance_info.json")
+    with open(path, encoding="utf-8") as fh:
+        top = json.load(fh)
+    cores = [v for v in top["instances"].values() if v["cell_name"] == "CORE"]
+    assert len(cores) == 6
+    assert sorted(v["orient"] for v in cores) == ["E", "FN", "FS", "N", "S", "W"]
+    assert sorted((v["location_x"], v["location_y"]) for v in cores) == [
+        (15.0, 15.0), (15.0, 270.0), (270.0, 15.0),
+        (270.0, 270.0), (525.0, 15.0), (525.0, 270.0)]
+
+
 def test_bin_scale_fill_varies(gp):
     """Fill measured in heat-map-bin windows must span a wide range.
 

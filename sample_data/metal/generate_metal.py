@@ -38,8 +38,6 @@ _REPO = os.path.dirname(os.path.dirname(HERE))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
-from vlsi_viewer.assembly import Frame       # noqa: E402  (after the path fix above)
-
 UNITS_PER_MICRON = 2000
 DBU = UNITS_PER_MICRON
 
@@ -124,9 +122,10 @@ SITE = 0.14
 N_SIGNAL_NETS = 15000
 PG_STRIPE_PITCH = 40.0
 
-# The four orientations the sub-blocks are placed at, so frame composition for *wires* is
-# exercised by the committed sample rather than only by a unit test.
-SUB_ORIENTS = ("N", "W", "FS", "E")
+# The six orientations the sub-blocks are placed at - all four rotations plus both axis
+# flips - so frame composition for *wires* is exercised by the committed sample rather
+# than only by a unit test.
+SUB_ORIENTS = ("N", "W", "S", "E", "FN", "FS")
 
 
 def dbu(microns: float) -> int:
@@ -211,27 +210,25 @@ def activity(x: float, y: float) -> float:
 def build(rng: random.Random):
     """The floorplan, and the contents of **one** sub-block in its own local frame.
 
-    The leaf cells and their wiring are written once, in `sub.def`, and placed four times by
-    `top.def` at four different orientations. That is what makes frame composition for wires
+    The leaf cells and their wiring are written once, in `sub.def`, and placed six times by
+    `top.def` at six different orientations. That is what makes frame composition for wires
     something the committed sample exercises rather than only a unit test: every sub-block's
     routing reaches global coordinates through its own rotation.
     """
-    # Laid out on a grid sized by the *larger* dimension, and each instance is placed so its
-    # **rotated** footprint lands in its cell. Two subtleties, both of which produced
-    # overlapping blocks when ignored: a quarter turn swaps the extents (a 260x200 block
-    # placed West occupies 200x260), and DEF anchors the cell's origin corner at the
-    # placement - West maps `x -> x0 - y`, so the block extends to the *left* of its origin
-    # rather than the right. Overlapping blocks put one block's wiring inside another's
-    # macro, which reads as congestion where no router could have put anything.
+    # Laid out on a grid sized by the *larger* dimension, and each instance is placed at the
+    # lower-left of its cell: DEF anchors the lower-left of the oriented bounding box there,
+    # so a quarter turn swaps the extents inside the slot instead of moving the block.
+    # Overlapping blocks put one block's wiring inside another's macro, which reads as
+    # congestion where no router could have put anything.
     span = max(SUB_W, SUB_H)
-    die = (2 * span + GAP + 2 * MARGIN, 2 * span + GAP + 2 * MARGIN)
+    cols, rows = 3, 2
+    die = (cols * span + (cols - 1) * GAP + 2 * MARGIN,
+           rows * span + (rows - 1) * GAP + 2 * MARGIN)
     subs = []
     for index, orient in enumerate(SUB_ORIENTS):
-        target = (MARGIN + (index % 2) * (span + GAP),
-                  MARGIN + (index // 2) * (span + GAP))
-        probe = Frame(orient, (0.0, 0.0)).apply_rect([0.0], [0.0], [SUB_W], [SUB_H])
-        subs.append((target[0] - float(probe[0][0]), target[1] - float(probe[1][0]),
-                     orient))
+        target = (MARGIN + (index % cols) * (span + GAP),
+                  MARGIN + (index // cols) * (span + GAP))
+        subs.append((target[0], target[1], orient))
 
     rows, placements = [], []
     row_pitch = (SUB_H - 2 * ROW_H) / max(1, ROWS_PER_SUB - 1)
@@ -948,9 +945,9 @@ def main(argv=None) -> int:
     # lower metals, and a sample that did would show metal in cells whose capacity is zero.
     nets = signal_nets(rng, (SUB_W, SUB_H), macro_rects(placements))
 
-    # The top level holds four rotated instances of the one block that carries the cells and
-    # the signal routing. Its own wiring is the power grid, which is what a real top-level
-    # DEF mostly contains.
+    # The top level holds six instances of the one block that carries the cells and the
+    # signal routing: all four rotations plus both axis flips. Its own wiring is the power
+    # grid, which is what a real top-level DEF mostly contains.
     top_placements = [(f"u{index}", "SUB", x, y, orient)
                       for index, (x, y, orient) in enumerate(subs)]
 

@@ -18,7 +18,7 @@ placed design or its routing on the other.
 pip install -r requirements.txt
 
 python quickstart.py json       # two-version compare over sample_data/*.json
-python quickstart.py physical   # a ~100k-instance CPU cluster as a density heat map
+python quickstart.py physical   # a ~150k-instance CPU cluster as a density heat map
 python quickstart.py metal      # per-layer routing utilisation of a routed DEF
 ```
 
@@ -67,12 +67,15 @@ It has been run on real designs, and the numbers are on record rather than asser
 
 **Read the numbers**
 
-- **10 standard-cell metrics + macro columns** — computed per hierarchy via
-  flattened (all-descendants) aggregation.
+- **13 standard-cell metrics + macro columns** — computed per hierarchy via
+  flattened (all-descendants) aggregation. Leakage/dynamic power include macros and
+  are hidden by default when the input carries no power data.
 - **Metrics menu** — the toolbar's **Metrics** menu toggles any metric column on/off
   without rebuilding the tree. The choice survives threshold/macro rebuilds and also
   applies to the selected-region tree; macro entries appear when *Include macros* is
-  on, and Density% in physical mode. Compare mode keeps its fixed V1/V2/Δ columns.
+  on, Density% in physical mode, and the two power entries start unchecked when the
+  input carried no power. Compare mode keeps its fixed V1/V2/Δ columns (power columns
+  are hidden there when neither design has power).
 - **Data bars** — background progress bars in metric cells: count/area scale to the
   top-level total; ULVT%/MB%/D1D2% are color-coded red→green (bad→good) over a
   configurable min–max range.
@@ -174,7 +177,7 @@ python main.py json --cell_info cell.json --block_info v1_a.json \
     --compare_block_info v2_a.json
 
 # physical layout mode: 2-D heat map (mutually exclusive with --compare_block_info);
-# uses the bundled ~100k-instance CPU-cluster sample
+# uses the bundled ~150k-instance CPU-cluster sample
 python main.py json --cell_info sample_data/physical/cell_info.json \
     --block_info sample_data/physical/instance_info.json \
         sample_data/physical/CORE.json sample_data/physical/IFU.json \
@@ -407,7 +410,7 @@ A file's `top_name` says which block its keys are relative to, which is what mak
 these work — a *flattened* `TOP.json` whose keys are paths under the top (`u_core/u1`), and
 a per-block `sub_A.json` whose keys are that sub-block's own instance names (`u1`). A record
 for a sub-block's leaf fills **every** placement of that block, because the filling happens
-before the hierarchy is expanded: one record for a block placed four times lights four
+before the hierarchy is expanded: one record for a block placed six times lights six
 places on the map.
 
 An attribute the input already provides is never overwritten — the DEF's cell names and
@@ -455,7 +458,9 @@ the power filled in, and the same `core.power.json` fills the netlist run.
 
 Computed over the "counted" set: standard cells (`is_macro == false` and
 `is_physical_only == false`) with a known `cell_name`. Aggregation is
-**hierarchy-flatten** (all descendant leaves).
+**hierarchy-flatten** (all descendant leaves). The two power metrics are the exception:
+they include macros (only physical-only and missing instances are excluded), matching the
+leakage/dynamic heat maps.
 
 | Column | Definition |
 |---|---|
@@ -470,6 +475,12 @@ Computed over the "counted" set: standard cells (`is_macro == false` and
 | PUL Cnt | count(`is_pulse_latch`) |
 | B/I Cnt | count(`is_buffer` or `is_inverter`) |
 | B/I Area | Σ(`area` where buffer/inverter) |
+| Leakage Power | Σ `leakage_power` over non-physical-only instances (macros included) |
+| Dynamic Power | Σ `dynamic_power` over non-physical-only instances (macros included) |
+
+The power columns are hidden by default when the input carried no power data (for example
+a DEF without `--json`); the Metrics menu can still show them. A supplied `0.0` counts as
+data. Values are shown as supplied by the input, with two decimals.
 
 Percentage metrics (ULVT%/MB%/D1D2%) use a red→green quality gradient over a
 configurable `[min, max]` range (right-click a gradient **column header** to edit);
@@ -527,8 +538,8 @@ bar.
 Left-drag on the heat map to select a rectangle of grid tiles. The release snaps to
 tile edges and outlines the region; a second hierarchy tree appears below the main
 one with the same columns, restricted to instances whose boxes overlap the selection.
-Area, ULVT/ B/I / macro area and bit counts are apportioned by the overlap fraction;
-counts count each intersecting instance once. **Filler, tap and decap
+Area, ULVT/ B/I / macro area, bit counts and power are apportioned by the overlap
+fraction; counts count each intersecting instance once. **Filler, tap and decap
 (`is_physical_only`) instances are excluded** from the region tree. The region tree
 ignores the toolbar Min threshold, follows `schema.METRICS` automatically, and uses
 the same expand/collapse/sort/click-to-contour behavior. Middle-drag still pans,
@@ -673,9 +684,10 @@ which files have to come out before this repository is published — in
 | `vlsi_viewer/Point.py`, `utils.py` | small shared helpers |
 | `quickstart.py` | preset GUI shortcuts for the bundled samples |
 
-Adding a new metric or input *attribute* is a one-place change in `schema.py`. A new
-input *format* additionally needs a converter in `vlsi_viewer/parsers/convert.py` and a
-subparser in `cli.py`.
+Adding a metric that reads an existing raw column is a change in `schema.py`. One backed
+by a new raw aggregate (such as power) also needs `metrics._flatten`, and
+`region.RegionData.stats` for the selected-region tree. A new input *format* additionally
+needs a converter in `vlsi_viewer/parsers/convert.py` and a subparser in `cli.py`.
 
 ## Testing
 

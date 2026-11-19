@@ -3,8 +3,9 @@
 ## Why
 
 The physical-mode Density% column computes a gap-padded union per visible hierarchy node,
-and clicking a node recomputes the same union for its contour. On the bundled 108,436-box
-sample:
+and clicking a node recomputes the same union for its contour. The measurements below are
+from the earlier four-core 108,436-box sample (it now has six cores, 153,650 boxes, and more
+uncore nodes):
 
 | Node | Boxes | Merged | pandas merge | shapely area | loops |
 |---|---:|---:|---:|---:|---:|

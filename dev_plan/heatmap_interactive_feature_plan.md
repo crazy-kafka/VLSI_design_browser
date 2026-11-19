@@ -44,7 +44,8 @@ data path. The selection payload and UI stay reusable but metal selection is not
    decap, and any `is_physical_only` cell): they contribute no count, area, bit or macro
    metric, and a path containing only physical-only instances is omitted.
 2. **Columns**: exactly the same columns as the main tree, built from `schema.METRICS`, so
-   future metric additions appear automatically. No `Density%`, no new power columns.
+   future metric additions appear automatically. No `Density%`; the leakage/dynamic power
+   columns added later appear here too.
 3. **Threshold**: the region tree ignores the toolbar Min threshold and shows every
    hierarchy path with at least one selected instance; empty branches are omitted.
 

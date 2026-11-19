@@ -1,6 +1,6 @@
 """Generate a small browsable EDA sample: macro LEF + DEF + gate-level Verilog.
 
-Unlike ``sample_data/physical`` (108k instances, JSON only), this sample is sized to a
+Unlike ``sample_data/physical`` (~154k instances, JSON only), this sample is sized to a
 few thousand instances so the DEF stays small enough to parse on every test run, while
 still having real hierarchy, hard macros, filler and tap cells - enough for the tree,
 the contours and the density heat map to be worth browsing:

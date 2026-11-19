@@ -1,7 +1,7 @@
-"""Generate a realistic CPU-cluster physical sample (~100k instances).
+"""Generate a realistic CPU-cluster physical sample (~154k instances).
 
-The top-level ``CPU_CLUSTER`` holds 4 cores in the 4 corners with 4 different
-orientations (N / W / S / E). Each core contains IFU, IEX and LSU sub-blocks,
+The top-level ``CPU_CLUSTER`` holds 6 cores in a 3x2 array with all four rotations
+plus both axis flips (N / W / S / E / FN / FS). Each core contains IFU, IEX and LSU sub-blocks,
 and each sub-block has thousands of standard cells plus a small SRAM bank. An
 "uncore" region (interconnect logic in the central cross + 8 L2 SRAM macros in
 the horizontal band) sits between the cores.
@@ -17,8 +17,9 @@ the field is sparsest through ~0.90 where it is densest) and each cell pays off
 that share as site-sized holes, so the holes stay evenly spread. Bin-scale texture
 can only come from leaving varying whitespace, because ``build_physical`` clips
 density at 1.0 and skips physical-only cells - without this the map degenerates
-into solid 100% rectangles. The die side is solved so the average density (total
-cell area / die area) lands at ~60%, and the generator self-verifies the result
+into solid 100% rectangles. The die is sized around the three-by-two core array so
+the average density (total cell area / die area) lands at ~60%, and the generator
+self-verifies the result
 through ``vlsi_viewer.physical.build_physical``.
 
 Run:  python sample_data/physical/generate_physical.py
@@ -87,8 +88,16 @@ MEAN_STD_W = sum(CELLS[n]["size_x"] for n in STD_POOL) / len(STD_POOL)
 # ---------------------------------------------------------------------------
 # Floorplan constants
 # ---------------------------------------------------------------------------
-CORE_SIZE = 210.0      # square core -> 4 orientations keep the same footprint
-MARGIN = 15.0          # die margin around the 2x2 core array
+CORE_SIZE = 210.0      # square core -> every orientation keeps the same footprint
+MARGIN = 15.0          # die margin around the core array
+CORE_GAP = 45.0        # gap between cores; also the width of the uncore cross
+CORES_X, CORES_Y = 3, 2
+
+
+def die_size():
+    """(width, height) of the 3x2 core array plus its margins."""
+    return (CORES_X * CORE_SIZE + (CORES_X - 1) * CORE_GAP + 2 * MARGIN,
+            CORES_Y * CORE_SIZE + (CORES_Y - 1) * CORE_GAP + 2 * MARGIN)
 
 # Per-core sub-block standard-cell counts (fit inside the core, see layout()).
 SUB_STD = {"IFU": 8000, "IEX": 7400, "LSU": 7200}
@@ -280,65 +289,66 @@ def build_core(rng):
             "instances": insts}
 
 
-def build_top(die, rng):
-    """TOP (CPU_CLUSTER): 4 rotated cores at the corners + uncore cross."""
+def build_top(rng):
+    """TOP (CPU_CLUSTER): six cores in a 3x2 array + the uncore cross.
+
+    The orientations cover all four rotations plus both axis flips: N, W, S, E, FN, FS.
+    """
     C = CORE_SIZE
     m = MARGIN
-    gap = die - 2 * m - 2 * C
-    # gap == width of the central cross
+    g = CORE_GAP
+    width, height = die_size()
     insts = {}
-    # A rotated core keeps a different corner fixed at its placement origin:
-    # N -> lower-left, W -> lower-right, S -> upper-right, E -> upper-left.
-    ll = m
-    rr = m + 2 * C + gap
-    refs = [
-        ("core_0", ll, ll, "N"),
-        ("core_1", rr, ll, "W"),
-        ("core_2", rr, rr, "S"),
-        ("core_3", ll, rr, "E"),
-    ]
-    for name, x, y, orient in refs:
-        attrs = _attrs("CORE", rng)
-        attrs["orient"] = orient
-        attrs["location_x"] = round(x, 3)
-        attrs["location_y"] = round(y, 3)
-        insts[name] = attrs
+    # Every core sits at the lower-left of its own slot: DEF anchors the lower-left corner
+    # of the oriented bounding box at the placement, whatever the orientation.
+    for row, row_orients in enumerate((("N", "W", "S"), ("E", "FN", "FS"))):
+        for col, orient in enumerate(row_orients):
+            name = f"core_{row * CORES_X + col}"
+            attrs = _attrs("CORE", rng)
+            attrs["orient"] = orient
+            attrs["location_x"] = round(m + col * (C + g), 3)
+            attrs["location_y"] = round(m + row * (C + g), 3)
+            insts[name] = attrs
 
-    # --- uncore logic cells in the vertical strip of the cross, split into a
-    # --- bottom half and a top half so the strip reads evenly (the horizontal
-    # --- band between the halves holds the L2 macros and arm logic).
-    strip_b = (m + C, m, gap, C)            # bottom half
-    strip_t = (m + C, m + C + gap, gap, C)  # top half
-    strip_rects = [strip_b, strip_t]
+    # --- uncore logic cells in the two vertical gaps of the cross, split into a
+    # --- bottom half and a top half each so the gaps read evenly (the horizontal
+    # --- band between the rows holds the L2 macros and arm logic).
+    strip_rects = []
+    for gap_index, col in enumerate((1, 2)):
+        x = m + col * C + (col - 1) * g
+        strip_rects += [(f"uncore/b{gap_index}", (x, m, g, C), 0.7 + 0.6 * gap_index),
+                        (f"uncore/t{gap_index}", (x, m + C + g, g, C),
+                         2.1 + 0.6 * gap_index)]
     cells = [rng.choice(STD_POOL) for _ in range(UNCORE_STRIP)]
-    half = (len(cells) + 1) // 2
-    for i, (prefix, rect, phase) in enumerate(zip(("uncore/b", "uncore/t"),
-                                                   strip_rects, (0.7, 2.1))):
-        part = cells[i * half:(i + 1) * half]
+    chunk = (len(cells) + len(strip_rects) - 1) // len(strip_rects)
+    for index, (prefix, rect, phase) in enumerate(strip_rects):
+        part = cells[index * chunk:(index + 1) * chunk]
         placed, dropped = place_std_rows(part, *rect, phase=phase, rng=rng)
         assert not dropped, f"{prefix}: {dropped} std cells did not fit"
         insts.update(_insts(prefix, placed, rng))
 
     # --- 8 L2 SRAM macros in the horizontal band arms ---
-    band_y0 = m + C + (gap - SRAM_H) / 2.0
+    band_y0 = m + C + (g - SRAM_H) / 2.0
     left_x = m + 6.0
-    right_x = m + C + gap + 6.0
+    right_x = m + 2 * (C + g) + 6.0
     l2 = place_sram_row(4, left_x, band_y0) + place_sram_row(4, right_x, band_y0)
     insts.update(_insts("l2/sram", l2, rng))
 
     # --- uncore logic cells in the arms, around the L2 macros ---
-    # the horizontal band spans the full die width; skip the vertical strip so
+    # the horizontal band spans the full die width; skip the two vertical gaps so
     # the cross arms don't overlap the strip's cells.
-    band = (m, m + C, 2 * C + gap, gap)
+    band = (m, m + C, CORES_X * C + (CORES_X - 1) * g, g)
     blocked = [(x, y, x + SRAM_W, y + SRAM_H) for _, x, y, _ in l2]
-    blocked.append((m + C, m, m + C + gap, m + 2 * C + gap))  # vertical strip
+    for col in (1, 2):
+        x = m + col * C + (col - 1) * g
+        blocked.append((x, m, x + g, m + CORES_Y * C + (CORES_Y - 1) * g))
     arm_cells = [rng.choice(STD_POOL) for _ in range(UNCORE_ARMS * 2)]
     arms, dropped = place_std_rows(arm_cells, *band, blocked=blocked, phase=4.3, rng=rng)
     assert not dropped, f"uncore/arm: {dropped} std cells did not fit"
     insts.update(_insts("uncore/arm", arms, rng))
 
     return {"top_name": "CPU_CLUSTER",
-            "boundary": _rect_poly(0.0, 0.0, die, die),
+            "boundary": _rect_poly(0.0, 0.0, width, height),
             "instances": insts}
 
 
@@ -358,19 +368,18 @@ def main():
     rng = random.Random(0)
     _write("cell_info.json", CELLS, indent=2)
 
-    # Solve the die side so the average density lands at ~60%: the cell area is
-    # fixed by the placement counts, so pick L = sqrt(area / 0.60).
-    n_std = (4 * sum(SUB_STD.values()) + UNCORE_STRIP + 2 * UNCORE_ARMS)
-    n_sram = (4 * sum(SUB_SRAM.values()) + N_L2)
+    # Six cores in a 3x2 array; the die is sized around them, with CORE_GAP as the cross.
+    n_cores = CORES_X * CORES_Y
+    n_std = (n_cores * sum(SUB_STD.values()) + UNCORE_STRIP + 2 * UNCORE_ARMS)
+    n_sram = (n_cores * sum(SUB_SRAM.values()) + N_L2)
     area = n_std * MEAN_STD_W + n_sram * SRAM_W * SRAM_H
-    die = int(round(math.sqrt(area / 0.60) / 10.0) * 10)
-    die = max(die, int(2 * MARGIN + 2 * CORE_SIZE + 40))  # leave a ~40-wide cross
+    width, height = die_size()
 
     ifu = build_subblock("IFU", rng)
     iex = build_subblock("IEX", rng)
     lsu = build_subblock("LSU", rng)
     core = build_core(rng)
-    top = build_top(die, rng)
+    top = build_top(rng)
 
     _write("IFU.json", ifu, indent=2)
     _write("IEX.json", iex, indent=2)
@@ -381,7 +390,7 @@ def main():
     blocks = {"IFU": ifu["instances"], "IEX": iex["instances"],
               "LSU": lsu["instances"], "CORE": core["instances"]}
     expanded = _expand_count(top["instances"], blocks)
-    density = area / (die * die)
+    density = area / (width * height)
 
     unique = (len(top["instances"]) + len(core["instances"]) + len(ifu["instances"])
               + len(iex["instances"]) + len(lsu["instances"]))
@@ -389,7 +398,7 @@ def main():
     print("  files: IFU.json IEX.json LSU.json CORE.json instance_info.json")
     print(f"  unique JSON records : {unique}")
     print(f"  expanded instances  : {expanded} (std {n_std} + SRAM {n_sram})")
-    print(f"  die                 : {die} x {die}")
+    print(f"  die                 : {width:g} x {height:g}")
     print(f"  avg density (est.)  : {density:.3f} (target ~0.60)")
     verify()
 
@@ -433,12 +442,12 @@ def verify():
           f"{100 * midrange:.1f}% mid-range, {distinct} distinct values, "
           f"roughness {roughness:.3f}")
 
-    assert 90_000 <= n <= 110_000, f"instance count {n} out of range"
+    assert 140_000 <= n <= 170_000, f"instance count {n} out of range"
     assert 0.55 <= avg <= 0.65, f"avg density {avg:.3f} not ~60%"
     assert dmax <= 1.0 + 1e-9, f"max density {dmax} exceeds 1.0"
     assert dmax > 0.85, f"no dense bins (max {dmax})"
     assert float(dens.min()) < 0.05, "no empty bins (no density variety)"
-    # The SRAM macros alone are 17.7% of the die = ~23% of occupied bins and are
+    # The SRAM macros alone are 17.2% of the die = ~23% of occupied bins and are
     # legitimately fully packed, so the floor here is the macro share; the old
     # striped placement measured 88.5%. Anything above the macro floor plus a
     # little headroom for the densest logic rows means the map has gone flat again.
@@ -452,7 +461,7 @@ def verify():
     assert roughness < 0.12, (
         f"bin-to-bin roughness {roughness:.3f} - the map is per-bin noise rather than "
         f"a utilisation field")
-    print("  verify: OK (count ~100k, density ~60%, max <= 1.0, realistic spread)")
+    print("  verify: OK (count ~154k, density ~60%, max <= 1.0, realistic spread)")
 
 
 if __name__ == "__main__":

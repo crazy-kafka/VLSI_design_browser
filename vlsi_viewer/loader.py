@@ -110,7 +110,14 @@ def _block_from_data(data, label):
         raise ValueError(f"'instances' must be a dict in {label}")
 
     records = []
+    has_power = False
     for leaf_name, attrs in instances.items():
+        # Power presence is only visible here: below, a missing attribute becomes its
+        # 0.0 default and is indistinguishable from a value somebody supplied.
+        if isinstance(attrs, dict) and (
+                attrs.get("leakage_power") is not None
+                or attrs.get("dynamic_power") is not None):
+            has_power = True
         row = {"leaf_instance_name": leaf_name}
         for spec in schema.INSTANCE_ATTRS:
             row[spec.name] = _apply_spec(attrs, spec)
@@ -118,6 +125,7 @@ def _block_from_data(data, label):
 
     df = pd.DataFrame(records, columns=["leaf_instance_name"] + [s.name for s in schema.INSTANCE_ATTRS])
     _cast(df, schema.INSTANCE_ATTRS)
+    df.attrs["has_power"] = has_power
     boundary = _parse_boundary(data.get("boundary"))
     logger.info("Loaded block '%s' with %d instance(s) from %s", top_name, len(df), label)
     return top_name, df, boundary

@@ -77,6 +77,8 @@ def _m_bits(g):    return g["reg_bits"]
 def _m_pul(g): return g["pul_count"]
 def _m_ckb(g): return g["ckb_count"]
 def _m_icg(g): return g["icg_count"]
+def _m_leakage(g): return g["leakage_power"]
+def _m_dynamic(g): return g["dynamic_power"]
 def _m_macro_count(g): return g["macro_count"]
 def _m_macro_area(g):  return g["macro_area"]
 
@@ -86,7 +88,7 @@ class MetricSpec:
     """One metric: how it is identified, labelled, formatted, and computed."""
     key: str
     label: str
-    kind: str          # "count" | "area" | "percent"
+    kind: str          # "count" | "area" | "percent" | "power"
     is_macro: bool
     compute: Callable[[pd.DataFrame], pd.Series]
     gradient: str = None   # None | "lower_better" | "higher_better" (quality bar color)
@@ -104,12 +106,15 @@ METRICS = [
     MetricSpec("pul_count", "PUL Cnt", "count", False, _m_pul),
     MetricSpec("bi_count", "B/I Cnt", "count", False, _m_bi_count),
     MetricSpec("bi_area", "B/I Area", "area", False, _m_bi_area),
+    MetricSpec("leakage_power", "Leakage Power", "power", False, _m_leakage),
+    MetricSpec("dynamic_power", "Dynamic Power", "power", False, _m_dynamic),
     MetricSpec("macro_count", "Macro Cnt", "count", True, _m_macro_count),
     MetricSpec("macro_area", "Macro Area", "area", True, _m_macro_area),
 ]
 
 STD_METRICS = [m for m in METRICS if not m.is_macro]
 MACRO_METRICS = [m for m in METRICS if m.is_macro]
+POWER_METRIC_KEYS = tuple(m.key for m in METRICS if m.kind == "power")
 
 # Mutable gradient ranges (defaults) keyed by metric key.
 _GRADIENT_RANGES = {
@@ -154,7 +159,7 @@ def format_metric(kind: str, value) -> str:
         pass
     if kind == "percent":
         return f"{value * 100:.2f}%"
-    if kind == "area":
+    if kind in ("area", "power"):
         return f"{value:,.2f}"
     return f"{int(value):,}"
 
@@ -191,7 +196,7 @@ def format_delta_abs(kind: str, value) -> str:
         pass
     if kind == "count":
         return f"{int(value):+,}"
-    if kind == "area":
+    if kind in ("area", "power"):
         return f"{value:+,.2f}"
     return f"{value:+.2f}pt"
 

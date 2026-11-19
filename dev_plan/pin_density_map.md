@@ -32,8 +32,8 @@ no pin data.
   the lower-left corner of the placement bounding rectangle is placed after any possible rotations or
   flips"*, and *"Components are always placed such that the lower left corner of the cell is the
   origin (0,0) after any orientation."* So a macro-local pin point `p` maps to global as
-  **`M_o·p − ℓ + loc`**, where `ℓ` is the lower-left of the *oriented* local bbox: zero for N/FW/FN,
-  and non-zero otherwise (for W it is the macro's height). Omitting `ℓ` would put every rotated
+  **`M_o·p − ℓ + loc`**, where `ℓ` is the lower-left of the *oriented* local bbox: zero for N/FW,
+  and non-zero otherwise (for W it is the macro's height, for FN the width). Omitting `ℓ` would put every rotated
   macro's pins one macro-extent away from the box the view draws for it. `physical.py`'s own box code
   (`_oriented_extent`) already follows the reference, so the pins must too — and then they land
   inside the drawn box by construction.
@@ -167,13 +167,14 @@ none for a rail, none for an area-only cell - and builds the pin grid from the r
 `quickstart.py def` now offers *Cell density / Leakage power / Dynamic power / ULVT density / Pin
 density* and renders the fifth.
 
-## Flagged, not fixed: metal's obstruction transform
+## Metal's obstruction transform (fixed follow-up)
 
-`metal._macro_blockage` (`metal.py:1151-1162`) implements `p_global = M_block(M_o·p + loc) + t_block`
-— the raw-placement-point convention, without the `ℓ` term. By the reference passage above that is
-wrong for S/W/E/FN/FS/FW, and would put a rotated macro's obstruction geometry one macro-extent away
-from the same macro's footprint. Nothing in this change touches it, and the pin pass must not inherit
-it. Worth a separate check against a rotated macro in a real design.
+`metal._macro_blockage` used to implement `p_global = M_block(M_o·p + loc) + t_block` — the
+raw-placement-point convention, without the `ℓ` term. By the reference passage above that was
+wrong for S/W/E/FN/FS/FE, and put a rotated macro's obstruction geometry one macro-extent away
+from the same macro's footprint. It now applies the same `ℓ` term (`placement_origin`) to both
+the declared-OBS and fallback-footprint paths, and `tests/test_metal_metric.py` pins all eight
+orientations plus a macro nested in a rotated block.
 
 ## Later: the pin grid moved out of the map switch (2026-09-22)
 

@@ -592,7 +592,8 @@ constants at the top, one writer per file, a `verify()` that re-parses through t
    FILL/TAP/DCAP), reusing the existing generator's tables where possible.
 3. **`sub.def`** — a leaf block with local TRACKS, macros, its own `NETS`, and a `SPECIALNETS`
    followpin plus one PG ring as `+ POLYGON`.
-4. **`top.def`** — ~2 mm die, four `sub` instances at **four different orientations** (so frame
+4. **`top.def`** — ~2 mm die, six `sub` instances at **six orientations** - all four rotations
+   plus both axis flips (so frame
    composition for wires is exercised by real data), `NONDEFAULTRULES` written in the real
    no-semicolon `+ LAYER` form with DB-unit values (a `2W2S` clock rule and a wider PG rule, both
    referenced by nets), all 12 `TRACKS` with direction matching the LEF, SRAM macros sized so the

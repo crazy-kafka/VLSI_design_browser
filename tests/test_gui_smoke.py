@@ -8,7 +8,7 @@ from PyQt5 import QtCore
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
 
-from vlsi_viewer import theme
+from vlsi_viewer import schema, theme
 from vlsi_viewer.model import match_paths, view_for_diff, view_for_single
 from vlsi_viewer.ui_main import MainWindow
 from vlsi_viewer.ui_search import SearchDialog
@@ -40,7 +40,7 @@ def test_tree_constructs(app, design):
     tree = HierarchyTree()
     tree.set_view(view)
 
-    assert tree.columnCount() == 12  # Hierarchy + 11 std metrics
+    assert tree.columnCount() == 14  # Hierarchy + 13 std metrics
     assert tree.topLevelItemCount() == 1
 
     top = tree.topLevelItem(0)
@@ -59,7 +59,7 @@ def test_include_macros_adds_columns(app, design):
     view = view_for_single(design, include_macros=True)
     tree = HierarchyTree()
     tree.set_view(view)
-    assert tree.columnCount() == 14  # Hierarchy + 11 std + 2 macro
+    assert tree.columnCount() == 16  # Hierarchy + 13 std + 2 macro
 
 
 def test_threshold_filters_children(app, design):
@@ -100,9 +100,9 @@ def test_search_dialog_compare(app, design):
     dlg = SearchDialog(v1, v2, "*unit1*", "wildcard")
     assert dlg.tables["v1"].rowCount() == 1
     assert dlg.tables["v2"].rowCount() == 1
-    # v2 table has macro columns (11 std + 2 macro)
-    assert dlg.tables["v2"].columnCount() == 1 + 13
-    assert dlg.tables["v1"].columnCount() == 1 + 11
+    # v2 table has macro columns (13 std + 2 macro)
+    assert dlg.tables["v2"].columnCount() == 1 + 15
+    assert dlg.tables["v1"].columnCount() == 1 + 13
 
 
 def _sortable_view():
@@ -622,6 +622,18 @@ def _region_fixture(tmp_path):
     return design, physical, RegionData(physical, design, selection)
 
 
+def _powered_design(tmp_path):
+    """A one-cell design whose input explicitly carries power keys."""
+    import json
+    from vlsi_viewer.metrics import build_design
+
+    cell = tmp_path / "power_cell.json"
+    cell.write_text(json.dumps({"C": {"area": 1.0}}))
+    block = {"top_name": "TOP", "instances": {
+        "a": {"cell_name": "C", "leakage_power": 0.5, "dynamic_power": 1.5}}}
+    return build_design([block], str(cell))
+
+
 def test_region_panel_shows_and_clears(app, tmp_path):
     from vlsi_viewer.ui_region import RegionPanel
 
@@ -780,6 +792,81 @@ def test_region_tree_follows_hidden_metrics(app, tmp_path):
         w.close()
 
 
+def test_power_columns_are_hidden_when_no_power_was_read(app, design):
+    w = MainWindow(design)
+    try:
+        assert not design.has_power
+        for key, label in (("leakage_power", "Leakage Power"),
+                           ("dynamic_power", "Dynamic Power")):
+            column = w._tree.column_index(key)
+            assert column is not None and w._tree.isColumnHidden(column)
+            action = _action(w.metrics_menu, label)
+            assert action.isCheckable() and not action.isChecked()
+        # The Metrics menu can still bring a hidden one back.
+        _action(w.metrics_menu, "Leakage Power").trigger()
+        assert not w._tree.isColumnHidden(w._tree.column_index("leakage_power"))
+    finally:
+        w.close()
+
+
+def test_power_columns_are_visible_when_power_was_read(app, tmp_path):
+    powered = _powered_design(tmp_path)
+    w = MainWindow(powered)
+    try:
+        assert powered.has_power
+        for key, label in (("leakage_power", "Leakage Power"),
+                           ("dynamic_power", "Dynamic Power")):
+            column = w._tree.column_index(key)
+            assert column is not None and not w._tree.isColumnHidden(column)
+            assert _action(w.metrics_menu, label).isChecked()
+    finally:
+        w.close()
+
+
+def test_region_power_columns_are_hidden_without_power(app, tmp_path):
+    design, physical, region = _region_fixture(tmp_path)
+    w = MainWindow(design, physical=physical)
+    try:
+        w._on_region_selected(region.selection)
+        assert not design.has_power
+        for key in schema.POWER_METRIC_KEYS:
+            column = w._region_tree.column_index(key)
+            assert column is not None and w._region_tree.isColumnHidden(column)
+    finally:
+        w.close()
+
+
+def test_compare_power_columns_hide_without_power(app, design):
+    w = MainWindow(design, design, threshold=0)
+    try:
+        for tree in (w._compare.v1, w._compare.v2):
+            for key in schema.POWER_METRIC_KEYS:
+                column = tree.column_index(key)
+                assert column is not None and tree.isColumnHidden(column)
+        for key in schema.POWER_METRIC_KEYS:
+            for suffix in ("_abs", "_rel"):
+                column = w._compare.diff.column_index(key + suffix)
+                assert column is not None and w._compare.diff.isColumnHidden(column)
+    finally:
+        w.close()
+
+
+def test_compare_power_columns_show_when_one_side_has_power(app, design, tmp_path):
+    powered = _powered_design(tmp_path)
+    w = MainWindow(powered, design, threshold=0)
+    try:
+        for tree in (w._compare.v1, w._compare.v2):
+            for key in schema.POWER_METRIC_KEYS:
+                column = tree.column_index(key)
+                assert column is not None and not tree.isColumnHidden(column)
+        for key in schema.POWER_METRIC_KEYS:
+            for suffix in ("_abs", "_rel"):
+                column = w._compare.diff.column_index(key + suffix)
+                assert column is not None and not w._compare.diff.isColumnHidden(column)
+    finally:
+        w.close()
+
+
 def test_compare_mode_has_no_metrics_menu(app, design):
     w = MainWindow(design, design, threshold=0)
     try:
@@ -798,7 +885,7 @@ def test_mainwindow_tree_only_has_no_region_panel(app, design):
 
 def test_diff_view(app, design):
     view = view_for_diff(design, design)
-    assert len(view.columns) == 22  # 11 metrics x {abs, rel}
+    assert len(view.columns) == 26  # 13 metrics x {abs, rel}
     # Δrel columns carry a gradient; Δabs columns do not
     rel_col = view.columns[1]    # ΔArea% (index 1 = first rel after ΔArea at 0)
     assert rel_col.gradient == "lower_better"
@@ -827,7 +914,7 @@ def test_mainwindow_compare(app, design):
     assert w._stack.currentWidget() is w._compare
     assert w._compare.v1.topLevelItemCount() == 1
     assert w._compare.diff.topLevelItemCount() == 1
-    assert w._compare.diff.columnCount() == 23  # Hierarchy + 22 diff columns
+    assert w._compare.diff.columnCount() == 27  # Hierarchy + 26 diff columns
 
 
 def test_deep_hierarchy_expand_arrow(app, tmp_path):
@@ -865,7 +952,7 @@ def test_toggle_macros_preserves_expansion(app, design):
 
     tree.set_view(view_for_single(design, include_macros=True))
     assert tree._expanded_paths() == ["TOP"]       # expansion preserved
-    assert tree.columnCount() == 14                # +2 macro columns
+    assert tree.columnCount() == 16                # +2 macro columns
     assert tree.topLevelItem(0).childCount() == 2
 
 

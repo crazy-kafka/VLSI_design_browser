@@ -32,12 +32,12 @@ the remaining width to the map.
 
 `_boundary_polys` returned each block's boundary untransformed, where `physical.py` maps them
 through the block's frame. The white rectangle in the lower-left of the screenshot was the
-`SUB` outline drawn at `(0,0)-(260,200)` instead of at its four placements.
+`SUB` outline drawn at `(0,0)-(260,200)` instead of at its placements.
 
 `_boundary_polys(assembler, blocks, root)` now walks the tree as `_macro_area` does and maps
 each boundary vertex by vertex — not by bounding box, because a quarter turn swaps the
-outline's extents. Four outlines appear, one per placement, which is both correct and free
-hierarchy feedback.
+outline's extents. One outline per placement now appears, which is both correct and free
+hierarchy feedback (the sample later grew to six placements).
 
 ## 3. Make the panel legible at its new width
 

@@ -95,6 +95,20 @@ def _build(tmp_path, def_body, macro_lef=False, macro_lef_text=None, **kwargs):
         return build_metal([path], lef, [tech], **kwargs)
 
 
+def _build_hierarchy(tmp_path, defs, macro_lef_text, **kwargs):
+    """Write one DEF per ``(filename, design, die_um, body)`` and build them together."""
+    tech = _write(tmp_path / "tech.lef", TECH)
+    lef = _write(tmp_path / "cells.lef", macro_lef_text)
+    paths = []
+    for filename, design, die_um, body in defs:
+        text = ("VERSION 5.8 ;\nDESIGN %s ;\nUNITS DISTANCE MICRONS 1000 ;\n"
+                "DIEAREA ( 0 0 ) ( %d %d ) ;\n%sEND DESIGN\n"
+                % (design, die_um * 1000, die_um * 1000, body))
+        paths.append(_write(tmp_path / filename, text))
+    with contextlib.redirect_stdout(io.StringIO()):
+        return build_metal(paths, [lef], [tech], **kwargs)
+
+
 def _nets(statements):
     return "COMPONENTS 0 ;\nEND COMPONENTS\nNETS %d ;\n%sEND NETS\n" % (
         len(statements), "".join(statements))
@@ -327,8 +341,9 @@ def test_obstructions_follow_the_placement_and_its_orientation(tmp_path):
     """An obstruction offset inside the macro has to land where the cell's geometry lands.
 
     This is the case the old extents-swap shortcut could not express at all - it knew only the
-    macro's outline - and a `W` placement is where the two differ, because the true DEF
-    transform puts the cell to the *minus*-x side of its placed origin.
+    macro's outline - and a `W` placement is where the transforms differ: DEF anchors the
+    lower-left of the oriented 4 x 4 bbox at (5, 5), so the cell spans [5, 9] x [5, 9] and
+    its local (0, 0) corner sits at (9, 5).
     """
     # A 2 x 2 obstruction in the macro's own corner, a quarter of the 4 x 4 macro - above the
     # size rule, so what is under test here is the transform and not the filter.
@@ -339,14 +354,77 @@ COMPONENTS 1 ;
 END COMPONENTS
 """ + _nets([])
     data = _build(tmp_path, body, macro_lef_text=lef, grid_size=1.0)
-    # W maps a local point (x, y) to (5 - y, 5 + x), so the obstruction's image is
-    # x in [3, 5], y in [5, 7] - to the *minus*-x side of the placed origin, which is where
-    # the true DEF transform puts a W-placed cell.
-    for ix, iy in ((3, 5), (4, 5), (3, 6), (4, 6)):
+    # W maps a macro-local (x, y) to (9 - y, 5 + x), so the obstruction's image is
+    # x in [7, 9], y in [5, 7] - the plus-x side, where the anchored bbox puts the cell.
+    for ix, iy in ((7, 5), (8, 5), (7, 6), (8, 6)):
         assert data.cell_detail(ix, iy, "L:M4")["capacity"] == pytest.approx(0.0), (ix, iy)
-    # ... and not on the other side, which is where getting the composition wrong puts it.
-    for ix, iy in ((5, 5), (6, 5), (5, 6), (7, 7)):
+    # ... and not where the raw-location transform used to put it (x [3, 5]), nor elsewhere
+    # on the cell's footprint.
+    for ix, iy in ((3, 5), (4, 5), (3, 6), (4, 6), (5, 5), (6, 5), (5, 6), (7, 7)):
         assert data.cell_detail(ix, iy, "L:M4")["capacity"] == pytest.approx(1.0), (ix, iy)
+
+
+@pytest.mark.parametrize("orient, box", [
+    ("N", (5, 5, 7, 7)), ("S", (7, 5, 9, 7)), ("W", (5, 5, 7, 7)),
+    ("E", (5, 7, 7, 9)), ("FN", (7, 5, 9, 7)), ("FS", (5, 5, 7, 7)),
+    ("FW", (5, 5, 7, 7)), ("FE", (5, 7, 7, 9)),
+])
+def test_a_rotated_macro_uses_its_oriented_bbox_offsets(tmp_path, orient, box):
+    """A 4 x 2 macro pins whether an orientation needed the width or the height.
+
+    W and FS need the height (2); E and FE need the width (4); S and FN need the width in
+    x. A square macro could not tell those apart.
+    """
+    lef = _macro_lef(obs=[("M4", [(0.0, 0.0, 2.0, 2.0)])], size=(4.0, 2.0))
+    body = (f"COMPONENTS 1 ;\n- m1 SRAM + PLACED ( 5000 5000 ) {orient} ;\n"
+            "END COMPONENTS\n") + _nets([])
+    data = _build(tmp_path, body, macro_lef_text=lef, grid_size=1.0)
+    assert data.blockage["obs_cells"] == 1
+    assert data.blockage["fallback_cells"] == 0
+    x0, y0, x1, y1 = box
+    expected = {(ix, iy) for ix in range(x0, x1) for iy in range(y0, y1)}
+    covered = {(ix, iy) for ix in range(10) for iy in range(10)
+               if data.cell_detail(ix, iy, "L:M4")["capacity"] == 0.0}
+    assert covered == expected
+
+
+def test_a_rotated_fallback_footprint_is_anchored_at_the_placement(tmp_path):
+    """A macro with no OBS blocks its whole oriented footprint at the anchored lower-left.
+
+    The raw-location transform put a W 4 x 4 at (5, 5) on x [1, 5]; DEF puts it on [5, 9].
+    """
+    lef = _macro_lef(size=(4.0, 4.0))
+    body = ("COMPONENTS 1 ;\n- m1 SRAM + PLACED ( 5000 5000 ) W ;\n"
+            "END COMPONENTS\n") + _nets([])
+    data = _build(tmp_path, body, macro_lef_text=lef, grid_size=1.0, macro_block_layers=1)
+    assert data.blockage["fallback_cells"] == 1
+    expected = {(ix, iy) for ix in range(5, 9) for iy in range(5, 9)}
+    covered = {(ix, iy) for ix in range(10) for iy in range(10)
+               if data.cell_detail(ix, iy, "L:M3")["capacity"] == 0.0}
+    assert covered == expected
+
+
+def test_a_macro_in_a_rotated_sub_block_uses_the_composed_frame(tmp_path):
+    """The macro's offset rotates with its block: apply it before M_block, not after.
+
+    SUB holds a 4 x 2 W macro at (1, 1), so the macro-local obstruction [0, 2] x [0, 2]
+    sits at [1, 3] x [1, 3] in SUB. SUB W at (10, 10) (10 x 10) maps that to
+    x [17, 19], y [11, 13]. Adding the offset in global axes would leave it at y [9, 11].
+    """
+    lef = _macro_lef(obs=[("M4", [(0.0, 0.0, 2.0, 2.0)])], size=(4.0, 2.0))
+    top = ("top.def", "TOP", 40,
+           "COMPONENTS 1 ;\n- s1 SUB + SOURCE DIST + PLACED ( 10000 10000 ) W ;\n"
+           "END COMPONENTS\nNETS 0 ;\nEND NETS\n")
+    sub = ("sub.def", "SUB", 10,
+           "COMPONENTS 1 ;\n- m1 SRAM + SOURCE DIST + PLACED ( 1000 1000 ) W ;\n"
+           "END COMPONENTS\nNETS 0 ;\nEND NETS\n")
+    data = _build_hierarchy(tmp_path, [top, sub], lef, grid_size=1.0)
+    for ix in (17, 18):
+        for iy in (11, 12):
+            assert data.cell_detail(ix, iy, "L:M4")["capacity"] == pytest.approx(0.0), (ix, iy)
+    for ix in (17, 18):
+        for iy in (9, 10):
+            assert data.cell_detail(ix, iy, "L:M4")["capacity"] == pytest.approx(1.0), (ix, iy)
 
 
 # -- groups ------------------------------------------------------------------------
@@ -635,8 +713,37 @@ def test_a_rotated_sub_block_outline_turns_with_it(tmp_path):
 
     outline = next(points for name, points in data.boundary_polys if name == "SUB")
     assert len(outline) == 4
-    # 4 x 2 becomes 2 x 4, anchored at the placed origin as DEF defines it.
-    assert _bbox(outline) == pytest.approx((3.0, 5.0, 5.0, 9.0))
+    # 4 x 2 becomes 2 x 4; the placement is the lower-left of the oriented bbox, so the
+    # outline spans x [5, 7], y [5, 9].
+    assert _bbox(outline) == pytest.approx((5.0, 5.0, 7.0, 9.0))
+
+
+@pytest.mark.parametrize("orient, expected", [
+    ("N", [(5.0, 5.0), (9.0, 5.0), (9.0, 6.0), (6.0, 6.0), (6.0, 7.0), (5.0, 7.0)]),
+    ("FN", [(9.0, 5.0), (5.0, 5.0), (5.0, 6.0), (8.0, 6.0), (8.0, 7.0), (9.0, 7.0)]),
+    ("FS", [(5.0, 7.0), (9.0, 7.0), (9.0, 6.0), (6.0, 6.0), (6.0, 5.0), (5.0, 5.0)]),
+])
+def test_a_flipped_sub_block_outline_keeps_its_shape(tmp_path, orient, expected):
+    """An L-shaped outline makes a flip visible where a rectangle would not.
+
+    FN mirrors x and FS mirrors y; asserting every vertex (not just the bbox) is what
+    catches a rectangle-shaped outline silently collapsing the shape.
+    """
+    tech = _write(tmp_path / "tech.lef", TECH)
+    sub = _write(tmp_path / "sub.def",
+                 "DESIGN SUB ;\nUNITS DISTANCE MICRONS 1000 ;\n"
+                 "DIEAREA ( 0 0 ) ( 4000 0 ) ( 4000 1000 ) ( 1000 1000 ) "
+                 "( 1000 2000 ) ( 0 2000 ) ;\n" + _nets([]) + "END DESIGN\n")
+    top = _write(tmp_path / "top.def",
+                 "DESIGN TOP ;\nUNITS DISTANCE MICRONS 1000 ;\n" + DIE
+                 + f"COMPONENTS 1 ;\n- u1 SUB + SOURCE DIST + PLACED ( 5000 5000 ) {orient} ;\n"
+                 "END COMPONENTS\n" + _nets([]) + "END DESIGN\n")
+    with contextlib.redirect_stdout(io.StringIO()):
+        data = build_metal([top, sub], [], [tech], grid_size=10.0)
+
+    outline = next(points for name, points in data.boundary_polys if name == "SUB")
+    got = [(round(float(x), 6), round(float(y), 6)) for x, y in outline]
+    assert got == expected
 
 
 def test_a_missing_boundary_is_rejected(tmp_path):

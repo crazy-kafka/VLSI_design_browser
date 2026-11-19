@@ -319,8 +319,9 @@ def _report_fill(filled, args, compare) -> None:
     no instance at all, and the design's own attributes kept over the file's.
     """
     if filled is None:
-        logger.warning("%s input carries no power data: the leakage and dynamic heat maps "
-                       "will be empty", args.cmd)
+        logger.warning("%s input carries no power data: the hierarchy power columns are "
+                       "hidden and the leakage and dynamic heat maps will be empty",
+                       args.cmd)
         return
     logger.info("power: %d of %d design instance(s) filled from %d file(s)%s", filled.instances,
                 filled.total, filled.files,
@@ -328,12 +329,13 @@ def _report_fill(filled, args, compare) -> None:
                 if filled.conflicts else "")
     if not filled.matched:
         logger.warning("%s input still carries no power data: no --json record matched an "
-                       "instance, so the leakage and dynamic heat maps will be empty", args.cmd)
+                       "instance, so the hierarchy power columns are hidden and the leakage "
+                       "and dynamic heat maps will be empty", args.cmd)
     elif args.cmd == "verilog":
         logger.info("power: a netlist has no physical mode, so use --out to keep the data")
     if compare:
-        # Power is not rendered in the compare view at all, so a second design would silently
-        # carry data nothing can show - and the file may not even be about it.
+        # Only the first design is filled. The compare design keeps whatever power its own
+        # input carried, and the power columns appear when either side has data.
         logger.info("power: the --json file(s) filled the first design only; the compare design "
                     "is not changed")
 

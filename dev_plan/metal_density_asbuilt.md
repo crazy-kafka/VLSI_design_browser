@@ -397,10 +397,11 @@ side-effect lists with twenty-odd tests pinning it - so the metal path gets its 
 ### A real bug, found by an exhaustive test
 
 `Frame.compose` was written first with `Orient.mergeOrient`, which combines mirrors by XOR-ing
-global X and Y flags. That is wrong whenever the **parent is rotated and the child is
-mirrored**: the child's mirror axis rotates with the parent. The 64-pair test (every outer
-orientation against every inner) failed on exactly those pairs - all four rotated parents
-against all four mirrored children - and none of the rotation-only or mirror-only pairs.
+global X and Y flags. That is wrong when the **parent is mirrored and the child carries a
+quarter turn**: the parent's mirror is expressed in the child's rotated axes. The 64-pair
+test (every outer orientation against every inner) failed on exactly 16 ordered pairs - all
+four mirrored parents {FN,FS,FW,FE} against the four quarter-turn children {W,E,FW,FE} - and
+none of the rotation-only or mirror-only pairs.
 
 Rewritten to compose the actual 2x2 matrices, which is exact by construction:
 `M = M_parent M_child`, `t = M_parent t_child + t_parent`. Every pair now matches
@@ -879,10 +880,11 @@ it replaced at the default depth, which is why the dtype and the precomputation 
 - I conflated "declares no OBS" with "declared obstructions that were judged negligible", so a
   macro carrying only pin-access bites fell back to the layer count - the exact three-state
   confusion the change exists to remove. `test_pin_access_bites_are_not_a_keep_out` failed.
-- The transform for a macro-local obstruction is `M_block·M_orient·p + (M_block·loc + t_block)`,
-  and applying the *composed* matrix to the instance location as well puts a rotated macro's
-  obstruction where a second rotation of its placement says. Nothing pinned a rotated macro
-  before; the new orientation test does.
+- The transform for a macro-local obstruction is
+  `M_block·M_orient·p + M_block·(loc + off) + t_block`, where `off` is the oriented bbox's
+  lower-left relative to the placement, and applying the *composed* matrix to the location
+  as well puts a rotated macro's obstruction where a second rotation of its placement says.
+  Nothing pinned a rotated macro before; the new orientation test does.
 
 **And one the real file settled:** the 107 `OBS` blocks in the vendored Nangate45 library are all
 on `metal1` and all interior - pin-access bites inside standard cells. Every one of those cells
@@ -1102,8 +1104,9 @@ more than once, and the plan is [`parse_once_flow.md`](parse_once_flow.md).
 **The test gap was closed first**, because both failures here are silent. Nothing pinned a wire
 under a non-identity frame - the frame tests were outline-only and macro-obstruction-only, and
 `verify()`'s grid thresholds survive a *composed* transform - and nothing pinned a block's wiring
-landing once per placement, which a deduplicated walk passes while losing three quarters of the
-metal. Both are now tests, and so is `emitted == 79,277 == 4 × 19,817 + 9` on the committed sample.
+landing once per placement, which a deduplicated walk passes while losing five sixths of the
+metal. Both are now tests, and so is `emitted == 79,277 == 4 × 19,817 + 9` on the sample as it
+stood then (it now places SUB six times: `6 × 19,817 + 9 = 118,911`).
 
 **And one of them found a live bug.** `_add_polygon` never applied a frame at all: a `+ POLYGON`
 inside a rotated sub-block rasterised in the block's own coordinates, stacked under every other
@@ -1537,10 +1540,10 @@ since a 30 um run between two points outside a macro passes straight over it. A 
 sideways step and is tested too.
 
 **The four sub-blocks overlapped.** A quarter turn swaps a block's extents: a 260x200 block
-placed West occupies 200x260, and DEF anchors the cell's *origin corner* at the placement, so
-West maps `x -> x0 - y` and the block extends to the *left* of its origin. Spacing the columns
-by the un-rotated width put one block's wiring inside another's macro. Each instance is now
-placed so its **rotated** footprint lands in its grid cell.
+placed West occupies 200x260, and DEF anchors the lower-left of that oriented bbox at the
+placement, so West maps `x -> x0 + height - y` and the footprint spans `[x0, x0 + height]`.
+Spacing the columns by the un-rotated width put one block's wiring inside another's macro.
+Each instance is now placed at the lower-left of its grid cell.
 
 That one was found by inverting each frame on a stranded cell and asking which placement put
 the metal there - the answer was a *different* block than the one whose macro covered it,

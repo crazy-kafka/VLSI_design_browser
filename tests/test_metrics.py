@@ -91,8 +91,74 @@ def test_metric_registry_columns(design):
     assert [m.key for m in schema.STD_METRICS] == [
         "area", "count", "ulvt_ratio", "mb_ratio", "d1d2_ratio", "bits",
         "ckb_count", "icg_count", "pul_count", "bi_count", "bi_area",
+        "leakage_power", "dynamic_power",
     ]
     assert [m.key for m in schema.MACRO_METRICS] == ["macro_count", "macro_area"]
+
+
+def test_power_metrics_include_macros_and_exclude_physical_only(tmp_path):
+    """Power counts every logic instance; only physical-only and missing ones are left out.
+
+    Count/Area also drop macros, but power must not: an SRAM is a real consumer.
+    """
+    cells = {
+        "STD": {"area": 1.0},
+        "MACRO": {"area": 100.0, "is_macro": True},
+        "TAP": {"area": 0.5},
+    }
+    inst = {"top_name": "TOP", "instances": {
+        "std": {"cell_name": "STD", "leakage_power": 1.0, "dynamic_power": 2.0},
+        "blk/macro": {"cell_name": "MACRO", "leakage_power": 10.0, "dynamic_power": 20.0},
+        "tap": {"cell_name": "TAP", "is_physical_only": True,
+                "leakage_power": 100.0, "dynamic_power": 200.0},
+        "miss": {"cell_name": "UNKNOWN", "leakage_power": 1000.0, "dynamic_power": 2000.0},
+    }}
+    (tmp_path / "cell.json").write_text(json.dumps(cells))
+    (tmp_path / "inst.json").write_text(json.dumps(inst))
+    design = build_design([str(tmp_path / "inst.json")], str(tmp_path / "cell.json"))
+
+    assert design.has_power
+    mv = design.metric_values()          # the std view still carries macro power
+    assert mv.loc["TOP", "leakage_power"] == pytest.approx(11.0)
+    assert mv.loc["TOP", "dynamic_power"] == pytest.approx(22.0)
+    assert mv.loc["TOP/blk", "leakage_power"] == pytest.approx(10.0)
+    assert mv.loc["TOP/blk", "dynamic_power"] == pytest.approx(20.0)
+
+
+def test_power_keys_present_but_zero_still_count_as_read(tmp_path):
+    """Presence is structural: a supplied 0.0 is data, not an absent attribute."""
+    (tmp_path / "cell.json").write_text(json.dumps({"C": {"area": 1.0}}))
+    (tmp_path / "inst.json").write_text(json.dumps({"top_name": "TOP", "instances": {
+        "a": {"cell_name": "C", "leakage_power": 0.0, "dynamic_power": 0.0}}}))
+    design = build_design([str(tmp_path / "inst.json")], str(tmp_path / "cell.json"))
+    assert design.has_power
+    assert design.metric_values().loc["TOP", "leakage_power"] == 0.0
+
+
+def test_a_design_without_power_reports_no_power_data(design):
+    assert not design.has_power
+
+
+def test_load_blocks_keeps_power_presence_across_a_duplicate_merge():
+    """combine_first drops DataFrame.attrs; the flag is OR-ed explicitly."""
+    from vlsi_viewer.metrics import load_blocks
+
+    earlier = {"top_name": "TOP", "instances": {"x": {"cell_name": "C"}}}
+    later = {"top_name": "TOP", "instances": {
+        "x": {"cell_name": "C", "leakage_power": 1.0}}}
+    assert load_blocks([earlier, later]).attrs["has_power"]
+
+
+def test_the_cache_preserves_power_presence(tmp_path):
+    (tmp_path / "cell.json").write_text(json.dumps({"C": {"area": 1.0}}))
+    (tmp_path / "inst.json").write_text(json.dumps({"top_name": "TOP", "instances": {
+        "a": {"cell_name": "C", "leakage_power": 1.0}}}))
+    cache = str(tmp_path / "cache")
+    paths = [str(tmp_path / "inst.json")]
+    cells = str(tmp_path / "cell.json")
+    d1 = load_or_build(paths, cells, cache_dir=cache)
+    d2 = load_or_build(paths, cells, cache_dir=cache)   # cache hit
+    assert d1.has_power and d2.has_power
 
 
 def test_new_metrics(tmp_path):
@@ -146,9 +212,13 @@ def test_gradient_range_defaults_and_validation():
 def test_formatting():
     assert schema.format_metric("count", 12345) == "12,345"
     assert schema.format_metric("area", 12.5) == "12.50"
+    assert schema.format_metric("power", 12.5) == "12.50"
     assert schema.format_metric("percent", 0.1234) == "12.34%"
     assert schema.format_metric("percent", float("nan")) == "—"
     assert schema.format_metric("count", None) == "—"
+    assert schema.format_metric("power", None) == "—"
+    assert schema.format_delta_abs("power", 1.5) == "+1.50"
+    assert schema.format_delta_abs("power", -2.0) == "-2.00"
 
 
 def test_diff_values():
@@ -169,6 +239,7 @@ def test_pickle_round_trip(sample_dir, tmp_path):
     d2 = load_or_build([inst], cell, cache_dir=cache)  # cache hit
     assert sorted(d2.missing_cells) == sorted(d1.missing_cells)
     assert list(d2.hier.index) == list(d1.hier.index)
+    assert d2.has_power == d1.has_power
     pd.testing.assert_frame_equal(d1.hier, d2.hier)
     # force rebuild bypasses cache
     d3 = load_or_build([inst], cell, cache_dir=cache, force=True)

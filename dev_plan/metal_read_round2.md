@@ -89,7 +89,8 @@ reachable on one core: ~3.3 µs/line on pass 1 puts the file's text alone near 9
 ## Verification
 
 `python -m pytest -q`, with the pinned set unmoved (`SAMPLE_SHAPES` at `rel=1e-9`,
-`emitted == 4 × 19,817 + 9`, gcd 2,504 via / 5 jogs / 2,327 rects / `metal2` mean 0.2527,
+`emitted == 4 × 19,817 + 9` on the sample as it stood then - it now places SUB six times, so
+118,911 - gcd 2,504 via / 5 jogs / 2,327 rects / `metal2` mean 0.2527,
 `verify()`); a `tracemalloc` bound test for Phase 2; a two-way fixture for Phase 3 (the artifact
 numbers with the old pattern reconstructed, the corrected ones with the new); a counters-identical
 on/off test for Phase 4; and the generator sweep before/after for the timing claims, recorded in the

@@ -100,9 +100,10 @@ both mechanisms, because they are not equally trustworthy.
   obstructions that were judged negligible", so a macro with only pin-access bites fell back to
   the layer count. `test_pin_access_bites_are_not_a_keep_out` failed, which is exactly the bug
   the whole change exists to avoid.
-- **The instance transform.** `p_global = M_block·M_orient·p + (M_block·loc + t_block)`:
-  applying the *composed* matrix to the location as well puts a rotated macro's obstruction
-  where a second rotation of the placement says. Only visible on a rotated cell, and the new
-  orientation test found it.
+- **The instance transform.** `p_global = M_block·M_orient·p + M_block·(loc + off) + t_block`,
+  where `off` is the oriented bbox's lower-left relative to the placement: applying the
+  *composed* matrix to the location as well puts a rotated macro's obstruction where a second
+  rotation of the placement says. Only visible on a rotated cell, and the new orientation
+  test found it.
 - **Memory was going the wrong way.** 1 base + *B* blocked grids is more than the constant 3 it
   replaced at the default depth, hence float32 and one precomputation.

@@ -21,7 +21,7 @@ Three things fall out of that one placement, which is why it is where it is:
   apart; the dict can.
 - **One record fills every placement.** Both `metrics.load_blocks` and `physical.walk` expand the
   hierarchy from these same dicts and read power off the same entry, so a record for a sub-block's
-  leaf placed four times lights four boxes on the map (measured: one `SUB` record → 4 design
+  leaf placed six times lights six boxes on the map (measured: one `SUB` record → 6 design
   instances on `sample_data/metal`).
 - **`--out` writes the filled data**, so the dump is an ordinary input to the `json` subcommand and
   the conversion only has to be done once.
@@ -63,8 +63,8 @@ The old "carries no power data" warning still fires verbatim when `--json` was n
 "still carries no power data: no --json record matched an instance" when it was given and nothing
 matched — the case that must not read like the case where nothing was passed. For `verilog` the run
 adds that a netlist has no physical mode, so `--out` is how to keep the filled data; the
-`--compare_*` design is never filled (power is not rendered in the compare view), and an INFO line
-says so when both are given.
+`--compare_*` design is never filled (it keeps whatever power its own input carried; the power
+columns appear when either side has data), and an INFO line says so when both are given.
 
 ## A bug this work found and fixed: macros apportioned their power by the grid area
 

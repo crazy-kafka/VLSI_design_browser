@@ -58,8 +58,9 @@ def test_nested_rotated_block(tmp_path):
     sub = _block(tmp_path, "B", {"c": {"cell_name": "C1", "location_x": 0, "location_y": 0}},
                  boundary=[(0, 0), (6, 6)], fname="sub.json")
     pd_ = build_physical([top, sub], str(cell), grid_size=4.0)
-    # W rotation maps the 2x2 cell to global box [2, 0, 4, 2] -> grid cell (0, 0)
-    assert pd_.density[0, 0] == pytest.approx(4 / 16)
+    # B's 6x6 boundary at (4, 0) W anchors the oriented bbox's lower-left at (4, 0), so
+    # the frame origin is (10, 0); the 2x2 cell lands at global [8, 10]x[0, 2] -> cell (0, 2).
+    assert pd_.density[0, 2] == pytest.approx(4 / 16)
     assert pd_.density[0, 1] == 0.0
 
 
@@ -91,12 +92,56 @@ def test_nested_rotated_block_two_levels(tmp_path):
                   {"c": {"cell_name": "C1", "location_x": 0, "location_y": 0}},
                   boundary=[(0, 0), (10, 10)], fname="leaf.json")
     pd_ = build_physical([top, sub, leaf], str(cell), grid_size=10.0)
-    # S occupies B-local [5,7]x[5,7]; B's W frame maps (x,y) -> (10-y, 10+x),
-    # so the 2x2 cell lands at global [3,5]x[15,17].
-    assert pd_.boxes[0][0] == pytest.approx(3.0)
+    # S occupies B-local [5,7]x[5,7]; B's 10x10 boundary at (10, 10) W gives the frame
+    # origin (20, 10), so it maps (x,y) -> (20-y, 10+x) and the cell lands at [13,15]x[15,17].
+    assert pd_.boxes[0][0] == pytest.approx(13.0)
     assert pd_.boxes[0][1] == pytest.approx(15.0)
-    assert pd_.boxes[0][2] == pytest.approx(5.0)
+    assert pd_.boxes[0][2] == pytest.approx(15.0)
     assert pd_.boxes[0][3] == pytest.approx(17.0)
+
+
+def test_fn_placed_sibling_keeps_its_contents_inside_the_die(tmp_path):
+    """The reported case: two identical block placements, N and FN, at the die's edge.
+
+    DEF anchors the lower-left of the oriented bbox at the placement, so the FN copy
+    occupies x [0, 10], not [-10, 0] - where the die clip erases every box.
+    """
+    cell = tmp_path / "cell.json"
+    _cell(cell, "C1", area=4, size_x=2, size_y=2)
+    top = _block(tmp_path, "TOP",
+                 {"n": {"cell_name": "SUB", "location_x": 20, "location_y": 0, "orient": "N"},
+                  "f": {"cell_name": "SUB", "location_x": 0, "location_y": 0, "orient": "FN"}},
+                 boundary=[(0, 0), (30, 4)], fname="top.json")
+    sub = _block(tmp_path, "SUB",
+                 {"a": {"cell_name": "C1", "location_x": 0, "location_y": 0},
+                  "b": {"cell_name": "C1", "location_x": 8, "location_y": 0}},
+                 boundary=[(0, 0), (10, 4)], fname="sub.json")
+    data = build_physical([top, sub], str(cell), grid_size=2.0)
+
+    boxes = sorted(tuple(float(v) for v in box) for box in data.boxes_for("TOP"))
+    assert boxes == [(0.0, 0.0, 2.0, 2.0), (8.0, 0.0, 10.0, 2.0),
+                     (20.0, 0.0, 22.0, 2.0), (28.0, 0.0, 30.0, 2.0)]
+    # Both lobes are populated; before the fix the whole FN copy sat at x < 0.
+    for ix in (0, 4, 10, 14):
+        assert data.density[0, ix] == pytest.approx(1.0)
+
+
+def test_n_placed_block_with_a_nonzero_origin_boundary(tmp_path):
+    """The N translation fast path must subtract the boundary's own lower-left corner."""
+    cell = tmp_path / "cell.json"
+    _cell(cell, "C1", area=4, size_x=2, size_y=2)
+    top = _block(tmp_path, "TOP",
+                 {"b": {"cell_name": "B", "location_x": 4, "location_y": 5, "orient": "N"}},
+                 boundary=[(0, 0), (20, 20)], fname="top.json")
+    sub = _block(tmp_path, "B",
+                 {"c": {"cell_name": "C1", "location_x": 2, "location_y": 3}},
+                 boundary=[(2, 3), (12, 13)], fname="sub.json")
+    data = build_physical([top, sub], str(cell), grid_size=4.0)
+
+    box = tuple(float(v) for v in data.boxes_for("TOP")[0])
+    assert box == (4.0, 5.0, 6.0, 7.0)
+    assert data.density[1, 1] == pytest.approx(0.25)
+    assert data.density[2, 1] == 0.0
 
 
 def test_ulvt_density_grid(tmp_path):
@@ -476,8 +521,8 @@ def _pin_design(tmp_path, size=(4.0, 2.0), pin=(1.0, 0.5)):
 def test_pin_offsets_follow_the_placement_rule():
     """The eight offsets that move a macro-local pin point onto the placed box.
 
-    Zero for the three orientations whose rotation leaves the local lower-left corner at the
-    origin, and the macro's own extent for the rest - for W it is the height, for E the width.
+    Zero for N and FW, whose transform leaves the local lower-left corner at the origin, and
+    the macro's own extent for the rest - for W it is the height, for E the width.
     """
     import numpy as np
     from vlsi_viewer.physical import _PIN_ORIENTS, _pin_offsets
@@ -543,21 +588,24 @@ def test_a_source_without_pins_offers_no_pin_map(tmp_path):
         data.heat("pins")
 
 
-def test_pin_density_under_a_rotated_sub_block(tmp_path):
+@pytest.mark.parametrize("orient, expected_box, expected_col", [
+    ("W", (40.0, 0.0, 42.0, 4.0), 10),
+    ("FN", (48.0, 0.0, 52.0, 2.0), 12),
+    ("FS", (40.0, 0.0, 44.0, 2.0), 10),
+])
+def test_pin_density_under_a_rotated_sub_block(tmp_path, orient, expected_box, expected_col):
     """The leaf's orientation composes *inside* its block's, not the other way round.
 
-    A pin goes through its cell's orientation, then the placement, then the block's frame. The
-    two orders differ by a rotation of the placement point, which is exactly what this pins:
-    the block is W at (40, 0), its cell is N at (0, 0) with a pin at (1.0, 0.5), so the pin
-    lands at (39.5, 1.0) - and the box the density map draws for that same instance is
-    [38, 40] x [0, 4].
+    A pin goes through its cell's orientation, then the placement, then the block's frame.
+    The block is placed at (40, 0) with a 12x2 boundary; W/FN/FS cover a rotation and both
+    axis mirrors, so the frame origin, the drawn box and the pin's bin all move.
     """
     cell = tmp_path / "rot_cell.json"
     cell.write_text(json.dumps({"P1": {"area": 8.0, "size_x": 4.0, "size_y": 2.0,
                                        "leakage_power": 1.0, "dynamic_power": 2.0}}))
     top = _block(tmp_path, "TOP",
                  {"b": {"cell_name": "B", "location_x": 40.0, "location_y": 0.0,
-                        "orient": "W"}},
+                        "orient": orient}},
                  boundary=[(0, 0), (80, 20)], fname="top.json")
     sub = _block(tmp_path, "B",
                  {"p": {"cell_name": "P1", "location_x": 0.0, "location_y": 0.0}},
@@ -566,9 +614,9 @@ def test_pin_density_under_a_rotated_sub_block(tmp_path):
     data = build_physical([top, sub], str(cell), grid_size=4.0, pins={"P1": [(1.0, 0.5)]})
     grid = data.heat("pins")
     assert grid.sum() == 1
-    assert grid[0, 9] == 1.0            # (39.5, 1.0) on a 4 um grid
+    assert grid[0, expected_col] == 1.0
     x0, y0, x1, y1 = (float(v) for v in data.boxes_for("TOP")[0])
-    assert (x0, y0, x1, y1) == (38.0, 0.0, 40.0, 4.0)
+    assert (x0, y0, x1, y1) == expected_box
 
 
 def test_a_macro_apportions_its_power_like_a_std_cell(tmp_path):

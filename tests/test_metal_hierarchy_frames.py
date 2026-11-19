@@ -3,9 +3,9 @@
 These are silent failure modes, which is why they are pinned before the flow that produces them is
 changed. A transform applied *twice* - the second instance's frame composed onto the first's -
 moves a sub-block's wiring somewhere plausible, and a block visited once instead of once per
-placement loses three quarters of its metal; neither shows up in a counter, and
+placement loses five sixths of its metal; neither shows up in a counter, and
 `generate_metal.verify()` survives both, because its grid thresholds (max > 0.30, distinct > 30,
-occupied > 2 %) hold on a quarter of the design.
+occupied > 2 %) hold on a sixth of the design.
 
 `+ POLYGON` is worse than either: it was never transformed at all, so a ring inside a rotated
 sub-block rasterises in the sub-block's local coordinates, stacked under every other instance while
@@ -40,8 +40,8 @@ LAYER M2
 END M2
 """
 
-# A 4 x 4 um block, one wire across it: (1,1) to (3,1) in microns, so a quarter turn puts the same
-# wire on the x = 3 grid line running in y.
+# A 4 x 4 um block, one wire across it: (1,1) to (3,1) in microns. Placed at (4, 0), W and FN
+# put a vertical run at x = 7, while FS puts a horizontal run at y = 3.
 SUB_HEAD = """\
 VERSION 5.8 ;
 DESIGN SUB ;
@@ -101,16 +101,20 @@ def _cells(data, layer="M1"):
     return set(zip(*np.nonzero(heat > 0)))
 
 
-def test_a_wire_in_a_sub_block_lands_where_its_instance_puts_it(tmp_path):
-    """The oracle for multi-frame placement: what a rotated copy contributes equals the same
-    wire written directly in the parent, and a *composed* transform fails this and little else."""
+@pytest.mark.parametrize("orient, direct_wire", [
+    ("W", "( 7000 1000 ) ( 7000 3000 )"),
+    ("FN", "( 5000 1000 ) ( 7000 1000 )"),
+    ("FS", "( 5000 3000 ) ( 7000 3000 )"),
+])
+def test_a_wire_in_a_sub_block_lands_where_its_instance_puts_it(tmp_path, orient, direct_wire):
+    """The oracle for multi-frame placement: what a placed copy contributes equals the same
+    wire written directly in the parent. W/FN/FS cover a rotation and both axis mirrors, and
+    a *composed* transform fails this and little else."""
     alone = _build(tmp_path, SUB_WIRE, [("N", 0, 0)])
-    both = _build(tmp_path, SUB_WIRE, [("N", 0, 0), ("W", 4, 0)])
-    # The W instance turns the local (1,1)-(3,1) wire into a vertical run at global x = 3,
-    # y = 1..3 - which is what the same wire drawn in the top block looks like.
+    both = _build(tmp_path, SUB_WIRE, [("N", 0, 0), (orient, 4, 0)])
     direct = _build(tmp_path, SUB_WIRE, [("N", 0, 0)],
-                    top_wires="NETS 1 ;\n- t1 ( PIN A )\n  + ROUTED M1 ( 3000 1000 ) "
-                              "( 3000 3000 ) ;\nEND NETS\n")
+                    top_wires=f"NETS 1 ;\n- t1 ( PIN A )\n  + ROUTED M1 {direct_wire} ;\n"
+                              "END NETS\n")
     assert _cells(alone) < _cells(both)                  # the second instance added metal
     assert _cells(both) - _cells(alone) == _cells(direct) - _cells(alone)
 
@@ -127,27 +131,27 @@ def test_a_ring_in_a_sub_block_lands_where_its_instance_puts_it(tmp_path):
     assert len(_cells(both)) > len(_cells(alone))        # not the same ring twice
 
 
-def test_the_committed_sample_places_its_sub_block_four_times():
-    """The absolute number: 4 x SUB's own 19,817 shapes plus the top's 9.
+def test_the_committed_sample_places_its_sub_block_six_times():
+    """The absolute number: 6 x SUB's own 19,817 shapes plus the top's 9.
 
     Nothing else in the suite pins this. A walk that visits each *block* once instead of each
-    placement passes every other test - `verify()`, the GUI tests, quickstart - while losing three
-    quarters of the metal.
+    placement passes every other test - `verify()`, the GUI tests, quickstart - while losing five
+    sixths of the metal.
     """
     paths = [os.path.join(SAMPLE, "top.def"), os.path.join(SAMPLE, "sub.def")]
     with contextlib.redirect_stdout(io.StringIO()):
         data = build_metal(paths, [os.path.join(SAMPLE, "cells.lef")],
                            [os.path.join(SAMPLE, "tech.lef")], grid_size=10.0)
-    assert data.totals["emitted"] == 4 * 19817 + 9
-    assert data.totals["jogs"] == 4 * 135
+    assert data.totals["emitted"] == 6 * 19817 + 9
+    assert data.totals["jogs"] == 6 * 135
 
 
-def test_the_per_layer_counts_add_up_under_four_placements():
+def test_the_per_layer_counts_add_up_under_six_placements():
     """The invariant the layer table rests on, at the only placement count that can break it.
 
     A DEF parsed directly has one placement, and at one placement the two counting rules coincide:
-    a shape is one shape either way. At four they do not - the stream counts a jog once per parse
-    and the totals count it once per placement - and the rows did disagree: 135 jogs against 540.
+    a shape is one shape either way. At six they do not - the stream counts a jog once per parse
+    and the totals count it once per placement - and the rows did disagree: 135 jogs against 810.
     The columns that are already counted per placement, `shapes` among them, stayed right, which is
     why this is the fixture that tells the two rules apart.
     """

@@ -116,13 +116,16 @@ def test_the_tech_lef_carries_the_awkward_shapes(generator):
     assert "TYPE CUT" in text and "TYPE OVERLAP" in text
 
 
-def test_the_top_def_instantiates_the_sub_four_times(generator, tmp_path):
-    """The hierarchy is what makes frame composition for wires part of the sample."""
+def test_the_top_def_instantiates_the_sub_six_times(generator, tmp_path):
+    """The hierarchy is what makes frame composition for wires part of the sample.
+
+    All four rotations plus both axis flips: the sample is also the demo for FN/FS blocks.
+    """
     text = open(os.path.join(SAMPLE, "top.def")).read()
-    assert text.count(" SUB + SOURCE DIST + PLACED") == 4
-    orientations = {line.rsplit(")", 1)[1].strip().rstrip(";")
+    assert text.count(" SUB + SOURCE DIST + PLACED") == 6
+    orientations = {line.rsplit(")", 1)[1].strip().rstrip(";").strip()
                     for line in text.splitlines() if " SUB " in line and "PLACED" in line}
-    assert len(orientations) == 4, orientations
+    assert orientations == {"N", "W", "S", "E", "FN", "FS"}, orientations
 
 
 def test_no_duplicate_component_names(generator):

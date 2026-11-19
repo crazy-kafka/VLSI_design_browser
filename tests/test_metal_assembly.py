@@ -9,7 +9,8 @@ rather than against another copy of the same composition.
 import pandas as pd
 import pytest
 
-from vlsi_viewer.assembly import Frame, HierarchyAssembler, find_single_top
+from vlsi_viewer.assembly import (Frame, HierarchyAssembler, boundary_bounds,
+                                  find_single_top, placement_origin)
 from vlsi_viewer.coordinateProcess import CoordinateProcess, Orient
 
 
@@ -85,6 +86,36 @@ def test_rotation_swaps_a_rectangles_extent():
     x0, y0, x1, y1 = frame.apply_rect([0.0], [0.0], [10.0], [20.0])
     assert (float(x0[0]), float(y0[0]), float(x1[0]), float(y1[0])) == \
         pytest.approx((80.0, 200.0, 100.0, 210.0))
+
+
+@pytest.mark.parametrize("orient", sorted(Orient.orient_map))
+def test_placement_origin_anchors_the_oriented_bbox_at_the_location(orient):
+    """DEF anchors the oriented bbox's lower-left at the placement, not the local origin.
+
+    The bbox deliberately starts away from (0, 0), which a child DEF's DIEAREA may.
+    """
+    bounds = boundary_bounds([(-3.0, 2.0), (9.0, 2.0), (9.0, 8.0), (-3.0, 8.0)])
+    frame = Frame(orient, placement_origin(orient, (100.0, 50.0), bounds))
+    (bx, by), (w, h) = bounds
+    x0, y0, _x1, _y1 = frame.apply_rect([bx], [by], [bx + w], [by + h])
+    assert (float(x0[0]), float(y0[0])) == pytest.approx((100.0, 50.0))
+    # Without a boundary there is no size to orient; the raw location is what remains.
+    assert placement_origin(orient, (100.0, 50.0), None) == (100.0, 50.0)
+
+
+@pytest.mark.parametrize("orient, offset", [
+    ("N", (0.0, 0.0)), ("S", (6.0, 4.0)), ("W", (4.0, 0.0)), ("E", (0.0, 6.0)),
+    ("FN", (6.0, 0.0)), ("FS", (0.0, 4.0)), ("FW", (0.0, 0.0)), ("FE", (4.0, 6.0)),
+])
+def test_calculate_origin_by_orient_anchors_the_oriented_bbox(orient, offset):
+    """The helper is uncalled, but its E branch used the height where the width belongs.
+
+    Signature order is ``(ll, orient, height, width)``; the offsets are the lower-left of
+    the oriented bbox relative to the placement.
+    """
+    got = CoordinateProcess.calculateOriginByOrient((10.0, 20.0), orient,
+                                                    height=4.0, width=6.0)
+    assert got == pytest.approx((10.0 + offset[0], 20.0 + offset[1]))
 
 
 def test_compose_places_a_child_inside_a_rotated_parent():

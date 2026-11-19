@@ -300,7 +300,7 @@ class FillSummary:
     """What one fill did, for the summary `cli` prints and for the tests.
 
     ``instances`` and ``total`` are counted over *design* instances, not over records: a record
-    for a sub-block's leaf that the design places four times fills four. They are walk counts
+    for a sub-block's leaf that the design places many times fills every placement. They are walk counts
     rather than a tally kept while filling, because two files may fill one instance's different
     attributes and a per-file tally would call that two instances.
     """

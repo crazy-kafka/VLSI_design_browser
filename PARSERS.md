@@ -299,7 +299,7 @@ sink.first                                           # (0, 1, array([1.965, 1.96
 - `ShapeStream(tech, sink, db_unit=None, ndrs=None, frames=None, batch=..., min_segment=None)`:
   `frames` places the shapes — each entry needs `apply_rect(x0, y0, x1, y1)`,
   `apply_point(x, y)` and `apply_points(xs, ys)` (`vlsi_viewer.assembly.Frame` implements that).
-  A *list*, because a block placed four times is parsed once and emitted four times. `min_segment`
+  A *list*, because a block placed many times is parsed once and emitted once per placement. `min_segment`
   drops non-preferred-direction jogs shorter than the given length (`None` = each layer's own pitch).
   `db_unit`/`ndrs` normally come from `parse_def` itself, which configures the stream on the first
   net.

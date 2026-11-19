@@ -214,7 +214,7 @@ Verification, `tests/test_metal_db.py` (23 cases) and `tests/test_metal_gui.py`:
   close (a pooled dump sums in another order). `(rects + diagonals + polygons) x placements ==
   emitted` is checked against the file, so nothing may be dropped between the counters and the body.
 - **a bare sub dump assembled elsewhere** — the 09-17 workflow, now exact: every grid
-  `array_equal` to the one-shot parse, through four placements at four orientations.
+  `array_equal` to the one-shot parse, through the sample's six placements at six orientations.
 - **a standalone dump whose grids do not fit** — the run-2 die mismatch: grids refused, shapes
   replayed, no warning, and the refusal named in the log.
 - **the old container**, one arm each: a v1 db that matches rebuilds exactly, and a v1 db from a bare

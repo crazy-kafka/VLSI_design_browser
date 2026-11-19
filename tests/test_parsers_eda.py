@@ -494,7 +494,7 @@ def _fill_file(tmp_path, name, top, instances):
 
 
 def _metal_design():
-    """The committed two-level sample: TOP places SUB four times, at four orientations."""
+    """The committed two-level sample: TOP places SUB six times, at six orientations."""
     return [instance_info_from_def(f"{METAL}/top.def"),
             instance_info_from_def(f"{METAL}/sub.def")]
 
@@ -530,11 +530,11 @@ def test_the_same_record_is_found_however_it_is_addressed(tmp_path, top, key):
     """The two accepted forms, and the path a user copies out of the tree.
 
     All three name the same instance, and one record for a sub-block's leaf has to fill *every*
-    placement of that block - four here - because the fill happens before the hierarchy is
+    placement of that block - six here - because the fill happens before the hierarchy is
     expanded, which is where the placements are made.
     """
     blocks = _metal_design()
-    assert len(blocks[0]["instances"]) == 4          # the four placements of SUB
+    assert len(blocks[0]["instances"]) == 6          # the six placements of SUB
     leaf = sorted(blocks[1]["instances"])[0]
     path = _fill_file(tmp_path, "power.json", top, {key.replace("r0_0", leaf):
                                                     {"leakage_power": 0.5}})
@@ -542,8 +542,8 @@ def test_the_same_record_is_found_however_it_is_addressed(tmp_path, top, key):
     summary = fill_instances(blocks, [path])
 
     assert (summary.records, summary.matched) == (1, 1)
-    assert summary.instances == 4                    # one record, four design instances
-    assert summary.total == 4 * len(blocks[1]["instances"])
+    assert summary.instances == 6                    # one record, six design instances
+    assert summary.total == 6 * len(blocks[1]["instances"])
     assert blocks[1]["instances"][leaf]["leakage_power"] == 0.5
 
 
@@ -587,7 +587,7 @@ def test_records_that_match_nothing_are_reported(tmp_path, caplog):
         summary = fill_instances(blocks, [unknown, mixed])
 
     assert (summary.files, summary.matched, summary.instances) == (2, 0, 0)
-    assert summary.total == 4 * len(blocks[1]["instances"])          # the denominator is real
+    assert summary.total == 6 * len(blocks[1]["instances"])          # the denominator is real
     assert "which is no block of this design" in caplog.text
     assert "filled no instance" in caplog.text
     assert "sub-block rather than a leaf" in caplog.text

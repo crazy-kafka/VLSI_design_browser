@@ -13,7 +13,8 @@ from collections import OrderedDict
 import numpy as np
 
 from . import config, contour, schema
-from .assembly import HierarchyAssembler, _ORIENT_MATRIX
+from .assembly import (HierarchyAssembler, _ORIENT_MATRIX, boundary_bounds,
+                       placement_origin)
 from .coordinateProcess import CoordinateProcess, Orient
 from .loader import load_block, load_cell_info
 
@@ -291,7 +292,7 @@ def _pin_offsets(sizes_x, sizes_y):
     location, after any rotation or flip (LEF/DEF reference, COMPONENTS). A pin's coordinates
     are in the macro's own frame, whose lower-left is the origin, so a point has to be rotated
     and then shifted by the lower-left of its own oriented bounding box: the offset here is
-    that corner, negated. It is zero for N/FW/FN and non-zero for the rest - for W it is the
+    that corner, negated. It is zero for N/FW and non-zero for the rest - for W it is the
     macro's height - which is why a rotated cell's pins would otherwise land one macro extent
     away from the box the view draws for it.
     """
@@ -514,19 +515,22 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
             cell = getattr(row, "cell_name")
             if cell in blocks:
                 orient = getattr(row, "orient") or "N"
-                ox = float(getattr(row, "location_x"))
-                oy = float(getattr(row, "location_y"))
-                chain.append((orient, (ox, oy)))
+                cx, cy = placement_origin(
+                    orient,
+                    (float(getattr(row, "location_x")),
+                     float(getattr(row, "location_y"))),
+                    boundary_bounds(blocks[cell][1]))
+                chain.append((orient, (cx, cy)))
                 was_trans = trans_only
                 if orient == "N":
-                    tx += ox
-                    ty += oy
+                    tx += cx
+                    ty += cy
                 else:
                     trans_only = False
                 walk(cell, _join(prefix, getattr(row, "leaf_instance_name")), visiting)
                 if orient == "N":
-                    tx -= ox
-                    ty -= oy
+                    tx -= cx
+                    ty -= cy
                 trans_only = was_trans
                 chain.pop()
                 continue

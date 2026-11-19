@@ -1,6 +1,7 @@
 """Two-version comparison: V1 / V2 / Diff tabs."""
 from PyQt5.QtWidgets import QTabWidget
 
+from . import schema
 from .model import view_for_diff, view_for_single
 from .ui_tree import HierarchyTree
 
@@ -52,3 +53,14 @@ class CompareWidget(QTabWidget):
         self.v1.set_view(view_for_single(self._d1, self._include_macros))
         self.v2.set_view(view_for_single(self._d2, self._include_macros))
         self.diff.set_view(view_for_diff(self._d1, self._d2, self._include_macros))
+
+        # Compare has no Metrics menu, so the power columns are shown only when there is
+        # power to read on at least one side. Re-seeding each refresh keeps this idempotent
+        # across threshold/macro changes.
+        no_power = (not getattr(self._d1, "has_power", False)
+                    and not getattr(self._d2, "has_power", False))
+        for key in schema.POWER_METRIC_KEYS:
+            self.v1.set_metric_hidden(key, no_power)
+            self.v2.set_metric_hidden(key, no_power)
+            self.diff.set_metric_hidden(key + "_abs", no_power)
+            self.diff.set_metric_hidden(key + "_rel", no_power)

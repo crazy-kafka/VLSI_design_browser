@@ -164,6 +164,11 @@ class RegionData:
 
         std_frac = frac[std]
         std_area = area[std]
+        # Power is per instance, not a cell attribute: weight the per-box arrays by the
+        # selection overlap over all selected logic boxes (macros included, physical-only
+        # already excluded from _idx), matching the leakage/dynamic heat maps.
+        leak = self._physical._leak[idx].astype(np.float64)
+        dyn = self._physical._dyn[idx].astype(np.float64)
         out = {
             "count": int(std.sum()),
             "area": float(np.sum(std_area * std_frac)),
@@ -178,6 +183,8 @@ class RegionData:
             "icg_count": int(np.sum(std & is_icg)),
             "macro_count": int(macro.sum()),
             "macro_area": float(np.sum(area[macro] * frac[macro])),
+            "leakage_power": float(np.sum(leak * frac)),
+            "dynamic_power": float(np.sum(dyn * frac)),
         }
         self._stats_cache[path] = out
         return out

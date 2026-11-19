@@ -129,7 +129,7 @@ class CoordinateProcess:
         elif orient_name == 'W':
             return x0 + height, y0
         elif orient_name == 'E':
-            return x0, y0 + height
+            return x0, y0 + width
         elif orient_name == 'FN':
             return x0 + width, y0
         elif orient_name == 'FS':
