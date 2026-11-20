@@ -413,6 +413,34 @@ def test_the_out_dump_carries_the_fill_and_reloads(tmp_path):
     assert name == "core" and df["leakage_power"].sum() > 0
 
 
+def test_a_flattened_override_survives_the_out_dump(tmp_path):
+    """A per-placement value rides in the root block's ``power_overrides`` and reloads."""
+    from vlsi_viewer.loader import load_block
+    from vlsi_viewer.parsers.convert import instance_info_from_def
+
+    metal = "sample_data/metal"
+    sub = instance_info_from_def(f"{metal}/sub.def")
+    leaf = sorted(sub["instances"])[0]
+    power = tmp_path / "power.json"
+    power.write_text(json.dumps({"top_name": "TOP", "instances": {
+        f"u0/{leaf}": {"leakage_power": 0.5}}}))
+
+    out = tmp_path / "out"
+    _cells, blocks, _compare, _pins = resolve_inputs(parse_args([
+        "def", "--def", f"{metal}/top.def", f"{metal}/sub.def",
+        "--lef", f"{metal}/cells.lef", "--json", str(power), "--out", str(out)]))
+
+    with open(out / "TOP.instance_info.json", encoding="utf-8") as fh:
+        dumped = json.load(fh)
+    assert dumped == blocks[0]
+    override = {f"TOP/u0/{leaf}": {"leakage_power": 0.5}}
+    assert dumped["power_overrides"] == override
+
+    name, df, _boundary = load_block(str(out / "TOP.instance_info.json"))
+    assert name == "TOP"
+    assert df.attrs["power_overrides"] == override
+
+
 def test_a_missing_json_file_is_a_cli_error(capsys, tmp_path):
     """A path that is not there is a wrong argument, not a run with a partial fill."""
     from vlsi_viewer.cli import main

@@ -31,6 +31,12 @@ INSTANCE_ATTRS = [
     AttrSpec("is_physical_only", "bool", False),
 ]
 
+# Attributes that can differ between two placements of one block: switching activity is
+# a property of where the block is used, not of the block. Everything else in
+# INSTANCE_ATTRS describes the block definition and is shared by every placement, so a
+# flattened fill of one of those is only safe when the block has a single placement.
+PLACEMENT_ATTRS = ("leakage_power", "dynamic_power")
+
 # cell_info.json value fields (key = cell_name).
 CELL_ATTRS = [
     AttrSpec("area", "float", 0.0),

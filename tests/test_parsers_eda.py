@@ -529,9 +529,10 @@ def test_fill_power_from_a_flattened_file(tmp_path):
 def test_the_same_record_is_found_however_it_is_addressed(tmp_path, top, key):
     """The two accepted forms, and the path a user copies out of the tree.
 
-    All three name the same instance, and one record for a sub-block's leaf has to fill *every*
-    placement of that block - six here - because the fill happens before the hierarchy is
-    expanded, which is where the placements are made.
+    All three name the same leaf, but the file's ``top_name`` chooses the scope. ``SUB`` is a
+    block-level file, so its value is the block definition and fills every placement - six
+    here. A ``TOP`` file is flattened, so a key inside the sub-block names one placement: the
+    value is kept as a per-placement override and the shared block definition is left alone.
     """
     blocks = _metal_design()
     assert len(blocks[0]["instances"]) == 6          # the six placements of SUB
@@ -542,9 +543,165 @@ def test_the_same_record_is_found_however_it_is_addressed(tmp_path, top, key):
     summary = fill_instances(blocks, [path])
 
     assert (summary.records, summary.matched) == (1, 1)
-    assert summary.instances == 6                    # one record, six design instances
     assert summary.total == 6 * len(blocks[1]["instances"])
-    assert blocks[1]["instances"][leaf]["leakage_power"] == 0.5
+    if top == "SUB":
+        assert summary.instances == 6                # a block definition fills every placement
+        assert blocks[1]["instances"][leaf]["leakage_power"] == 0.5
+        assert "power_overrides" not in blocks[0]
+    else:
+        assert summary.instances == 1                # one placement, named by the key
+        assert blocks[0]["power_overrides"] == {f"TOP/u0/{leaf}": {"leakage_power": 0.5}}
+        assert "leakage_power" not in blocks[1]["instances"][leaf]
+
+
+def _nested_design():
+    """TOP places SH twice; each SH places SP twice; plus one FF and one flat leaf.
+
+    The top's container keys are multi-segment, the shape a real DEF produced when a
+    sub-block's instance path was flattened into one component name. SP therefore has four
+    placements, which is what a per-placement power value has to tell apart.
+    """
+    return [
+        {"top_name": "TOP", "instances": {
+            "U_SHADER/u_shc0": {"cell_name": "SH", "orient": "N",
+                                "location_x": 0.0, "location_y": 0.0},
+            "U_SHADER/u_shc1": {"cell_name": "SH", "orient": "N",
+                                "location_x": 10.0, "location_y": 0.0},
+            "u_ff": {"cell_name": "FF", "orient": "N",
+                     "location_x": 20.0, "location_y": 0.0},
+            "flat": {"cell_name": "INV_X1_SVT", "orient": "N",
+                     "location_x": 30.0, "location_y": 0.0},
+        }},
+        {"top_name": "SH", "instances": {
+            "gen_sp_0": {"cell_name": "SP", "orient": "N",
+                         "location_x": 0.0, "location_y": 0.0},
+            "gen_sp_1": {"cell_name": "SP", "orient": "N",
+                         "location_x": 5.0, "location_y": 0.0},
+        }},
+        {"top_name": "SP", "instances": {
+            "u_sp": {"cell_name": "INV_X1_SVT", "orient": "N",
+                     "location_x": 0.0, "location_y": 0.0},
+        }},
+        {"top_name": "FF", "instances": {
+            "u_ff_leaf": {"cell_name": "INV_X1_SVT", "orient": "N",
+                          "location_x": 0.0, "location_y": 0.0},
+        }},
+    ]
+
+
+def test_a_flattened_record_descends_a_multi_segment_container(tmp_path):
+    """The real case's shape: the block component itself contains '/'.
+
+    A record key is that component name plus the block's own leaf path. Both the
+    top-relative and the top-prefixed form resolve through two container levels, and the
+    values are placement data: two switching toggles survive on the same reused block
+    while the shared definition is untouched.
+    """
+    blocks = _nested_design()
+    path = _fill_file(tmp_path, "power.json", "TOP", {
+        "U_SHADER/u_shc0/gen_sp_0/u_sp": {"leakage_power": 0.5},
+        "TOP/U_SHADER/u_shc1/gen_sp_1/u_sp": {"leakage_power": 1.5},
+    })
+
+    summary = fill_instances(blocks, [path])
+
+    assert (summary.records, summary.matched) == (2, 2)
+    assert (summary.instances, summary.total) == (2, 6)
+    assert summary.conflicts == 0 and summary.unusable == 0
+    assert blocks[0]["power_overrides"] == {
+        "TOP/U_SHADER/u_shc0/gen_sp_0/u_sp": {"leakage_power": 0.5},
+        "TOP/U_SHADER/u_shc1/gen_sp_1/u_sp": {"leakage_power": 1.5},
+    }
+    assert "leakage_power" not in blocks[2]["instances"]["u_sp"]
+
+
+def test_a_longer_slash_prefix_that_misses_falls_back_to_the_shorter_container(tmp_path):
+    """The prefix loop keeps trying shorter cuts; the resolved form builds the path.
+
+    ``a/b`` is not an instance of TOP, but ``a`` is, and B's own leaf is the multi-segment
+    name ``b/c`` - so the record resolves to the hierarchy path ``TOP/a/b/c``.
+    """
+    blocks = [
+        {"top_name": "TOP", "instances": {"a": {"cell_name": "B"}}},
+        {"top_name": "B", "instances": {"b/c": {"cell_name": "INV_X1_SVT"}}},
+    ]
+    path = _fill_file(tmp_path, "power.json", "TOP",
+                      {"a/b/c": {"leakage_power": 0.5}})
+
+    summary = fill_instances(blocks, [path])
+
+    assert (summary.matched, summary.instances, summary.total) == (1, 1, 1)
+    assert blocks[0]["power_overrides"] == {"TOP/a/b/c": {"leakage_power": 0.5}}
+
+
+def test_a_block_default_and_a_flattened_override_coexist(tmp_path):
+    """Mixed files are the incremental contract: a shared default, one placement overridden."""
+    blocks = _nested_design()
+    default = _fill_file(tmp_path, "sp.json", "SP",
+                         {"u_sp": {"leakage_power": 0.1}})
+    override = _fill_file(tmp_path, "top.json", "TOP", {
+        "U_SHADER/u_shc0/gen_sp_0/u_sp": {"leakage_power": 0.9}})
+
+    summary = fill_instances(blocks, [default, override])
+
+    assert blocks[2]["instances"]["u_sp"]["leakage_power"] == 0.1
+    assert blocks[0]["power_overrides"] == {
+        "TOP/U_SHADER/u_shc0/gen_sp_0/u_sp": {"leakage_power": 0.9}}
+    # The shared value fills four placements; the override adds no fifth.
+    assert (summary.instances, summary.total) == (4, 6)
+
+
+def test_a_flattened_structural_value_is_rejected_on_a_reused_block(tmp_path, caplog):
+    """Structural facts define the block, so a flattened value on a reused block is a conflict.
+
+    The rule must not guess which placement the value was meant for. An agreeing ``cell_name``
+    is not a conflict - it says nothing new - and the same record's power value is placement
+    data and still lands.
+    """
+    blocks = _nested_design()
+    path = _fill_file(tmp_path, "power.json", "TOP", {
+        "U_SHADER/u_shc0/gen_sp_0/u_sp": {
+            "cell_name": "INV_X1_SVT", "is_physical_only": True,
+            "leakage_power": 0.5},
+    })
+
+    with caplog.at_level(logging.WARNING):
+        summary = fill_instances(blocks, [path])
+
+    assert summary.placement_conflicts == 1
+    assert summary.conflicts == 0
+    assert "is_physical_only" not in blocks[2]["instances"]["u_sp"]
+    assert blocks[0]["power_overrides"] == {
+        "TOP/U_SHADER/u_shc0/gen_sp_0/u_sp": {"leakage_power": 0.5}}
+    assert "structural value" in caplog.text
+    assert "top_name is the block itself" in caplog.text
+
+
+def test_a_flattened_structural_value_fills_a_single_placement_block(tmp_path):
+    """One placement has no ambiguity: the value is the block definition for that block."""
+    blocks = _nested_design()
+    path = _fill_file(tmp_path, "power.json", "TOP", {
+        "u_ff/u_ff_leaf": {"is_physical_only": True},
+    })
+
+    summary = fill_instances(blocks, [path])
+
+    assert summary.placement_conflicts == 0
+    assert blocks[3]["instances"]["u_ff_leaf"]["is_physical_only"] is True
+    assert summary.instances == 1
+
+
+def test_a_block_level_file_may_set_a_structural_value_on_a_reused_block(tmp_path):
+    """The sanctioned form for block-wide structural data: name the block itself."""
+    blocks = _nested_design()
+    path = _fill_file(tmp_path, "sp.json", "SP",
+                      {"u_sp": {"is_physical_only": True}})
+
+    summary = fill_instances(blocks, [path])
+
+    assert summary.placement_conflicts == 0
+    assert blocks[2]["instances"]["u_sp"]["is_physical_only"] is True
+    assert summary.instances == 4
 
 
 def test_the_input_wins_a_conflict_and_agreement_is_not_one(tmp_path, caplog):

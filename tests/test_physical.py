@@ -677,6 +677,40 @@ def test_filled_power_reaches_the_power_maps(tmp_path):
     assert pd_.dynamic.sum() == pytest.approx(4 * 0.25)
 
 
+def test_flat_power_fills_one_placement_of_a_reused_block(tmp_path):
+    """A flattened key names a placement, so a reused block may switch differently twice.
+
+    One SUB leaf gets 0.5 at the first placement and 1.5 at the second through a top file;
+    the other placements stay at the loader default. The shared block definition keeps no
+    power at all - the value is read off the placement path the walk is at.
+    """
+    from vlsi_viewer.parsers.convert import fill_instances
+
+    cell = tmp_path / "cell.json"
+    _cell(cell, "C1", area=4, size_x=2, size_y=2, leakage=1.0, dynamic=2.0)
+    sub = {"top_name": "SUB",
+           "boundary": [[0, 0], [4, 0], [4, 4], [0, 4]],
+           "instances": {"u1": {"cell_name": "C1", "location_x": 0, "location_y": 0},
+                         "u2": {"cell_name": "C1", "location_x": 2, "location_y": 0}}}
+    top = {"top_name": "TOP", "boundary": [[0, 0], [20, 0], [20, 20], [0, 20]],
+           "instances": {f"b{i}": {"cell_name": "SUB", "location_x": 4 * i,
+                                   "location_y": 0, "orient": "N"} for i in range(4)}}
+    power = tmp_path / "power.json"
+    power.write_text(json.dumps({"top_name": "TOP", "instances": {
+        "b0/u1": {"leakage_power": 0.5, "dynamic_power": 0.25},
+        "b1/u1": {"leakage_power": 1.5, "dynamic_power": 0.75}}}))
+    summary = fill_instances([top, sub], [str(power)])
+    assert (summary.instances, summary.total) == (2, 8)
+    assert top["power_overrides"] == {
+        "TOP/b0/u1": {"leakage_power": 0.5, "dynamic_power": 0.25},
+        "TOP/b1/u1": {"leakage_power": 1.5, "dynamic_power": 0.75}}
+
+    pd_ = build_physical([top, sub], str(cell), grid_size=2.0)
+
+    assert pd_.leakage.sum() == pytest.approx(0.5 + 1.5)
+    assert pd_.dynamic.sum() == pytest.approx(0.25 + 0.75)
+
+
 def test_the_build_says_what_it_is_computing(tmp_path, caplog):
     """Every phase announces itself before it runs, and its result line follows.
 

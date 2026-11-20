@@ -149,6 +149,36 @@ def test_load_blocks_keeps_power_presence_across_a_duplicate_merge():
     assert load_blocks([earlier, later]).attrs["has_power"]
 
 
+def test_power_overrides_are_per_placement_and_sum_into_the_tree(tmp_path):
+    """A flattened power record is placement data, not block data.
+
+    TOP places SUB twice. The same SUB leaf carries 1.0 at the first placement and 3.0 at
+    the second; the expanded tree keeps both and the TOP row sums them. A block-level value
+    would instead be one number shared by both.
+    """
+    top = {"top_name": "TOP", "instances": {
+        "b0": {"cell_name": "SUB"}, "b1": {"cell_name": "SUB"}},
+        "power_overrides": {
+            "TOP/b0/u": {"leakage_power": 1.0, "dynamic_power": 2.0},
+            "TOP/b1/u": {"leakage_power": 3.0, "dynamic_power": 4.0}}}
+    sub = {"top_name": "SUB", "instances": {
+        "u": {"cell_name": "C"}, "v": {"cell_name": "C"}}}
+    (tmp_path / "cell.json").write_text(json.dumps({"C": {"area": 1.0}}))
+    (tmp_path / "top.json").write_text(json.dumps(top))
+    (tmp_path / "sub.json").write_text(json.dumps(sub))
+
+    design = build_design([str(tmp_path / "top.json"), str(tmp_path / "sub.json")],
+                          str(tmp_path / "cell.json"))
+
+    assert design.has_power
+    mv = design.metric_values()
+    # A block-instance row aggregates its leaves, so b0 and b1 carry their own value.
+    assert mv.loc["TOP/b0", "leakage_power"] == pytest.approx(1.0)
+    assert mv.loc["TOP/b1", "leakage_power"] == pytest.approx(3.0)
+    assert mv.loc["TOP", "leakage_power"] == pytest.approx(4.0)
+    assert mv.loc["TOP", "dynamic_power"] == pytest.approx(6.0)
+
+
 def test_the_cache_preserves_power_presence(tmp_path):
     (tmp_path / "cell.json").write_text(json.dumps({"C": {"area": 1.0}}))
     (tmp_path / "inst.json").write_text(json.dumps({"top_name": "TOP", "instances": {

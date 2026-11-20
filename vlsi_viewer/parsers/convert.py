@@ -283,9 +283,12 @@ def instance_info_from_def(def_path, top=None) -> dict:
 #
 # Here rather than after loading, because absence is only expressible in a dict like this: the
 # loader turns a missing attribute into its default (0.0 for power), and a default cannot be told
-# from a value somebody meant. And it happens before the hierarchy is expanded, so one record for
-# a sub-block's leaf fills *every* placement of that block - `metrics.load_blocks` and
+# from a value somebody meant. And it happens before the hierarchy is expanded, so one block-level
+# record for a sub-block's leaf fills *every* placement of that block - `metrics.load_blocks` and
 # `physical.walk` both expand these same dicts later, each of them reading power off the entry.
+# A flattened record (a file whose `top_name` is the design root) may instead carry a different
+# power value per placement; those go into the root block's `power_overrides`, keyed by the
+# absolute hierarchy path, which both readers apply after expansion.
 
 
 # How often the record loop says how far it has read. A chip-level power file is millions of
@@ -299,10 +302,11 @@ FILL_PROGRESS_RECORDS = 1_000_000
 class FillSummary:
     """What one fill did, for the summary `cli` prints and for the tests.
 
-    ``instances`` and ``total`` are counted over *design* instances, not over records: a record
-    for a sub-block's leaf that the design places many times fills every placement. They are walk counts
-    rather than a tally kept while filling, because two files may fill one instance's different
-    attributes and a per-file tally would call that two instances.
+    ``instances`` and ``total`` are counted over *design* instances, not over records: a
+    block-level record for a sub-block's leaf that the design places many times fills every
+    placement, while a flattened power record fills only the placement its key names. They are
+    walk counts rather than a tally kept while filling, because two files may fill one
+    instance's different attributes and a per-file tally would call that two instances.
     """
 
     files: int = 0
@@ -313,6 +317,7 @@ class FillSummary:
     conflicts: int = 0               # the input already had the attribute: the file's is dropped
     unusable: int = 0                # a record or value that could not be used
     mismatched_cells: int = 0        # a record whose cell_name is not the design's
+    placement_conflicts: int = 0     # structural value for a block placed more than once: dropped
 
 
 def _names(names, limit: int = 5) -> str:
@@ -366,96 +371,158 @@ def _block_instances(blocks) -> Dict[str, dict]:
 
 
 def _resolve(tables: Dict[str, dict], name: str, key: str, seen=frozenset()):
-    """The instance entry ``key`` names, relative to the block called ``name``, or ``None``.
+    """``(block, entry)`` for the instance ``key`` names under ``name``, or ``None``.
 
     The key is tried whole first: a DEF that flattens its hierarchy into the component names
     (``sample_data/eda`` writes ``- u0/b0/tap_1_0 TAP_1 ...``) holds ``u0/b0/tap_1_0`` as one
     instance, while one that really instantiates a sub-block holds ``u0`` and the key descends
-    through it. Descending is by ``cell_name`` naming another block - the same rule
-    `metrics.load_blocks` and `physical.walk` use to expand the hierarchy - so an entry this
-    accepts is one both of them will place and read power off.
+    through it. A real DEF may flatten several levels into one name
+    (``U_GPU_SHADER_TOP/u_gpu_shc_top/gen_sp_1_u_sp``), so every ``/``-prefix is tried,
+    longest first, and a shorter one only when the longer remainder misses. Descending is by
+    ``cell_name`` naming another block - the same rule `metrics.load_blocks` and
+    `physical.walk` use to expand the hierarchy - so an entry this accepts is one both of them
+    will place and read power off. The block name comes back because a fill writer needs it:
+    a value for a leaf inside a sub-block belongs to the placement, not the block definition.
     """
     if name not in tables or name in seen:
         return None
     instances = tables[name]                         # already merged, and only read here
     if key in instances:
-        return instances[key]
-    head, sep, tail = key.partition("/")
-    if not sep or not head:
-        return None
-    entry = instances.get(head) or {}
-    child = str(entry.get("cell_name") or "")
-    if child in tables:
-        return _resolve(tables, child, tail, seen | {name})
+        return name, instances[key]
+    cut = key.rfind("/")
+    while cut > 0:
+        entry = instances.get(key[:cut])
+        if entry is not None:
+            child = str(entry.get("cell_name") or "")
+            if child in tables:
+                found = _resolve(tables, child, key[cut + 1:], seen | {name})
+                if found is not None:
+                    return found
+        cut = key.rfind("/", 0, cut)
     return None
 
 
 def _target(tables: Dict[str, dict], top: str, raw_key):
-    """`_resolve` for one record, tolerating the absolute path a user may have exported.
+    """``(_resolve(...), relative key)`` for one record, or ``(None, None)``.
 
     The hierarchy paths the viewer shows and ``--out`` writes start with the top name
-    (``core/u0/b0/x``), so a leading ``<top>/`` is stripped and the key retried.
+    (``core/u0/b0/x``), so a leading ``<top>/`` is stripped and the key retried. The
+    relative key is the form that resolved, which is what makes the absolute hierarchy
+    path ``top + "/" + relative`` correct for both forms: a component genuinely called
+    ``<top>/x`` resolves whole and becomes ``<top>/<top>/x``, matching the readers.
     """
     key = str(raw_key).replace("\\", "/").strip("/")
     found = _resolve(tables, top, key)
-    if found is None and key.startswith(top + "/"):
-        found = _resolve(tables, top, key[len(top) + 1:])
-    return found
+    if found is not None:
+        return found, key
+    if key.startswith(top + "/"):
+        relative = key[len(top) + 1:]
+        found = _resolve(tables, top, relative)
+        if found is not None:
+            return found, relative
+    return None, None
 
 
-def _shape(tables: Dict[str, dict], wanted) -> List[int]:
-    """``[design instances, the ones carrying a filled attribute]``.
+def _placements(tables: Dict[str, dict]):
+    """``(design roots, how many placements each block has)``.
 
-    The same walk the hierarchy does, counting rather than placing: a block nothing instantiates
-    is a top (all of them are, if every block is referenced), and a block placed K times counts
-    its leaves K times - which is what makes "N of M instance(s)" mean instances on screen.
+    Same reference graph `_shape` walks, counting paths rather than leaves: a block used
+    twice by one parent has two placements, and a block used by a parent that is itself
+    placed twice has two as well. A block referenced on a cycle stops at the cycle, like
+    both readers do.
     """
     referenced = {str(entry.get("cell_name") or "")
                   for entries in tables.values() for entry in entries.values()}
-    tops = [name for name in tables if name not in referenced] or list(tables)
-    leaves, filled = {}, {}
-    for name, entries in tables.items():
-        keep = [entry for entry in entries.values()
-                if str(entry.get("cell_name") or "") not in tables]
-        leaves[name] = len(keep)
-        filled[name] = sum(1 for entry in keep if any(spec in entry for spec in wanted))
-    counts = [0, 0]
+    roots = [name for name in tables if name not in referenced] or list(tables)
+    counts = {name: 0 for name in tables}
     visiting = set()
 
     def walk(name: str) -> None:
-        if name in visiting:            # a cycle: the walks warn and stop, and so does the count
+        if name in visiting:
             return
+        counts[name] += 1
         visiting.add(name)
-        counts[0] += leaves[name]
-        counts[1] += filled[name]
         for entry in tables[name].values():
             child = str(entry.get("cell_name") or "")
             if child in tables:
                 walk(child)
         visiting.discard(name)
 
-    for name in tops:
+    for name in roots:
         walk(name)
+    return roots, counts
+
+
+def _shape(tables: Dict[str, dict], written, written_paths, roots) -> List[int]:
+    """``[design instances, the ones carrying an attribute this run filled]``.
+
+    The same walk the hierarchy does, counting rather than placing: a block placed K times
+    counts its leaves K times - which is what makes "N of M instance(s)" mean instances on
+    screen. A block-level value is read off the shared entry at every placement, so
+    ``written`` holds the ``id`` of each entry a shared value was written into. A flattened
+    power record writes no entry; it lights the one absolute ``written_paths`` path instead.
+    """
+    counts = [0, 0]
+    visiting = set()
+
+    def walk(name: str, prefix: str) -> None:
+        if name in visiting:            # a cycle: the walks warn and stop, and so does the count
+            return
+        visiting.add(name)
+        for leaf_name, entry in tables[name].items():
+            if str(entry.get("cell_name") or "") in tables:
+                continue
+            counts[0] += 1
+            path = f"{prefix}/{leaf_name}" if prefix else str(leaf_name)
+            if id(entry) in written or path in written_paths:
+                counts[1] += 1
+        for leaf_name, entry in tables[name].items():
+            child = str(entry.get("cell_name") or "")
+            if child in tables:
+                walk(child, f"{prefix}/{leaf_name}" if prefix else str(leaf_name))
+        visiting.discard(name)
+
+    for name in roots:
+        walk(name, name)
     return counts
 
 
 def fill_instances(blocks, json_paths) -> FillSummary:
     """Fill instance attributes from ``--json`` files into converted blocks, **in place**.
 
-    The file's ``top_name`` names the block its record keys are relative to, which is the whole
-    of "a flattened top file or a per-block file": keys are resolved against that block, and a
-    key whose first path segment names an instance of another block descends into it. Either
-    form, in any order, so a ``TOP.json`` covering the design and a ``sub_A.json`` covering one
-    sub-block both apply - and a sub-block's record fills every placement of it.
+    The file's ``top_name`` names the block its record keys are relative to, and that is what
+    chooses the scope. A file naming a sub-block fills the block definition: its values apply
+    to every placement of that block, and structural attributes belong in this form. A file
+    naming a design root fills placements: a key resolving to a leaf of the root itself writes
+    the unique top-table entry, while a key resolving inside a sub-block writes power per
+    placement into the root block's ``power_overrides`` - reused blocks can have a different
+    switching toggle at each placement. Structural attributes cannot be per placement: on a
+    block placed more than once they are not written and are counted as placement conflicts,
+    with a warning to use a block-level file.
 
-    An attribute the converted input already has is never overwritten: its cell name and placement
-    are facts about the design, not gaps, so the file's value for one is dropped and counted. A
-    record naming an instance the design does not have is ignored and counted. Nothing here is
-    fatal, because a partial fill is the normal case - one file per sub-block is exactly that.
+    Either form, in any order, so a ``TOP.json`` covering the design and a ``sub_A.json``
+    covering one sub-block both apply, and an override wins over a block-level default for the
+    placement it names. An attribute the converted input already has is never overwritten: its
+    cell name and placement are facts about the design, not gaps, so the file's value for one
+    is dropped and counted. A record naming an instance the design does not have is ignored
+    and counted. Nothing here is fatal, because a partial fill is the normal case - one file
+    per sub-block is exactly that.
     """
     tables = _block_instances(blocks)
+    roots, placements = _placements(tables)
+    root_blocks: Dict[str, dict] = {}
+    for block in blocks:
+        root_blocks.setdefault(str(block.get("top_name") or ""), block)
+    # A root block may already carry overrides (an input authored that way); they are input
+    # data, so the file fills only what is absent and a disagreement is a conflict.
+    overrides = {
+        name: {path: dict(attrs)
+               for path, attrs in (root_blocks[name].get("power_overrides") or {}).items()}
+        for name in roots if name in root_blocks
+    }
     summary = FillSummary(files=len(json_paths))
-    wanted = set()
+    written = set()              # id(entry) for shared values this run wrote
+    written_paths = set()        # absolute paths this run wrote a placement value for
     for path in json_paths:
         # The file can be hundreds of megabytes and takes a while to load, so say so before the
         # wait rather than after it: everything here is silent otherwise.
@@ -473,9 +540,11 @@ def fill_instances(blocks, json_paths) -> FillSummary:
         if not isinstance(records, dict):
             raise ValueError(f"instance json {path}: 'instances' must be an object")
 
+        is_root_file = top in roots
         unmatched: List[str] = []
         containers: List[str] = []
         mismatched: List[tuple] = []
+        placement_conflicts: List[tuple] = []
         unusable = applied = 0
         offered = filled_records = 0
         total_records = len(records)
@@ -488,10 +557,11 @@ def fill_instances(blocks, json_paths) -> FillSummary:
             if not isinstance(record, dict):
                 unusable += 1
                 continue
-            entry = _target(tables, top, raw_key)
-            if entry is None:
+            found, relative = _target(tables, top, raw_key)
+            if found is None:
                 unmatched.append(str(raw_key))
                 continue
+            owner, entry = found
             if str(entry.get("cell_name") or "") in tables:
                 containers.append(str(raw_key))      # a sub-block's own instance, not a leaf
                 continue
@@ -510,6 +580,21 @@ def fill_instances(blocks, json_paths) -> FillSummary:
             offered += 1
             wrote = 0
             for name, value in values.items():
+                if is_root_file and owner != top and name in schema.PLACEMENT_ATTRS:
+                    # A placement, not the block definition: the same leaf may switch
+                    # differently in another placement of the same block, and an override
+                    # wins over a block-level default for the placement it names.
+                    absolute = f"{top}/{relative}" if relative else top
+                    own = overrides[top].setdefault(absolute, {})
+                    if name in own:
+                        if own[name] != value:
+                            summary.conflicts += 1
+                        continue
+                    own[name] = value
+                    written_paths.add(absolute)
+                    applied += 1
+                    wrote += 1
+                    continue
                 if name in entry:
                     # The input's own value stands. Only a real disagreement is a conflict - a
                     # file restating a placement it agrees with has ignored nothing - and a
@@ -521,8 +606,15 @@ def fill_instances(blocks, json_paths) -> FillSummary:
                             summary.mismatched_cells += 1
                             mismatched.append((str(raw_key), value, entry[name]))
                     continue
+                if is_root_file and owner != top and placements.get(owner, 0) > 1:
+                    # An absent structural value for a reused block has no placement to
+                    # belong to, and applying it to the definition would change every
+                    # placement - the conflict this rule refuses to guess at.
+                    summary.placement_conflicts += 1
+                    placement_conflicts.append((str(raw_key), name))
+                    continue
                 entry[name] = value
-                wanted.add(name)               # what the design ends up *carrying* from the file
+                written.add(id(entry))         # what the design ends up *carrying* from the file
                 applied += 1
                 wrote += 1
             if wrote:
@@ -542,6 +634,12 @@ def fill_instances(blocks, json_paths) -> FillSummary:
             logger.warning("power: %s: %d record(s) name a different cell than the design "
                            "(e.g. %s: %s, where the design places %s); the design keeps its own",
                            path, len(mismatched), key, value, own)
+        if placement_conflicts:
+            key, name = placement_conflicts[0]
+            logger.warning(
+                "power: %s: %d structural value(s) for a block placed more than once were not "
+                "written (e.g. %s: %s); use a file whose top_name is the block itself to fill "
+                "it for every placement", path, len(placement_conflicts), key, name)
         if unusable:
             logger.warning("power: %s: %d record(s) or value(s) could not be used",
                            path, unusable)
@@ -549,7 +647,13 @@ def fill_instances(blocks, json_paths) -> FillSummary:
             logger.warning("power: %s: nothing was filled under '%s'; its data is unused",
                            path, top)
 
+    # The dump writes block dicts verbatim, so the overrides ride along with the root and the
+    # json subcommand reloads them without a second format.
+    for name, mapping in overrides.items():
+        if mapping:
+            root_blocks[name]["power_overrides"] = mapping
+
     # Counted even when nothing was filled, so "0 of N instance(s)" is a real denominator: the
     # number to read next to the warning that says no record matched.
-    summary.total, summary.instances = _shape(tables, wanted)
+    summary.total, summary.instances = _shape(tables, written, written_paths, roots)
     return summary

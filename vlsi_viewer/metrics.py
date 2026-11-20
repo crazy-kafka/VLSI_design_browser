@@ -54,6 +54,14 @@ def _merge_blocks(earlier: pd.DataFrame, later: pd.DataFrame) -> pd.DataFrame:
     # combine_first drops DataFrame.attrs; presence is OR-ed rather than "earlier wins".
     merged.attrs["has_power"] = (bool(earlier.attrs.get("has_power", False))
                                  or bool(later.attrs.get("has_power", False)))
+    # Placement values merge like the leaves: earlier file wins per path and attribute.
+    own = earlier.attrs.get("power_overrides") or {}
+    other = later.attrs.get("power_overrides") or {}
+    if own or other:
+        overrides = {path: dict(attrs) for path, attrs in other.items()}
+        for path, attrs in own.items():
+            overrides.setdefault(path, {}).update(attrs)
+        merged.attrs["power_overrides"] = overrides
     return merged
 
 
@@ -111,11 +119,29 @@ def load_blocks(block_paths) -> pd.DataFrame:
     for top in tops:
         expand(top, top)
 
+    overrides = {}
+    for df in blocks.values():
+        for path, attrs in (df.attrs.get("power_overrides") or {}).items():
+            overrides[path] = dict(attrs)
+
     columns = ["leaf_instance_name"] + [s.name for s in schema.INSTANCE_ATTRS]
     merged = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=columns)
+    # A flattened power record names one placement: apply it after expansion, where the
+    # absolute leaf paths exist. Everything else keeps the value read off its block entry.
+    if overrides and len(merged):
+        placed_paths = merged["leaf_instance_name"]
+        for attr in schema.PLACEMENT_ATTRS:
+            mapping = {path: values[attr] for path, values in overrides.items()
+                       if attr in values}
+            if not mapping:
+                continue
+            placed = placed_paths.map(mapping)
+            hit = placed.notna()
+            merged.loc[hit, attr] = placed[hit]
     # concat only propagates attrs when every input agrees; OR them explicitly.
-    merged.attrs["has_power"] = any(
-        bool(df.attrs.get("has_power", False)) for df in blocks.values())
+    merged.attrs["has_power"] = (any(bool(df.attrs.get("has_power", False))
+                                     for df in blocks.values())
+                                 or bool(overrides))
     logger.info("merged %d leaf instance(s)", len(merged))
     return merged
 

@@ -323,10 +323,12 @@ def _report_fill(filled, args, compare) -> None:
                        "hidden and the leakage and dynamic heat maps will be empty",
                        args.cmd)
         return
-    logger.info("power: %d of %d design instance(s) filled from %d file(s)%s", filled.instances,
-                filled.total, filled.files,
+    logger.info("power: %d of %d design instance(s) filled from %d file(s)%s%s",
+                filled.instances, filled.total, filled.files,
                 f"; {filled.conflicts} value(s) ignored, the input had them"
-                if filled.conflicts else "")
+                if filled.conflicts else "",
+                f"; {filled.placement_conflicts} structural value(s) for a multi-placed block "
+                "were not written" if filled.placement_conflicts else "")
     if not filled.matched:
         logger.warning("%s input still carries no power data: no --json record matched an "
                        "instance, so the hierarchy power columns are hidden and the leakage "

@@ -6,6 +6,8 @@
 
 Leaf paths are relative to ``top_name``. Missing attributes are filled with
 defaults and coerced per the attribute schema in :mod:`vlsi_viewer.schema`.
+A block may also carry ``power_overrides`` - ``{absolute path: {power attrs}}`` - for
+placements of a reused block that differ; the readers apply it after expansion.
 """
 import json
 import logging
@@ -123,9 +125,27 @@ def _block_from_data(data, label):
             row[spec.name] = _apply_spec(attrs, spec)
         records.append(row)
 
+    # Placement values written by the power fill (or authored in the file): power attrs for
+    # one placement of a block, keyed by the absolute hierarchy path. Normalize to floats
+    # here so both readers can apply them without a second validation.
+    raw_overrides = data.get("power_overrides") or {}
+    if not isinstance(raw_overrides, dict):
+        raise ValueError(f"'power_overrides' must be a dict in {label}")
+    power_overrides = {}
+    for path, attrs in raw_overrides.items():
+        if not isinstance(attrs, dict):
+            raise ValueError(f"'power_overrides' values must be dicts in {label}")
+        values = {spec.name: _coerce(attrs[spec.name], spec.type)
+                  for spec in schema.INSTANCE_ATTRS
+                  if spec.name in schema.PLACEMENT_ATTRS and spec.name in attrs}
+        if values:
+            power_overrides[str(path)] = values
+    has_power = has_power or bool(power_overrides)
+
     df = pd.DataFrame(records, columns=["leaf_instance_name"] + [s.name for s in schema.INSTANCE_ATTRS])
     _cast(df, schema.INSTANCE_ATTRS)
     df.attrs["has_power"] = has_power
+    df.attrs["power_overrides"] = power_overrides
     boundary = _parse_boundary(data.get("boundary"))
     logger.info("Loaded block '%s' with %d instance(s) from %s", top_name, len(df), label)
     return top_name, df, boundary

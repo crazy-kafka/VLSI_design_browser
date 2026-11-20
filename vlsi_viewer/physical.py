@@ -429,8 +429,12 @@ def _load_blocks_and_cells(block_paths, cell_path):
             df = _merge_blocks(prev_df, df)
             boundary = prev_b if prev_b is not None else boundary
         blocks[name] = (df, boundary)
+    power_overrides = {}
+    for df, _boundary in blocks.values():
+        for path, attrs in (df.attrs.get("power_overrides") or {}).items():
+            power_overrides[path] = dict(attrs)
     cells = load_cell_info(cell_path).set_index("cell_name")
-    return blocks, cells
+    return blocks, cells, power_overrides
 
 
 def build_physical(block_paths, cell_path, grid_size: float = 3.0,
@@ -456,7 +460,7 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
         contour_gap = config.DEFAULT_CONTOUR_GAP_FACTOR * grid_size
     if contour_gap < 0:
         raise ValueError("contour gap must be >= 0")
-    blocks, cells = _load_blocks_and_cells(block_paths, cell_path)
+    blocks, cells, power_overrides = _load_blocks_and_cells(block_paths, cell_path)
 
     referenced = set()
     for df, _ in blocks.values():
@@ -551,15 +555,19 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
                 ys = [c[1] for c in g]
                 _xs0.append(min(xs)); _ys0.append(min(ys))
                 _xs1.append(max(xs)); _ys1.append(max(ys))
-            _leaks.append(float(getattr(row, "leakage_power")))
-            _dyns.append(float(getattr(row, "dynamic_power")))
+            leaf_path = _join(prefix, getattr(row, "leaf_instance_name"))
+            override = power_overrides.get(leaf_path) or {}
+            _leaks.append(float(override.get("leakage_power",
+                                             getattr(row, "leakage_power"))))
+            _dyns.append(float(override.get("dynamic_power",
+                                            getattr(row, "dynamic_power"))))
             _ulvts.append(is_ulvt.get(cell, False))
             _macros.append(is_macro.get(cell, False))
             # Physical-only boxes are kept: they are real area, so they belong in the
             # density map. Everything else derived from them is suppressed below.
             _phys_onlies.append(bool(getattr(row, "is_physical_only"))
                                 or cell in phys_only_cells)
-            _paths.append(_join(prefix, getattr(row, "leaf_instance_name")))
+            _paths.append(leaf_path)
             _codes.append(code_of[cell])
         visiting.discard(name)
 

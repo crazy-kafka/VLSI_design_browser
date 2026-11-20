@@ -303,6 +303,25 @@ boundaries in global coordinates:
 }
 ```
 
+#### `power_overrides` (per-placement power)
+
+A block file may carry an optional power map keyed by **absolute hierarchy path**:
+
+```json
+{
+  "top_name": "TOP",
+  "instances": { "u_shader": { "cell_name": "SHADER" } },
+  "power_overrides": {
+    "TOP/u_shader/gen_sp_1/u_sp": { "leakage_power": 0.002, "dynamic_power": 0.4 }
+  }
+}
+```
+
+`--out` writes this field when a flattened power file gave a reused block a different
+value at one placement; the `json` subcommand reads it back. Only `leakage_power` and
+`dynamic_power` are used here — those are the attributes that may differ per placement;
+the block's own `instances` keep the definition shared by all placements.
+
 ### Multiple blocks & automatic nesting
 
 Pass several `--block_info` files to compose a hierarchy. A leaf whose `cell_name`
@@ -388,7 +407,7 @@ same name, and the CLI warns instead of letting one silently replace the other.
 | LEF (`--lef`) | the cell library | macro `SIZE` (microns) → `size_x`/`size_y`/`area`; `CLASS` other than `CORE` → `is_macro`. Several files are one library |
 | DEF (`--def`) | one block each | `DESIGN` → `top_name`, `DIEAREA` → `boundary`, `COMPONENTS` → instances. Coordinates are DEF database units divided by `UNITS DISTANCE MICRONS` |
 | Verilog (`--verilog`) | **one** block | flattened to instance-name paths; **no placement**, hence no physical mode. Several files are one netlist |
-| JSON (`--json`, def/verilog only) | instance attributes to **fill in** | `leakage_power`/`dynamic_power` in practice. `top_name` names the block the keys are relative to, so a flattened top file and a per-block file both apply; the input's own values win |
+| JSON (`--json`, def/verilog only) | instance attributes to **fill in** | `leakage_power`/`dynamic_power` in practice. A `top_name` naming a sub-block fills that block definition (every placement); one naming the design top fills individual placements. The input's own values win |
 
 **How the multi-file flags differ, deliberately:** a netlist is normally split across
 files (one per module), so several `--verilog` files are merged into a single design. Each
@@ -406,12 +425,22 @@ anything loads it.
     python main.py def --def core.def --lef cells.lef \
         --json top.power.json sub_a.power.json --physical_mode
 
-A file's `top_name` says which block its keys are relative to, which is what makes both of
-these work — a *flattened* `TOP.json` whose keys are paths under the top (`u_core/u1`), and
-a per-block `sub_A.json` whose keys are that sub-block's own instance names (`u1`). A record
-for a sub-block's leaf fills **every** placement of that block, because the filling happens
-before the hierarchy is expanded: one record for a block placed six times lights six
-places on the map.
+A file's `top_name` says which block its keys are relative to, and that chooses **two
+scopes**. A file naming a sub-block fills the *block definition*: its keys are that block's
+own instance names (`u1`), and its values apply to **every** placement of the block, because
+the filling happens before the hierarchy is expanded. A file naming the design's top is
+*flattened*: its keys are paths under the top (`u_core/u1`, or the absolute
+`TOP/u_core/u1`), and its records address individual placements.
+
+The distinction matters for what may differ per placement. Power — `leakage_power`,
+`dynamic_power` — is switching activity, and a reused block can toggle differently at each
+placement, so a flattened record writes that one placement and leaves its siblings alone; a
+block-level file gives them all one value. Structural attributes (`cell_name`, `orient`,
+`location_x/y`, `is_physical_only`) describe the block itself, so a flattened value is
+accepted only when the block has one placement; on a block placed more than once an absent
+attribute is not written and is counted as a placement conflict, with a warning to use a
+file whose `top_name` is the block. The two forms mix: a block-level default plus flattened
+overrides, in either order, with the override winning for the placement it names.
 
 An attribute the input already provides is never overwritten — the DEF's cell names and
 placement are facts about the design, not gaps — and a record naming an instance the design
@@ -433,7 +462,8 @@ Things worth knowing:
   rendered at all (no placement, no physical mode); there `--out` is how to keep them.
 - **The fill is not power-specific.** Any instance attribute the input does not provide can
   come from the JSON, so a physical-only flag or a placement can be filled into a netlist
-  run as well. `dynamic_power` and `leakage_power` are the ones with a map to land in.
+  run as well. Power is the only class that may differ per placement; a structural
+  attribute for a block placed more than once belongs in a block-level file.
 - **Filler is dropped.** `FILL*` components tile every row gap, so keeping them would
   peg the density map at 100%. Tap, decap and other physical-only cells are kept and
   flagged instead — they appear in density but not in the tree.

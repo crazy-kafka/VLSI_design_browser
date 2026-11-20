@@ -19,25 +19,29 @@ Three things fall out of that one placement, which is why it is where it is:
   and substitutes each spec's default for a missing key, so after loading, "no power was supplied"
   and "the power is 0.0" are the same value. A merge at the DataFrame level could not tell them
   apart; the dict can.
-- **One record fills every placement.** Both `metrics.load_blocks` and `physical.walk` expand the
-  hierarchy from these same dicts and read power off the same entry, so a record for a sub-block's
-  leaf placed six times lights six boxes on the map (measured: one `SUB` record → 6 design
-  instances on `sample_data/metal`).
+- **A block-level record fills every placement; a flattened one fills one.** Both
+  `metrics.load_blocks` and `physical.walk` expand the hierarchy from these same dicts, so a
+  per-block file's record for a sub-block's leaf lights every placement (measured: one `SUB`
+  record → 6 design instances on `sample_data/metal`). A flattened top file's record addresses
+  the placement its key names instead; see *Later* below for the per-placement rule.
 - **`--out` writes the filled data**, so the dump is an ordinary input to the `json` subcommand and
   the conversion only has to be done once.
 
-**A file's `top_name` names the block its keys are relative to** — that single rule covers both
-forms the user asked for, with no mode switch:
+**A file's `top_name` names the block its keys are relative to, and chooses the scope** — one rule,
+no mode switch:
 
-| file | keys | resolved by |
+| file | keys | scope |
 |---|---|---|
-| `TOP.json` (flattened) | `u_core/u1` | descending the container chain (`cell_name` names another block) |
-| `sub_A.json` (per-block) | `u1` | the block its `top_name` names |
+| `TOP.json` (flattened) | `u_core/u1` | the placement the key names: power goes to that placement |
+| `sub_A.json` (per-block) | `u1` | the block definition: every placement |
 | either, path copied out of the tree | `TOP/u_core/u1` | the leading `<top>/` is stripped and retried |
 
-Descending uses the same `cell_name in blocks` test `metrics.load_blocks` (`metrics.py:96`) and
-`physical.walk` (`physical.py:391`) use, so an entry the resolver accepts is one both of them will
-place — the resolver cannot accept an instance the hierarchy does not have.
+Keys are resolved against that block by trying the whole key first, then every `/`-prefix
+**longest first** (`_resolve`), so a block component that itself contains `/`
+(`U_GPU_SHADER_TOP/.../gen_sp_1_u_sp`) is one instance lookup. Descending uses the same
+`cell_name in blocks` test `metrics.load_blocks` (`metrics.py:96`) and `physical.walk`
+(`physical.py:391`) use, so an entry the resolver accepts is one both of them will place — the
+resolver cannot accept an instance the hierarchy does not have.
 
 **The rule per attribute, as the user set it:** fill any `schema.INSTANCE_ATTRS` key the input does
 not already provide; on a conflict the input's value stands and the file's is counted as ignored; a
@@ -45,6 +49,9 @@ record naming an instance the design does not have is ignored. Nothing is fatal 
 the normal case (one file per sub-block). A `cell_name` that *disagrees* is the one conflict said
 out loud, because it is the strongest sign the file belongs to another version of the design.
 Values go through `loader._coerce`, so a value the fill accepts is a value the loader accepts.
+`leakage_power`/`dynamic_power` are placement attributes and may differ per placement; every
+other attribute is a structural fact about the block, so a flattened value for an attribute the
+block lacks, on a block placed more than once, is counted as a placement conflict and not written.
 
 ## What a run prints
 
@@ -158,3 +165,37 @@ What changed, all in `parsers/convert.py`:
 Tests added: the table is built once and is the block's own dict (plus the duplicate-name merge),
 a flat fill of 8k records must finish inside a second (it took ~5 s before, ~40 ms now), and the
 progress lines appear with the summary's timing. **655 tests pass.**
+
+## Later: flattened block components and per-placement power (2026-11-20)
+
+Reported in `dev_plan/real_design_case_power_json_flattened_block.md`: both `gpu_sp_top`
+placements stayed at zero while `gpu_ff_top_if` filled. The DEF named the sp components with a
+flattened, multi-segment name (`U_GPU_SHADER_TOP/u_gpu_shc_top/gen_sp_1_u_sp`), and `_resolve`
+split the key at the first `/` only — it looked for an instance called `U_GPU_SHADER_TOP`, which
+is half a component name, not an instance. Those records were warned as "filled no instance".
+
+Two changes, both in `parsers/convert.py::fill_instances` unless noted:
+
+- **Longest-prefix resolution.** `_resolve` tries the whole key, then every `/`-prefix longest
+  first, descending only when the prefix's `cell_name` names a block. `_target` returns the
+  resolution *and* the relative key of the form that succeeded, so the absolute hierarchy path
+  is `top + "/" + relative` for both the root-relative and root-prefixed forms.
+- **The addon's two scopes.** A file naming a sub-block fills the block definition (every
+  placement). A file naming a design root fills placements: `leakage_power`/`dynamic_power` go
+  into the root block's `power_overrides` keyed by absolute path, because reused blocks can
+  have a different switching toggle at each placement. Structural attributes
+  (`cell_name`, `orient`, `location_x/y`, `is_physical_only`) are block facts; a flattened
+  value on a block placed more than once is counted in `FillSummary.placement_conflicts`, not
+  written, and warned about. Mixed files are allowed, and an override wins for its placement.
+- **Readers.** `loader._block_from_data` reads `power_overrides` into
+  `df.attrs["power_overrides"]`; `metrics._merge_blocks` merges the map (earlier file wins per
+  path/attribute), `metrics.load_blocks` applies it to the expanded leaf frame by
+  `leaf_instance_name`, and `physical.walk` applies it by the leaf path it already builds.
+  `_shape` counts a shared entry once per placement and an override path once, so a flattened
+  record counts one design instance, not six.
+- **Round trip.** `--out` writes block dicts verbatim, so the map is in the root block file and
+  the `json` subcommand reloads it. README documents the field.
+
+Tests: the real-shaped multi-segment/nested case with two different values, the mixed
+block-default + override case, the structural guard (reused vs single-placement vs block-level),
+the metrics aggregation, the physical map, and the `--out`/reload round trip.
