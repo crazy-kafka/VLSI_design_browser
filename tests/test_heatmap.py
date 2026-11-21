@@ -5,8 +5,8 @@ import numpy as np
 
 from vlsi_viewer.heatmap import grid_to_image, thermal_color
 
-_SAMPLE = os.path.join(os.path.dirname(__file__), "..", "dev_plan", "code_sample",
-                       "heatmap_color.py")
+_SAMPLE = os.path.join(os.path.dirname(__file__), "..", "dev_plan", "reference",
+                       "code_sample", "heatmap_color.py")
 
 
 def _innovus_sample_colors():

@@ -1,10 +1,10 @@
 """DEF net / special-net parsing, checked against the DEF 5.8 reference.
 
-`dev_plan/LEF_DEF_syntax reference.md` is the source of truth here: the syntax quoted in
+`dev_plan/reference/LEF_DEF_syntax reference.md` is the source of truth here: the syntax quoted in
 the docstrings is taken from its NETS (572-595), Regular Wiring (597-611), SPECIALNETS
 (613-628), Special Wiring (630-651) and appendix coordinate-convention (833-839)
 sections. Each test pins one defect found in the audit recorded in
-`dev_plan/def_net_parsing_audit.md`.
+`dev_plan/eda/def_net_parsing_audit.md`.
 
 Net parsing is off by default, so nothing here runs in the product; the tests pass the
 flags explicitly.

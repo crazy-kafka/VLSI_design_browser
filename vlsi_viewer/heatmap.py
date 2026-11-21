@@ -4,7 +4,7 @@ from PyQt5.QtGui import QImage
 
 # Gradient anchors matching the INNOVUS heat-map ramp, evenly spaced every 1/6.
 # INNOVUS ships this as a 127-entry table running high -> low; the stops below are
-# the same ramp reversed into low -> high (see dev_plan/heatmap_innovus_gradient.md):
+# the same ramp reversed into low -> high (see dev_plan/physical/heatmap_innovus_gradient.md):
 # navy (0%) -> blue (~16.67%) -> cyan (33.33%) -> green (50%) ->
 # yellow (~66.67%) -> red (~83.33%) -> near-white (100%).
 _THERMAL_ANCHORS = [

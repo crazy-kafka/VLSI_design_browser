@@ -89,7 +89,7 @@ _CAP_A, _CAP_Z, _DASH, _SPACE = ord("A"), ord("Z"), ord("-"), (32, 9)
 # Whether the pool splits the file by byte range (one scan in the parent, each worker reading only
 # its own share) instead of by statement count (every worker scanning the whole file and keeping
 # one statement in `jobs`). Both produce the same map; the difference is what they cost. Off while
-# the change is being evaluated - see `dev_plan/metal_work_units_eval.md` - and a constant rather
+# the change is being evaluated - see `dev_plan/metal/metal_work_units_eval.md` - and a constant rather
 # than a flag so a test and the benchmark can run both splits in one process, the way
 # `BYTES_PER_WORKER` and `DEFAULT_CHUNK_STATEMENTS` are set.
 RANGE_WORK_UNITS = False

@@ -213,7 +213,7 @@ END m4
 
 # -- property payloads are not layer statements -------------------------------------
 #
-# The stanzas below are verbatim from `dev_plan/issue.tech_layer_detect.md`, a real 18-layer
+# The stanzas below are verbatim from `dev_plan/issues/issue.tech_layer_detect.md`, a real 18-layer
 # design's tech LEF. A property's value is a mini-language belonging to that property, but
 # the stanza scanner reads it as layer statements: a quoted SPACINGTABLE body supplied a
 # spacing (from its PRL breakpoints, one of them negative) and a quoted LEF58_SPACING

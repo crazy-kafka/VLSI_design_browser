@@ -43,12 +43,12 @@ interfaces are in [PARSERS.md](PARSERS.md).
 It has been run on real designs, and the numbers are on record rather than asserted:
 
 - **3,355,697 placed instances, 17,385 macros from 221 LEF files, 18 routing layers** in a
-  ~30 M-line routed DEF — [`real_design_case_record.md`](dev_plan/real_design_case_record.md)
+  ~30 M-line routed DEF — [`real_design_case_record.md`](dev_plan/issues/real_design_case_record.md)
 - that design's map is a **1,785.87 s** read, 1,696.70 s of it the routing parse (**112.9 M** wire
   shapes); parsed once into a db, a rebuild is **~23 s** —
-  [`metal_def_db.md`](dev_plan/metal_def_db.md)
+  [`metal_def_db.md`](dev_plan/metal/metal_def_db.md)
 - where a rebuild cannot apply, stored shapes replay at **0.50 µs each** against 19.45 µs to parse
-  them — [`metal_def_db_eval.md`](dev_plan/metal_def_db_eval.md)
+  them — [`metal_def_db_eval.md`](dev_plan/metal/metal_def_db_eval.md)
 
 ## Features
 
@@ -670,7 +670,7 @@ Comfortable to about **10⁶ wire segments** (seconds); usable to about 10⁷ (m
 that the DEF *parser*, not the rasteriser, is the wall — parsing is 97 % of the runtime — and
 a full-chip flat DEF is out of reach for this viewer rather than merely slow. `--stress N` on
 the sample generator times a synthetic design of N nets; see
-[`dev_plan/metal_density_asbuilt.md`](dev_plan/metal_density_asbuilt.md) for the measured
+[`dev_plan/metal/metal_density_asbuilt.md`](dev_plan/metal/metal_density_asbuilt.md) for the measured
 numbers. Unlike the physical mode, the grids are built before the window appears, so a large
 run shows progress in the terminal and no window until it is ready.
 
@@ -686,7 +686,7 @@ LEF was read. Nangate45's tech and cell LEFs, a real routed `gcd` DEF, and the A
 tech LEFs; provenance, revisions and licences in
 [`sample_data/real/PROVENANCE.md`](sample_data/real/PROVENANCE.md), and the reasoning — including
 which files have to come out before this repository is published — in
-[`dev_plan/real_sample_sources.md`](dev_plan/real_sample_sources.md).
+[`dev_plan/samples/real_sample_sources.md`](dev_plan/samples/real_sample_sources.md).
 
 ## Architecture
 

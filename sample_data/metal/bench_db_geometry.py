@@ -43,7 +43,7 @@ SUB = os.path.join(SAMPLE, "sub.def")
 CELLS = os.path.join(SAMPLE, "cells.lef")
 TECH = os.path.join(SAMPLE, "tech.lef")
 
-# dev_plan/issue/real_design_log_0917.md: the shape counts the runs reported. Only the top block's
+# dev_plan/issues/real_design_log_0917.md: the shape counts the runs reported. Only the top block's
 # is known - the two runs refused or never reached the sub-blocks' - so the design projection is
 # given per 100M shapes and for the top, not invented for the rest.
 CORE_WRAP_SHAPES = 44_395_406

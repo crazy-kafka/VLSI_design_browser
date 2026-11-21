@@ -5,7 +5,7 @@
 Builds the bundled ~100 k-instance physical sample, then measures RegionData
 construction (the O(N) mask), the root's raw stats, its metrics, and the child
 batch, and projects the per-box cost to the 3.35 M-instance chip-level design
-from dev_plan/issue/real_design_log_0921.md.
+from dev_plan/issues/real_design_log_0921.md.
 """
 import os
 import sys

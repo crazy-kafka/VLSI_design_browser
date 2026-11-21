@@ -127,7 +127,7 @@ END ghost
 
 # -- the reported design's tech LEF -------------------------------------------------
 #
-# Verbatim stanzas from `dev_plan/issue.tech_layer_detect.md` (a real 18-layer design), and
+# Verbatim stanzas from `dev_plan/issues/issue.tech_layer_detect.md` (a real 18-layer design), and
 # the acceptance table from its report. It is one file doing three things at once: a region
 # layer, a layer with no stated spacing, and a layer whose two pitch values differ.
 

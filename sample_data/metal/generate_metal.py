@@ -6,7 +6,7 @@ Run it with no arguments to (re)write the committed sample:
 
 and with ``--stress N`` to write a synthetic DEF of about N nets into a scratch directory and
 report what each stage cost. The stress mode is how the performance numbers in
-``dev_plan/metal_density_asbuilt.md`` were measured; it is deliberately *not* committed, since
+``dev_plan/metal/metal_density_asbuilt.md`` were measured; it is deliberately *not* committed, since
 it exists to be regenerated on whatever machine matters.
 
 The tech LEF is written with several awkward-but-legal shapes on purpose, one per layer, each

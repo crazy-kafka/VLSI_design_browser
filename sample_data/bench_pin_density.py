@@ -32,7 +32,7 @@ LEF = f"{NANGATE}/NangateOpenCellLibrary.macro.mod.lef"
 DEF = f"{NANGATE}/gcd_nangate45.def"
 
 # The die of the chip-level design this mode is used on, and its instance count
-# (dev_plan/issue/real_design_log_0916.md): 1060.2 x 1226.64 um, 3,355,697 instances.
+# (dev_plan/issues/real_design_log_0916.md): 1060.2 x 1226.64 um, 3,355,697 instances.
 REAL_DIE = (1060.2, 1226.64)
 REAL_INSTANCES = 3355697
 

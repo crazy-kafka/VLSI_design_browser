@@ -30,7 +30,7 @@ FILL_PREFIX = "FILL"
 
 # Cell-name heuristics. These are library conventions, not LEF syntax: nothing in a
 # LEF file says which cell is a buffer or how many bits a flop holds. The rules follow
-# dev_plan/code_sample/extractCellInfo.py (the LinxCore library these samples target),
+# dev_plan/reference/code_sample/extractCellInfo.py (the LinxCore library these samples target),
 # with two changes noted at their use sites. Edit this block for another library.
 PHYSICAL_ONLY_PATTERNS = ("FILL", "BOUNDARY", "BHD", "ANTENNA", "DCAP", "TIE", "TAP",
                           "GDCAP", "HDDI")
@@ -352,7 +352,7 @@ def _block_instances(blocks) -> Dict[str, dict]:
     Built once, and that is the whole point of it existing: resolving a record used to rebuild the
     block's dict per lookup, so a flat 3.35M-instance design copied 3.35M entries for *each* of its
     3.35M records - days of CPU for a fill that should take seconds (see
-    ``dev_plan/power_json_fill.md``).
+    ``dev_plan/eda/power_json_fill.md``).
     """
     groups: Dict[str, List[dict]] = {}
     for block in blocks:
