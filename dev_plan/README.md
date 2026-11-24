@@ -50,6 +50,7 @@ LEF/DEF/Verilog support, parser audits, and the incremental `--json` fill.
 | [tech_lef_layer_extraction.md](eda/tech_lef_layer_extraction.md) | Fix for three tech-LEF layer-extraction defects. | historical |
 | [power_json_fill.md](eda/power_json_fill.md) | `--json` fill for `def`/`verilog`, including the O(N²) and flattened-component fixes. | current |
 | [power_fill_flattened_components.md](eda/power_fill_flattened_components.md) | Resolver and per-placement power fix for flattened block component names. | current |
+| [filler_instance_drop_rule.md](eda/filler_instance_drop_rule.md) | Corrected DEF filler drop: FILL master, or FILL instance name with physical-only/DIST. | current |
 
 ## Metal mode (`metal/`)
 
@@ -87,6 +88,7 @@ Physical layout, heat-map grids and legends, contours, and placement fixes.
 | [contour_density_performance.md](physical/contour_density_performance.md) | Contour/density performance plan and its measured as-built. | current |
 | [pin_density_map.md](physical/pin_density_map.md) | Hierarchy area sort and the pin-density map. | current |
 | [ulvt_density_map.md](physical/ulvt_density_map.md) | ULVT density as a fourth physical-mode heat map. | current |
+| [bi_dynamic_power.md](physical/bi_dynamic_power.md) | Data-path B/I dynamic-power metric + heat map; density-first map order. | current |
 | [thermal_gradient_128.md](physical/thermal_gradient_128.md) | The earlier 7-stop, 128-step thermal ramp. | superseded (colors) by [heatmap_innovus_gradient.md](physical/heatmap_innovus_gradient.md) |
 | [vertical_fixed_legend.md](physical/vertical_fixed_legend.md) | Vertical top-right color legend with five value ticks. | current |
 | [grid_cli_and_hover.md](physical/grid_cli_and_hover.md) | Grid size via CLI and the hover coordinate/grid readout. | current |

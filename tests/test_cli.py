@@ -133,6 +133,26 @@ def test_resolve_inputs_def_returns_in_memory_data(tmp_path):
     assert len(load_cell_info(cells)) == 20
 
 
+def test_def_flow_passes_the_cell_table_to_both_conversions(monkeypatch):
+    """The FILL*-instance rule needs the LEF-derived is_physical_only flag."""
+    import vlsi_viewer.parsers.convert as convert
+
+    calls = []
+    real = convert.instance_info_from_def
+
+    def spy(path, top=None, cells=None):
+        calls.append(cells)
+        return real(path, top, cells=cells)
+
+    monkeypatch.setattr(convert, "instance_info_from_def", spy)
+    cells, _blocks, _compare, _pins = resolve_inputs(parse_args([
+        "def", "--def", f"{SAMPLE}/core.def",
+        "--compare_def", f"{SAMPLE}/core.def",
+        "--lef", f"{SAMPLE}/cells.lef"]))
+
+    assert len(calls) == 2 and all(c is cells for c in calls)
+
+
 def test_no_file_is_written_without_out(tmp_path):
     """A def/verilog run must leave the input directory exactly as it found it."""
     import os

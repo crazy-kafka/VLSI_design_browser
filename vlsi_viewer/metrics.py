@@ -18,14 +18,15 @@ RAW_COLS = [
     "count", "area", "ulvt_area", "reg_bits", "mb_bits",
     "d1d2_count", "bi_count", "bi_area", "pul_count", "ckb_count", "icg_count",
     "macro_count", "macro_area", "leakage_power", "dynamic_power",
+    "bi_dynamic_power",
 ]
 _COUNT_COLS = ["count", "d1d2_count", "bi_count", "pul_count", "ckb_count",
                "icg_count", "macro_count"]
 _STD_COLS = ["count", "area", "ulvt_area", "reg_bits", "mb_bits",
              "d1d2_count", "bi_count", "bi_area", "pul_count", "ckb_count", "icg_count"]
 _MACRO_COLS = ["macro_count", "macro_area"]
-_POWER_COLS = ["leakage_power", "dynamic_power"]
-CACHE_VERSION = "3"  # bump to invalidate stale pickles when RAW_COLS / metrics change
+_POWER_COLS = ["leakage_power", "dynamic_power", "bi_dynamic_power"]
+CACHE_VERSION = "4"  # bump to invalidate stale pickles when RAW_COLS / metrics change
 
 
 def _parent_of(path: str) -> str:
@@ -227,10 +228,17 @@ def _flatten(leaves: pd.DataFrame) -> pd.DataFrame:
     # --- power contributions: every logic instance, macros included ---
     # Physical-only and missing leaves carry no power (the heat maps mask them too).
     powered = leaves[~leaves["is_missing"] & ~leaves["is_physical_only"]]
+    # Data-path B/I power: clock cells are excluded (their power belongs to the clock
+    # tree, which CKB Cnt reports separately). Macros carry no B/I flag, so only
+    # standard cells contribute.
+    bi = ((powered["is_buffer"] | powered["is_inverter"])
+          & ~powered["is_clock_cell"]).to_numpy(dtype=bool)
     power = pd.DataFrame({
         "parent_path": powered["parent_path"].to_numpy(dtype=str),
         "leakage_power": powered["leakage_power"].to_numpy(dtype="float64"),
         "dynamic_power": powered["dynamic_power"].to_numpy(dtype="float64"),
+        "bi_dynamic_power": np.where(
+            bi, powered["dynamic_power"].to_numpy(dtype="float64"), 0.0),
     })
     power = power.groupby("parent_path", sort=False).sum()
 

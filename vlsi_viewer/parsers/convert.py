@@ -24,8 +24,12 @@ logger = logging.getLogger(__name__)
 
 # Filler cells tiled across every row gap. These are dropped rather than flagged
 # physical-only: they cover the whole core, so counting them would drive the density
-# heat map to 100% and hide the real utilisation. DCAP/GDCAP are *not* dropped - they
-# are sparse, and they are legitimately physical-only area.
+# heat map to 100% and hide the real utilisation. A component is filler when its LEF
+# master starts with FILL, or when its own leaf name does and the instance is
+# physical-only (the LEF cell table's is_physical_only flag, or the DEF's + SOURCE DIST).
+# The instance-name rule matters because some flows place decap/other area cells as row
+# fill, so the master name alone misses them. DCAP/GDCAP masters whose instance names do
+# not start with FILL are *not* dropped - they are sparse, legitimately physical-only area.
 FILL_PREFIX = "FILL"
 
 # Cell-name heuristics. These are library conventions, not LEF syntax: nothing in a
@@ -213,12 +217,43 @@ def _read_head(path, limit: int = 65536) -> str:
         return ""
 
 
-def instance_info_from_def(def_path, top=None) -> dict:
+def _is_filler_instance(comp, cells=None) -> bool:
+    """Whether a DEF component is filler and must be dropped.
+
+    Two rules: (1) the LEF master starts with ``FILL``; (2) the instance's own leaf
+    name - the last ``/`` segment, since flattened DEFs name components
+    ``u0/b0/fill_16_25`` - starts with ``FILL`` and the instance is physical-only. It is
+    physical-only when the cell table says so, or when the DEF marks it ``+ SOURCE DIST``.
+
+    ``cells`` is ``cell_info_from_lef``'s table. Without it the LEF-name heuristic stands
+    in for the flag, so callers that have no cell table (``metal.py``) still apply rule 2
+    to DCAP/TAP/... masters.
+    """
+    model = str(comp.model_name)
+    if model.upper().startswith(FILL_PREFIX):
+        return True
+    leaf = str(comp.comp_name).rsplit("/", 1)[-1]
+    if not leaf.upper().startswith(FILL_PREFIX):
+        return False
+    if (comp.source or "").upper() == "DIST":
+        return True
+    attrs = (cells or {}).get(model)
+    if attrs is None:
+        return _is_physical_only_name(model)
+    return bool(attrs.get("is_physical_only"))
+
+
+def instance_info_from_def(def_path, top=None, cells=None) -> dict:
     """``instance_info.json`` data from one DEF (placement).
 
     ``top`` overrides the DEF ``DESIGN`` name. Coordinates are converted from DEF
     database units to microns; ``orient`` is passed through because DEF's
     ``N/S/W/E/FN/FS/FW/FE`` already match ``Orient.orient_map``.
+
+    ``cells`` is the ``cell_info_from_lef`` table. Only its ``is_physical_only`` flag is
+    read, to decide whether a ``FILL*`` instance is physical-only filler; when it is
+    omitted the cell-name heuristic stands in for the flag, so callers without a LEF
+    table keep working. See ``_is_filler_instance`` for the two drop rules.
 
     DEF carries no power data, so ``leakage_power``/``dynamic_power`` are left out and
     the loader defaults them to 0.0 - the leakage and dynamic heat maps come out empty.
@@ -249,10 +284,10 @@ def instance_info_from_def(def_path, top=None) -> dict:
     instances = {}
     dropped_fill = unplaced = 0
     for comp in components:
-        model = str(comp.model_name)
-        if model.upper().startswith(FILL_PREFIX):
+        if _is_filler_instance(comp, cells):
             dropped_fill += 1
             continue
+        model = str(comp.model_name)
         if str(comp.pstatus).upper() == "UNPLACED":
             # Kept at (0, 0) by the parser, which would pile every unplaced instance
             # onto the die origin in physical mode.

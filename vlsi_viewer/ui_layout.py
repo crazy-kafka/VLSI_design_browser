@@ -11,8 +11,13 @@ from .heatmap import grid_to_image, thermal_color
 from .physical import PhysicalData
 from .region import selection_from_points
 
-HEAT_TYPES = [("density", "Cell density"), ("leakage", "Leakage power"),
-              ("dynamic", "Dynamic power"), ("ulvt", "ULVT density")]
+# Density maps come first, then power maps: a PD engineer reads utilisation and then
+# where the switching power is. Pin density is a density map, so it stays above the
+# power group even though it is only offered when the source carries pin geometry.
+DENSITY_TYPES = [("density", "Cell density"), ("ulvt", "ULVT density")]
+POWER_TYPES = [("leakage", "Leakage power"), ("dynamic", "Dynamic power"),
+               ("bi_dynamic", "B/I dynamic power")]
+HEAT_TYPES = DENSITY_TYPES + POWER_TYPES
 
 # Magenta is deliberately outside the navy/blue/cyan/green/yellow/red thermal ramp,
 # so the selection boundary stays readable over every tile colour.
@@ -23,13 +28,14 @@ _SELECTION_FILL = QColor(0xFF, 0x2D, 0xE0, 35)
 def _kinds_for(physical):
     """The map selector's entries for a physical source.
 
-    Pin density is appended, never inserted: the four grids above keep their indices, which
-    the range bookkeeping and the tests both depend on. A source with no pin geometry (the
-    json path, whose cells come from a ``cell_info.json``) does not offer it at all.
+    Density maps (and pin density, when the source has pin geometry) come first; the
+    power maps follow. A source with no pin geometry (the json path, whose cells come
+    from a ``cell_info.json``) does not offer pin density at all.
     """
+    kinds = list(DENSITY_TYPES)
     if getattr(physical, "has_pins", False):
-        return HEAT_TYPES + [("pins", "Pin density")]
-    return HEAT_TYPES
+        kinds.append(("pins", "Pin density"))
+    return kinds + POWER_TYPES
 
 
 class LayoutView(QWidget):

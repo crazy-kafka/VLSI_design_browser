@@ -185,6 +185,9 @@ class RegionData:
             "macro_area": float(np.sum(area[macro] * frac[macro])),
             "leakage_power": float(np.sum(leak * frac)),
             "dynamic_power": float(np.sum(dyn * frac)),
+            # Data-path B/I power: clock cells are excluded, as in the tree metric/map.
+            "bi_dynamic_power": float(
+                np.sum(np.where(is_bi & ~is_clock, dyn, 0.0) * frac)),
         }
         self._stats_cache[path] = out
         return out

@@ -42,7 +42,7 @@ class PhysicalData:
     """
 
     def __init__(self, top_name, boundary_polys, grid_size,
-                 extent, rows, cols, density, leakage, dynamic, ulvt,
+                 extent, rows, cols, density, leakage, dynamic, bi_dynamic, ulvt,
                  geom, is_ulvt, is_macro, is_phys_only, leak, dyn, leaf_paths,
                  contour_gap):
         self.top_name = top_name
@@ -54,6 +54,7 @@ class PhysicalData:
         self.density = density                 # (rows, cols)
         self.leakage = leakage                 # (rows, cols)
         self.dynamic = dynamic                 # (rows, cols)
+        self.bi_dynamic = bi_dynamic           # (rows, cols) BUF/INV share of dynamic
         self.ulvt = ulvt                       # (rows, cols) ULVT-cell density
         self._geom = geom                      # (N, 4) float32 [x0,y0,x1,y1], sorted by path
         self._is_ulvt = is_ulvt                # (N,) bool
@@ -111,7 +112,8 @@ class PhysicalData:
         if kind == "pins" and self.has_pins:
             return self._pins
         return {"density": self.density, "leakage": self.leakage,
-                "dynamic": self.dynamic, "ulvt": self.ulvt}[kind]
+                "dynamic": self.dynamic, "bi_dynamic": self.bi_dynamic,
+                "ulvt": self.ulvt}[kind]
 
     def _slice_for(self, path: str):
         """Slice of the sorted arrays covering ``path`` and its descendants."""
@@ -481,6 +483,10 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
     code_of = {name: i for i, name in enumerate(cells.index)}
     is_ulvt = {name: bool(row["is_ULVT"]) for name, row in cells.iterrows()}
     is_macro = {name: bool(row["is_macro"]) for name, row in cells.iterrows()}
+    # Data-path B/I power: a clock-flagged buffer/inverter belongs to the clock tree.
+    is_bi_cell = {name: bool((row["is_buffer"] or row["is_inverter"])
+                             and not row["is_clock_cell"])
+                  for name, row in cells.iterrows()}
     phys_only_cells = {name for name, row in cells.iterrows()
                        if bool(row["is_physical_only"])}
 
@@ -488,6 +494,7 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
     boundary_polys = []
     _xs0, _ys0, _xs1, _ys1 = [], [], [], []
     _leaks, _dyns, _ulvts, _macros, _phys_onlies, _paths = [], [], [], [], [], []
+    _bis = []
     _codes = []
 
     def _join(prefix, rel):
@@ -563,6 +570,7 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
                                             getattr(row, "dynamic_power"))))
             _ulvts.append(is_ulvt.get(cell, False))
             _macros.append(is_macro.get(cell, False))
+            _bis.append(is_bi_cell.get(cell, False))
             # Physical-only boxes are kept: they are real area, so they belong in the
             # density map. Everything else derived from them is suppressed below.
             _phys_onlies.append(bool(getattr(row, "is_physical_only"))
@@ -587,14 +595,16 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
     dyn = np.asarray(_dyns, dtype=np.float32)
     is_ulvt = np.asarray(_ulvts, dtype=bool)
     is_macro = np.asarray(_macros, dtype=bool)
+    is_bi = np.asarray(_bis, dtype=bool)
     is_phys_only = np.asarray(_phys_onlies, dtype=bool)
     leaf_paths = np.asarray(_paths, dtype=object)
     order = np.argsort(leaf_paths, kind="stable")
     geom, leak, dyn = geom[order], leak[order], dyn[order]
     is_ulvt, is_macro = is_ulvt[order], is_macro[order]
-    is_phys_only, leaf_paths = is_phys_only[order], leaf_paths[order]
+    is_bi, is_phys_only = is_bi[order], is_phys_only[order]
+    leaf_paths = leaf_paths[order]
     cell_codes = np.asarray(_codes, dtype=np.int32)[order]
-    del _xs0, _ys0, _xs1, _ys1, _leaks, _dyns, _ulvts, _macros, _phys_onlies, _paths, _codes
+    del _xs0, _ys0, _xs1, _ys1, _leaks, _dyns, _ulvts, _macros, _bis, _phys_onlies, _paths, _codes
 
     bx = [p[0] for p in top_boundary]
     by = [p[1] for p in top_boundary]
@@ -606,6 +616,7 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
     density = np.zeros((rows, cols), dtype="float64")
     leakage = np.zeros((rows, cols), dtype="float64")
     dynamic = np.zeros((rows, cols), dtype="float64")
+    bi_dynamic = np.zeros((rows, cols), dtype="float64")
     ulvt = np.zeros((rows, cols), dtype="float64")
     gs = grid_size
     gs2 = gs * gs
@@ -614,8 +625,8 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
     # A box's contribution to its cell patch is separable (outer(oy, ox)/gs2),
     # so std cells (<= 2x2 patch) accumulate via bincount and macros via a
     # per-box outer-product update.
-    logger.info("physical: computing density, leakage, dynamic and ULVT grids over %d box(es) "
-                "on a %d x %d grid", n, rows, cols)
+    logger.info("physical: computing density, leakage, dynamic, B/I dynamic and ULVT grids "
+                "over %d box(es) on a %d x %d grid", n, rows, cols)
     bx0 = np.maximum(geom[:, 0], x0)
     by0 = np.maximum(geom[:, 1], y0)
     bx1 = np.minimum(geom[:, 2], x1)
@@ -623,11 +634,12 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
     keep = (bx1 > bx0) & (by1 > by0)
     bx0, by0, bx1, by1 = bx0[keep], by0[keep], bx1[keep], by1[keep]
     # Physical-only cells are area only: they must raise ``density`` (every kept box
-    # contributes to it) but not the ULVT/leakage/dynamic grids.
+    # contributes to it) but not the ULVT/leakage/dynamic/B-I dynamic grids.
     phys = is_phys_only[keep]
     ul = is_ulvt[keep] & ~phys
     lk = np.where(phys, 0.0, leak[keep])
     dynv = np.where(phys, 0.0, dyn[keep])
+    bidyn = np.where(is_bi[keep], dynv, 0.0)
     box_area = (bx1 - bx0) * (by1 - by0)
     ix0 = np.maximum(0, np.minimum(cols - 1, ((bx0 - x0) // gs).astype(np.intp)))
     ix1 = np.maximum(0, np.minimum(cols - 1, ((bx1 - x0) // gs).astype(np.intp)))
@@ -636,7 +648,7 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
     dx = ix1 - ix0
     ddy = iy1 - iy0
 
-    def _acc(flat, ov, ba, lk_, dy_, ul_):
+    def _acc(flat, ov, ba, lk_, dy_, bi_, ul_):
         """bincount-accumulate one group of (flat, overlap-area) pairs."""
         frac = ov / ba
         dens = ov / gs2
@@ -645,11 +657,14 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
                                  minlength=rows * cols).reshape(rows, cols)
         leakage[...] += np.bincount(flat, weights=frac * lk_, minlength=rows * cols).reshape(rows, cols)
         dynamic[...] += np.bincount(flat, weights=frac * dy_, minlength=rows * cols).reshape(rows, cols)
+        bi_dynamic[...] += np.bincount(flat, weights=frac * bi_,
+                                       minlength=rows * cols).reshape(rows, cols)
 
     # 1x1 patch: box fully inside one cell
     m = (dx == 0) & (ddy == 0)
     if m.any():
-        _acc(iy0[m] * cols + ix0[m], box_area[m], box_area[m], lk[m], dynv[m], ul[m])
+        _acc(iy0[m] * cols + ix0[m], box_area[m], box_area[m], lk[m], dynv[m],
+             bidyn[m], ul[m])
 
     # 1x2 patch: one column, two rows (crosses a horizontal grid line)
     m = (dx == 0) & (ddy == 1)
@@ -661,7 +676,8 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
         ov = np.concatenate([w * oy0, w * oy1])
         ba = np.concatenate([box_area[m], box_area[m]])
         _acc(flat, ov, ba, np.concatenate([lk[m], lk[m]]),
-             np.concatenate([dynv[m], dynv[m]]), np.concatenate([ul[m], ul[m]]))
+             np.concatenate([dynv[m], dynv[m]]),
+             np.concatenate([bidyn[m], bidyn[m]]), np.concatenate([ul[m], ul[m]]))
 
     # 2x1 patch: two columns, one row (crosses a vertical grid line)
     m = (dx == 1) & (ddy == 0)
@@ -673,7 +689,8 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
         ov = np.concatenate([h * ox0, h * ox1])
         ba = np.concatenate([box_area[m], box_area[m]])
         _acc(flat, ov, ba, np.concatenate([lk[m], lk[m]]),
-             np.concatenate([dynv[m], dynv[m]]), np.concatenate([ul[m], ul[m]]))
+             np.concatenate([dynv[m], dynv[m]]),
+             np.concatenate([bidyn[m], bidyn[m]]), np.concatenate([ul[m], ul[m]]))
 
     # 2x2 patch: crosses both a horizontal and a vertical grid line
     m = (dx == 1) & (ddy == 1)
@@ -691,8 +708,9 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
         ba = np.concatenate([box_area[m]] * 4)
         lk4 = np.concatenate([lk[m]] * 4)
         dy4 = np.concatenate([dynv[m]] * 4)
+        bi4 = np.concatenate([bidyn[m]] * 4)
         ul4 = np.concatenate([ul[m]] * 4)
-        _acc(flat, ov, ba, lk4, dy4, ul4)
+        _acc(flat, ov, ba, lk4, dy4, bi4, ul4)
 
     # Larger patches (macros): few, so a per-box outer-product update is fine.
     for i in np.flatnonzero(~((dx <= 1) & (ddy <= 1))):
@@ -716,6 +734,7 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
         frac = area / box_area[i]
         leakage[r0:r1 + 1, c0:c1 + 1] += frac * lk[i]
         dynamic[r0:r1 + 1, c0:c1 + 1] += frac * dynv[i]
+        bi_dynamic[r0:r1 + 1, c0:c1 + 1] += frac * bidyn[i]
 
     # Density ratios are in [0, 1]. Clamp float round-off so fully-packed bins
     # land on exactly 1.0 (the heat map's top gradient stop, near-white) instead
@@ -728,7 +747,7 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
     logger.info("physical: %d cell box(es), grid %d x %d, extent %s",
                 n, rows, cols, extent)
     data = PhysicalData(top, boundary_polys, grid_size,
-                        extent, rows, cols, density, leakage, dynamic, ulvt,
+                        extent, rows, cols, density, leakage, dynamic, bi_dynamic, ulvt,
                         geom, is_ulvt, is_macro, is_phys_only, leak, dyn,
                         leaf_paths, contour_gap)
     data._cell_codes = cell_codes
@@ -738,7 +757,7 @@ def build_physical(block_paths, cell_path, grid_size: float = 3.0,
         # placement's frame and its cell's pin geometry rather than the box arrays, but a
         # chip-level design costs seconds (0.25-0.34 us per pin point, ~3 s for 3.36M
         # instances) and building it on first use froze the window for that whole time when
-        # the map was selected. The trade is the one the four grids above already make: paid
+        # the map was selected. The trade is the one the grids above already make: paid
         # up front, whether or not the map is ever opened.
         logger.info("physical: computing pin density for %d cell(s)", len(cells))
         t0 = time.perf_counter()

@@ -163,6 +163,42 @@ def test_ulvt_density_grid(tmp_path):
     assert pd_.ulvt[0, 2] == 0.0                        # SVT excluded from ulvt
 
 
+def test_bi_dynamic_grid_counts_only_data_path_buffers_and_inverters(tmp_path):
+    """The B/I grid is the dynamic map filtered to non-clock is_buffer/is_inverter cells."""
+    cell = tmp_path / "cell.json"
+    cell.write_text(json.dumps({
+        "BUF": {"area": 4, "size_x": 2, "size_y": 2, "is_buffer": True},
+        "INV": {"area": 4, "size_x": 2, "size_y": 2, "is_inverter": True},
+        "CKBUF": {"area": 4, "size_x": 2, "size_y": 2,
+                  "is_buffer": True, "is_clock_cell": True},
+        "NAND": {"area": 4, "size_x": 2, "size_y": 2},
+        "TAP": {"area": 4, "size_x": 2, "size_y": 2},
+    }))
+    b = _block(tmp_path, "TOP", {
+        "buf": {"cell_name": "BUF", "location_x": 0, "location_y": 0,
+                "dynamic_power": 2.0},
+        "inv": {"cell_name": "INV", "location_x": 2, "location_y": 0,
+                "dynamic_power": 3.0},
+        "nand": {"cell_name": "NAND", "location_x": 4, "location_y": 0,
+                 "dynamic_power": 10.0},
+        "tap": {"cell_name": "TAP", "location_x": 6, "location_y": 0,
+                "is_physical_only": True, "dynamic_power": 1000.0},
+        "ckbuf": {"cell_name": "CKBUF", "location_x": 8, "location_y": 0,
+                  "dynamic_power": 7.0},
+    }, boundary=[(0, 0), (10, 2)])
+    pd_ = build_physical([b], str(cell), grid_size=2.0)
+
+    assert pd_.bi_dynamic[0, 0] == pytest.approx(2.0)   # BUF
+    assert pd_.bi_dynamic[0, 1] == pytest.approx(3.0)   # INV
+    assert pd_.bi_dynamic[0, 2] == pytest.approx(0.0)   # NAND is logic, not B/I
+    assert pd_.bi_dynamic[0, 3] == pytest.approx(0.0)   # physical-only excluded
+    assert pd_.bi_dynamic[0, 4] == pytest.approx(0.0)   # clock buffer excluded
+    assert pd_.dynamic[0, 2] == pytest.approx(10.0)
+    assert pd_.dynamic[0, 3] == pytest.approx(0.0)
+    assert pd_.dynamic[0, 4] == pytest.approx(7.0)
+    assert pd_.heat("bi_dynamic") is pd_.bi_dynamic
+
+
 def test_cell_codes_and_attrs_align_with_sorted_boxes(tmp_path):
     """The region tree needs a per-box cell code plus a tiny library-side attribute table."""
     cell = tmp_path / "cell.json"

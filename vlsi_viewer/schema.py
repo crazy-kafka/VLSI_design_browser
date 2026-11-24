@@ -85,6 +85,7 @@ def _m_ckb(g): return g["ckb_count"]
 def _m_icg(g): return g["icg_count"]
 def _m_leakage(g): return g["leakage_power"]
 def _m_dynamic(g): return g["dynamic_power"]
+def _m_bi_dynamic(g): return g["bi_dynamic_power"]
 def _m_macro_count(g): return g["macro_count"]
 def _m_macro_area(g):  return g["macro_area"]
 
@@ -114,6 +115,7 @@ METRICS = [
     MetricSpec("bi_area", "B/I Area", "area", False, _m_bi_area),
     MetricSpec("leakage_power", "Leakage Power", "power", False, _m_leakage),
     MetricSpec("dynamic_power", "Dynamic Power", "power", False, _m_dynamic),
+    MetricSpec("bi_dynamic_power", "B/I Dyn Pwr", "power", False, _m_bi_dynamic),
     MetricSpec("macro_count", "Macro Cnt", "count", True, _m_macro_count),
     MetricSpec("macro_area", "Macro Area", "area", True, _m_macro_area),
 ]

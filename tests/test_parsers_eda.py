@@ -384,6 +384,65 @@ def test_def_unplaced_is_skipped(tmp_path):
     assert list(block["instances"]) == ["u1"]
 
 
+def _filler_def(tmp_path, lines, name="fillers.def"):
+    body = "".join(f"{line}\n" for line in lines)
+    return _write(tmp_path, name, DEF_HEAD.format(dbu=1000, n=len(lines), body=body))
+
+
+def test_def_filler_drop_uses_master_instance_name_and_flags(tmp_path):
+    """FILL* master always; FILL* leaf when physical-only or + SOURCE DIST.
+
+    The second rule is what catches a decap master used as row fill under FILL* names.
+    """
+    cells = cell_info_from_lef([f"{SAMPLE}/cells.lef"])
+    assert cells["DCAP_4"]["is_physical_only"] is True
+    assert cells["INV_X1_SVT"]["is_physical_only"] is False
+
+    path = _filler_def(tmp_path, [
+        "- u0/master_is_fill FILL_16 + PLACED ( 100 0 ) N ;",              # rule 1
+        "- u0/fill_decap DCAP_4 + PLACED ( 200 0 ) N ;",                   # rule 2, cell flag
+        "- u0/Fill_MixedCase DCAP_4 + PLACED ( 300 0 ) N ;",               # case-insensitive
+        "- u0/fill_dist INV_X1_SVT + SOURCE DIST + PLACED ( 400 0 ) N ;",  # rule 2, DIST
+        "- u0/fill_plain INV_X1_SVT + PLACED ( 500 0 ) N ;",               # kept
+        "- u0/fill_parent/logic INV_X1_SVT + PLACED ( 600 0 ) N ;",        # leaf not FILL
+        "- u0/dcap_1 DCAP_4 + SOURCE DIST + PLACED ( 700 0 ) N ;",         # kept
+        "- u0/tap_1 TAP_1 + SOURCE DIST + PLACED ( 800 0 ) N ;",           # kept
+    ])
+
+    block = instance_info_from_def(path, cells=cells)
+
+    assert set(block["instances"]) == {
+        "u0/fill_plain", "u0/fill_parent/logic", "u0/dcap_1", "u0/tap_1"}
+
+
+def test_def_filler_drop_reads_is_physical_only_from_the_cell_table(tmp_path):
+    """Rule 2 uses the supplied cell attribute, not only the name heuristic."""
+    cells = {"CAP_ROW": {"is_physical_only": True},
+             "INV_X1_SVT": {"is_physical_only": False}}
+    path = _filler_def(tmp_path, [
+        "- u0/fill_cap CAP_ROW + PLACED ( 100 0 ) N ;",
+        "- u0/fill_inv INV_X1_SVT + PLACED ( 200 0 ) N ;",
+    ], name="cells_table.def")
+
+    assert list(instance_info_from_def(path, cells=cells)["instances"]) == ["u0/fill_inv"]
+    # Without the table CAP_ROW is not physical by name, so both are kept.
+    assert set(instance_info_from_def(path)["instances"]) == {"u0/fill_cap", "u0/fill_inv"}
+
+
+def test_def_filler_drop_without_cells_uses_the_name_heuristic(tmp_path):
+    """metal.py and the sample generator call the converter without a cell table."""
+    path = _filler_def(tmp_path, [
+        "- u0/fill_decap DCAP_4 + PLACED ( 100 0 ) N ;",
+        "- u0/fill_logic INV_X1_SVT + PLACED ( 200 0 ) N ;",
+        "- u0/fill_dist INV_X1_SVT + SOURCE DIST + PLACED ( 300 0 ) N ;",
+        "- u0/dcap_1 DCAP_4 + PLACED ( 400 0 ) N ;",
+    ], name="no_cells.def")
+
+    block = instance_info_from_def(path)
+
+    assert set(block["instances"]) == {"u0/fill_logic", "u0/dcap_1"}
+
+
 def test_def_without_design_name_needs_top(tmp_path):
     text = DEF_HEAD.format(dbu=1000, n=1, body="- u1 C1 + PLACED ( 0 0 ) N ;\n")
     text = "\n".join(line for line in text.splitlines() if not line.startswith("DESIGN"))
@@ -421,6 +480,23 @@ def test_generated_json_round_trips_through_the_loaders(tmp_path):
     assert dens.max() <= 1.0 + 1e-9
     assert len(pd_.boxes) == len(block["instances"])
     assert len(pd_.boxes_for("core/u0/b0")) < len(pd_.boxes)
+
+
+def test_fill_named_decap_row_fill_no_longer_pegs_density(tmp_path):
+    """A post-filler DEF can name decap row fill FILL*; keeping it saturates the map."""
+    from vlsi_viewer.physical import build_physical
+
+    cells = cell_info_from_lef([f"{SAMPLE}/cells.lef"])
+    path = _filler_def(tmp_path, [
+        f"- u0/fill_{i} DCAP_4 + PLACED ( {i * 800} 0 ) N ;" for i in range(5)
+    ] + ["- u0/logic_0 INV_X1_SVT + PLACED ( 0 0 ) N ;"], name="post_fill.def")
+
+    block = instance_info_from_def(path, cells=cells)
+    assert set(block["instances"]) == {"u0/logic_0"}
+
+    pd_ = build_physical([block], cells, grid_size=1.0)
+    # Five 0.8 x 1.0 DCAPs tile x 0..4; before the fix that is a 1.0 density row.
+    assert pd_.heat("density").max() < 0.5
 
 
 # -- compressed inputs, and a netlist split across files ---------------------------

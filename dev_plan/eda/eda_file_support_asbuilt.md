@@ -69,9 +69,13 @@ Defensive work around the parsers' real behaviour, each covered by a test:
   silently — the parsed count is compared against the declared `COMPONENTS` count.
 - `UNPLACED` components are kept at `(0, 0)` by the parser; the converter skips them
   rather than piling them on the die origin.
-- **`FILL*` is dropped**, not flagged: filler tiles every row gap, so keeping it (and
-  counting physical-only cells in density) would peg the density map at 100%. Tap, decap
-  and other physical-only cells are kept and flagged.
+- **Filler is dropped**, not flagged: filler tiles every row gap, so keeping it (and
+  counting physical-only cells in density) would peg the density map at 100%. A
+  component is filler when its `FILL*` master matches, or when its `FILL*` leaf
+  instance name comes with a physical-only cell or `+ SOURCE DIST` — the instance rule
+  catches decap masters used as row fill. Physical-only cells without a `FILL*` instance
+  name are kept and flagged. See
+  [filler_instance_drop_rule.md](filler_instance_drop_rule.md).
 
 Divergences from `dev_plan/reference/code_sample/extractCellInfo.py`, both commented in the code:
 

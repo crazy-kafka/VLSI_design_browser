@@ -67,13 +67,13 @@ It has been run on real designs, and the numbers are on record rather than asser
 
 **Read the numbers**
 
-- **13 standard-cell metrics + macro columns** — computed per hierarchy via
-  flattened (all-descendants) aggregation. Leakage/dynamic power include macros and
+- **14 standard-cell metrics + macro columns** — computed per hierarchy via
+  flattened (all-descendants) aggregation. Power metrics include macros and
   are hidden by default when the input carries no power data.
 - **Metrics menu** — the toolbar's **Metrics** menu toggles any metric column on/off
   without rebuilding the tree. The choice survives threshold/macro rebuilds and also
   applies to the selected-region tree; macro entries appear when *Include macros* is
-  on, Density% in physical mode, and the two power entries start unchecked when the
+  on, Density% in physical mode, and the power entries start unchecked when the
   input carried no power. Compare mode keeps its fixed V1/V2/Δ columns (power columns
   are hidden there when neither design has power).
 - **Data bars** — background progress bars in metric cells: count/area scale to the
@@ -84,8 +84,8 @@ It has been run on real designs, and the numbers are on record rather than asser
 **Look at the silicon**
 
 - **Physical layout mode** — `--physical_mode` renders the placed design as a
-  2-D heat map (cell density / leakage power / dynamic power / ULVT density, and
-  pin density when the cells came from a DEF + LEF)
+  2-D heat map (cell density / ULVT density / pin density when the cells came from a
+  DEF + LEF / leakage power / dynamic power / B/I dynamic power)
   beside the hierarchy tree. Interactive pan/zoom/fit, a color range adjustable
   in the UI, a fixed vertical thermal legend, and outlined block boundaries.
   Hovering reports the cursor coordinates + grid value; clicking a hierarchy node
@@ -464,9 +464,13 @@ Things worth knowing:
   come from the JSON, so a physical-only flag or a placement can be filled into a netlist
   run as well. Power is the only class that may differ per placement; a structural
   attribute for a block placed more than once belongs in a block-level file.
-- **Filler is dropped.** `FILL*` components tile every row gap, so keeping them would
-  peg the density map at 100%. Tap, decap and other physical-only cells are kept and
-  flagged instead — they appear in density but not in the tree.
+- **Filler is dropped.** A component is dropped when its LEF master name starts with
+  `FILL*`, or when its own (leaf) instance name starts with `FILL*` and its cell is
+  physical-only (`is_physical_only`) or the DEF marks it `+ SOURCE DIST`. The second rule
+  matters because filler insertion can use decap masters (`DCAP*`) under `FILL*` instance
+  names; keeping that row fill would peg the density map at 100%. Physical-only cells
+  without a `FILL*` instance name (tap, plain decap, antenna) are kept and flagged
+  instead — they appear in density but not in the tree.
 - **Unplaced components are skipped**, rather than piled onto the die origin.
 - **Cell-name heuristics are library conventions.** Which cells are buffers, or how many
   bits a flop holds, is not in the LEF. The rules live in one table at the top of
@@ -488,9 +492,10 @@ the power filled in, and the same `core.power.json` fills the netlist run.
 
 Computed over the "counted" set: standard cells (`is_macro == false` and
 `is_physical_only == false`) with a known `cell_name`. Aggregation is
-**hierarchy-flatten** (all descendant leaves). The two power metrics are the exception:
+**hierarchy-flatten** (all descendant leaves). The power metrics are the exception:
 they include macros (only physical-only and missing instances are excluded), matching the
-leakage/dynamic heat maps.
+leakage/dynamic heat maps; B/I Dynamic Power then keeps only data-path (non-clock)
+buffer/inverter cells.
 
 | Column | Definition |
 |---|---|
@@ -507,6 +512,7 @@ leakage/dynamic heat maps.
 | B/I Area | Σ(`area` where buffer/inverter) |
 | Leakage Power | Σ `leakage_power` over non-physical-only instances (macros included) |
 | Dynamic Power | Σ `dynamic_power` over non-physical-only instances (macros included) |
+| B/I Dynamic Power | Σ `dynamic_power` where (`is_buffer` or `is_inverter`) and not `is_clock_cell` — data path only (physical-only and missing excluded) |
 
 The power columns are hidden by default when the input carried no power data (for example
 a DEF without `--json`); the Metrics menu can still show them. A supplied `0.0` counts as
@@ -529,16 +535,17 @@ Macro columns (shown with `--include-macros`): **Macro Cnt** = count(`is_macro`)
 `--physical_mode` (available on the `json` and `def` subcommands) replaces the compare
 view with an interactive **layout view** to the right of the hierarchy tree. The design
 is cut into an equal-size square grid (cell size set via `--grid_size`, default
-**3.0 × 3.0** in physical units), and each grid square is colored by one of four heat
-maps:
+**3.0 × 3.0** in physical units), and each grid square is colored by one of the heat
+maps (density maps first, power maps below):
 
 | Layer | Per-grid value | Default range |
 |---|---|---|
 | Cell density | Σ(instance area overlapping the grid) / grid_area | 0.0 – 1.0 |
-| Leakage power | Σ(instance_area_ratio_in_grid × leakage_power) | 0.0 – max |
-| Dynamic power | Σ(instance_area_ratio_in_grid × dynamic_power) | 0.0 – max |
 | ULVT density | Σ(ULVT-instance area overlapping the grid) / grid_area | 0.0 – 1.0 |
 | Pin density | number of signal pins whose centre falls in the grid | 0 – max |
+| Leakage power | Σ(instance_area_ratio_in_grid × leakage_power) | 0.0 – max |
+| Dynamic power | Σ(instance_area_ratio_in_grid × dynamic_power) | 0.0 – max |
+| B/I dynamic power | Σ(instance_area_ratio_in_grid × dynamic_power) for data-path (non-clock) buffer/inverter cells | 0.0 – max |
 
 Pin density is offered only when the cells carry pin geometry, which means a DEF run with its
 LEF (`def --def … --lef … --physical_mode`) — a `cell_info.json` has no pin column and cannot
@@ -550,10 +557,19 @@ box). Power and ground pins are left out — by the LEF's `USE`, and by name (`V
 measures the row, not the design.
 
 Density counts **every** placed box, including physical-only cells, because the area
-they occupy is real. The other three maps count only instances with actual logic: a
+they occupy is real. The other four maps count only instances with actual logic: a
 physical-only instance contributes to density and to nothing else, and is absent from
 the tree, the contours and `Density%` (see
 [`is_physical_only`](#cell_infojson)). Missing-cell instances are skipped everywhere.
+
+**B/I dynamic power** keeps only instances whose cell has `is_buffer` or `is_inverter`
+set in the cell library **and is not flagged `is_clock_cell`** — it measures the data
+path, not the clock tree (clock B/I power is excluded; the `CKB Cnt` column counts those
+cells separately). It uses the per-instance `dynamic_power` exactly as supplied — the
+viewer has no separate net-switching power, capacitance or activity data — so the
+connected net is included to the extent the power file attributes it to the driving
+cell (the usual PD power-report convention).
+
 The heat-color **min/max range** is adjustable from the
 layout controls and is remembered per map type (each map keeps whatever range you
 last left it on); a fully-packed bin (density 100%) renders the top gradient stop

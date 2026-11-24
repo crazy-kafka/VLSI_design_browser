@@ -287,9 +287,11 @@ def resolve_inputs(args):
                                                args.compare_top or args.top)]
                    if args.compare_verilog else None)
     else:
-        # Each DEF is a complete design, so they stay separate blocks.
-        blocks = [instance_info_from_def(path, args.top) for path in args.def_files]
-        compare = ([instance_info_from_def(path, args.compare_top)
+        # Each DEF is a complete design, so they stay separate blocks. The LEF table is
+        # what tells a FILL*-named instance whether its cell is physical-only.
+        blocks = [instance_info_from_def(path, args.top, cells=cells)
+                  for path in args.def_files]
+        compare = ([instance_info_from_def(path, args.compare_top, cells=cells)
                     for path in args.compare_def] if args.compare_def else None)
 
     # Filled before the dump, so `--out` writes what the run measured rather than what the

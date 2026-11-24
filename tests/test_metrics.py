@@ -91,9 +91,10 @@ def test_metric_registry_columns(design):
     assert [m.key for m in schema.STD_METRICS] == [
         "area", "count", "ulvt_ratio", "mb_ratio", "d1d2_ratio", "bits",
         "ckb_count", "icg_count", "pul_count", "bi_count", "bi_area",
-        "leakage_power", "dynamic_power",
+        "leakage_power", "dynamic_power", "bi_dynamic_power",
     ]
     assert [m.key for m in schema.MACRO_METRICS] == ["macro_count", "macro_area"]
+    assert schema.POWER_METRIC_KEYS[-1] == "bi_dynamic_power"
 
 
 def test_power_metrics_include_macros_and_exclude_physical_only(tmp_path):
@@ -123,6 +124,39 @@ def test_power_metrics_include_macros_and_exclude_physical_only(tmp_path):
     assert mv.loc["TOP", "dynamic_power"] == pytest.approx(22.0)
     assert mv.loc["TOP/blk", "leakage_power"] == pytest.approx(10.0)
     assert mv.loc["TOP/blk", "dynamic_power"] == pytest.approx(20.0)
+
+
+def test_bi_dynamic_power_counts_only_data_path_buffer_and_inverter_instances(tmp_path):
+    """Data-path B/I power: clock cells are excluded, macros carry no B/I flag."""
+    cells = {
+        "BUF": {"area": 1.0, "is_buffer": True},
+        "INV": {"area": 1.0, "is_inverter": True},
+        "CKINV": {"area": 1.0, "is_inverter": True, "is_clock_cell": True},
+        "NAND": {"area": 1.0},
+        "MACRO": {"area": 100.0, "is_macro": True},
+        "TAP": {"area": 0.5},
+    }
+    inst = {"top_name": "TOP", "instances": {
+        "u/buf": {"cell_name": "BUF", "dynamic_power": 2.0},
+        "u/inv": {"cell_name": "INV", "dynamic_power": 3.0},
+        "u/ckinv": {"cell_name": "CKINV", "dynamic_power": 7.0},
+        "u/nand": {"cell_name": "NAND", "dynamic_power": 10.0},
+        "m/macro": {"cell_name": "MACRO", "dynamic_power": 100.0},
+        "tap": {"cell_name": "TAP", "is_physical_only": True, "dynamic_power": 1000.0},
+        "miss": {"cell_name": "UNKNOWN", "dynamic_power": 2000.0},
+    }}
+    (tmp_path / "cell.json").write_text(json.dumps(cells))
+    (tmp_path / "inst.json").write_text(json.dumps(inst))
+    design = build_design([str(tmp_path / "inst.json")], str(tmp_path / "cell.json"))
+
+    mv = design.metric_values()
+    assert mv.loc["TOP", "bi_dynamic_power"] == pytest.approx(5.0)
+    assert mv.loc["TOP/u", "bi_dynamic_power"] == pytest.approx(5.0)
+    assert mv.loc["TOP/m", "bi_dynamic_power"] == pytest.approx(0.0)
+    # The clock buffer remains a B/I count and keeps its total dynamic power.
+    assert mv.loc["TOP/u", "ckb_count"] == 1
+    assert mv.loc["TOP", "bi_count"] == 3
+    assert mv.loc["TOP", "dynamic_power"] == pytest.approx(122.0)
 
 
 def test_power_keys_present_but_zero_still_count_as_read(tmp_path):

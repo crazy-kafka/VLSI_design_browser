@@ -40,7 +40,7 @@ def test_tree_constructs(app, design):
     tree = HierarchyTree()
     tree.set_view(view)
 
-    assert tree.columnCount() == 14  # Hierarchy + 13 std metrics
+    assert tree.columnCount() == 15  # Hierarchy + 14 std metrics
     assert tree.topLevelItemCount() == 1
 
     top = tree.topLevelItem(0)
@@ -59,7 +59,7 @@ def test_include_macros_adds_columns(app, design):
     view = view_for_single(design, include_macros=True)
     tree = HierarchyTree()
     tree.set_view(view)
-    assert tree.columnCount() == 16  # Hierarchy + 13 std + 2 macro
+    assert tree.columnCount() == 17  # Hierarchy + 14 std + 2 macro
 
 
 def test_threshold_filters_children(app, design):
@@ -100,9 +100,9 @@ def test_search_dialog_compare(app, design):
     dlg = SearchDialog(v1, v2, "*unit1*", "wildcard")
     assert dlg.tables["v1"].rowCount() == 1
     assert dlg.tables["v2"].rowCount() == 1
-    # v2 table has macro columns (13 std + 2 macro)
-    assert dlg.tables["v2"].columnCount() == 1 + 15
-    assert dlg.tables["v1"].columnCount() == 1 + 13
+    # v2 table has macro columns (14 std + 2 macro)
+    assert dlg.tables["v2"].columnCount() == 1 + 16
+    assert dlg.tables["v1"].columnCount() == 1 + 14
 
 
 def _sortable_view():
@@ -189,18 +189,21 @@ def test_layout_view_builds(app, tmp_path):
     assert view._pix_item.pixmap() is not None and not view._pix_item.pixmap().isNull()
 
 
-def test_pin_density_map_is_offered_only_where_pins_exist(app, tmp_path):
-    """The fifth entry is appended - never inserted - and only for data that has pins."""
+def test_map_selector_puts_density_above_power_and_pins_with_density(app, tmp_path):
+    """Density maps first, then power; pin density sits with the density maps."""
     from vlsi_viewer.ui_layout import HEAT_TYPES, LayoutView
 
-    keys = [key for key, _label in HEAT_TYPES]
+    keys = ["density", "ulvt", "leakage", "dynamic", "bi_dynamic"]
+    assert [key for key, _label in HEAT_TYPES] == keys
     plain = LayoutView(_tiny_physical(tmp_path))
     assert [key for key, _label in plain._kinds] == keys
     assert plain.type_combo.count() == len(keys)
+    assert plain.type_combo.itemText(4) == "B/I dynamic power"
 
     pinned = LayoutView(_tiny_physical(tmp_path, pins={"C1": [(1.0, 1.0)]}))
-    assert [key for key, _label in pinned._kinds] == keys + ["pins"]
-    assert pinned.type_combo.itemText(len(keys)) == "Pin density"
+    assert [key for key, _label in pinned._kinds] == [
+        "density", "ulvt", "pins", "leakage", "dynamic", "bi_dynamic"]
+    assert pinned.type_combo.itemText(2) == "Pin density"
     # The count map must not put the source on the fixed [0, 1] ramp metal's metric uses:
     # that flag is what `physical.kinds()` would have flipped, for every map at once.
     assert pinned._fixed_ratio is False
@@ -210,6 +213,11 @@ def test_pin_density_map_is_offered_only_where_pins_exist(app, tmp_path):
     # selecting it renders: a count map autoscales to its own maximum
     assert not pinned._pix_item.pixmap().isNull()
     assert pinned._hi >= 1.0
+    # The B/I map renders too, and is not fixed-ratio.
+    pinned.set_kind("bi_dynamic")
+    assert pinned._kind == "bi_dynamic"
+    assert pinned._fixed_ratio is False
+    assert not pinned._pix_item.pixmap().isNull()
 
 
 def test_tree_click_without_physical_does_not_raise(app, design):
@@ -326,7 +334,7 @@ def test_layout_range_kept_across_map_switch(app, tmp_path):
     view.max_spin.setValue(0.75)
     assert (view._lo, view._hi) == (0.25, 0.75)
 
-    view.type_combo.setCurrentIndex(1)           # density -> leakage (auto-ranges)
+    view.type_combo.setCurrentIndex(2)           # density -> leakage (auto-ranges)
     assert view._kind == "leakage"
     view.type_combo.setCurrentIndex(0)           # back to density
 
@@ -359,7 +367,7 @@ def test_layout_first_visit_to_map_autotanges(app, tmp_path):
     from vlsi_viewer.ui_layout import LayoutView
     pd_ = _tiny_physical(tmp_path)
     view = LayoutView(pd_)
-    view.type_combo.setCurrentIndex(1)           # leakage: not visited yet
+    view.type_combo.setCurrentIndex(2)           # leakage: not visited yet
 
     assert view._kind == "leakage"
     assert view._lo == 0.0
@@ -797,7 +805,8 @@ def test_power_columns_are_hidden_when_no_power_was_read(app, design):
     try:
         assert not design.has_power
         for key, label in (("leakage_power", "Leakage Power"),
-                           ("dynamic_power", "Dynamic Power")):
+                           ("dynamic_power", "Dynamic Power"),
+                           ("bi_dynamic_power", "B/I Dyn Pwr")):
             column = w._tree.column_index(key)
             assert column is not None and w._tree.isColumnHidden(column)
             action = _action(w.metrics_menu, label)
@@ -815,7 +824,8 @@ def test_power_columns_are_visible_when_power_was_read(app, tmp_path):
     try:
         assert powered.has_power
         for key, label in (("leakage_power", "Leakage Power"),
-                           ("dynamic_power", "Dynamic Power")):
+                           ("dynamic_power", "Dynamic Power"),
+                           ("bi_dynamic_power", "B/I Dyn Pwr")):
             column = w._tree.column_index(key)
             assert column is not None and not w._tree.isColumnHidden(column)
             assert _action(w.metrics_menu, label).isChecked()
@@ -885,7 +895,7 @@ def test_mainwindow_tree_only_has_no_region_panel(app, design):
 
 def test_diff_view(app, design):
     view = view_for_diff(design, design)
-    assert len(view.columns) == 26  # 13 metrics x {abs, rel}
+    assert len(view.columns) == 28  # 14 metrics x {abs, rel}
     # Δrel columns carry a gradient; Δabs columns do not
     rel_col = view.columns[1]    # ΔArea% (index 1 = first rel after ΔArea at 0)
     assert rel_col.gradient == "lower_better"
@@ -914,7 +924,7 @@ def test_mainwindow_compare(app, design):
     assert w._stack.currentWidget() is w._compare
     assert w._compare.v1.topLevelItemCount() == 1
     assert w._compare.diff.topLevelItemCount() == 1
-    assert w._compare.diff.columnCount() == 27  # Hierarchy + 26 diff columns
+    assert w._compare.diff.columnCount() == 29  # Hierarchy + 28 diff columns
 
 
 def test_deep_hierarchy_expand_arrow(app, tmp_path):
@@ -952,7 +962,7 @@ def test_toggle_macros_preserves_expansion(app, design):
 
     tree.set_view(view_for_single(design, include_macros=True))
     assert tree._expanded_paths() == ["TOP"]       # expansion preserved
-    assert tree.columnCount() == 16                # +2 macro columns
+    assert tree.columnCount() == 17                # +2 macro columns
     assert tree.topLevelItem(0).childCount() == 2
 
 

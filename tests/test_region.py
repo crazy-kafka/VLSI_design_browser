@@ -119,6 +119,36 @@ def test_region_stats_intersect_and_apportion(tmp_path):
     # Power follows the area overlap: u1/a is full, u1/b straddles the edge.
     assert got["leakage_power"] == pytest.approx(1.0 + 3.0 * 0.5)
     assert got["dynamic_power"] == pytest.approx(2.0 + 4.0 * 0.5)
+    # C1 is an inverter and u1/a is fully selected; C2 is not a B/I cell.
+    assert got["bi_dynamic_power"] == pytest.approx(2.0)
+
+
+def test_region_bi_dynamic_power_excludes_clock_cells(tmp_path):
+    """The region's B/I dynamic power is data-path only, like the tree metric/map."""
+    cell = tmp_path / "cell.json"
+    cell.write_text(json.dumps({
+        "INV": {"area": 4, "size_x": 2, "size_y": 2, "is_inverter": True},
+        "CKINV": {"area": 4, "size_x": 2, "size_y": 2,
+                  "is_inverter": True, "is_clock_cell": True},
+    }))
+    top = tmp_path / "top.json"
+    top.write_text(json.dumps({
+        "top_name": "TOP", "boundary": [[0, 0], [4, 2]],
+        "instances": {
+            "d": {"cell_name": "INV", "location_x": 0, "location_y": 0,
+                  "dynamic_power": 2.0},
+            "c": {"cell_name": "CKINV", "location_x": 2, "location_y": 0,
+                  "dynamic_power": 7.0},
+        },
+    }))
+    paths = [str(top)]
+    design = build_design(paths, str(cell))
+    physical = build_physical(paths, str(cell), grid_size=2.0)
+    full = RegionSelection(rect=(-1.0, -1.0, 5.0, 3.0),
+                           col0=0, row0=0, col1=1, row1=0)
+    got = RegionData(physical, design, full).stats("TOP")
+    assert got["dynamic_power"] == pytest.approx(9.0)
+    assert got["bi_dynamic_power"] == pytest.approx(2.0)
 
 
 def test_region_excludes_boxes_that_only_touch_the_edge(tmp_path):
